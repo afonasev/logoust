@@ -82,16 +82,25 @@ Archive a completed change in the experimental workflow.
    - If there is nothing to commit, skip this step and report "Nothing to commit".
    - Otherwise stage the relevant changed/untracked files explicitly by path (never `git add -A`/`.`; skip `.env`, secrets, large binaries). Include the archive move, any synced spec changes, and pending implementation changes for this change.
    - Create a single commit using the standard project format with a HEREDOC body, ending with the `Co-Authored-By` trailer required by the global commit protocol. Subject should reference the change name, e.g. `<change-name>: archive`.
-   - Do NOT push. Do NOT use `--no-verify` or `--amend`. If the pre-commit hook fails, report the failure and stop — do not retry blindly.
+   - Do NOT use `--no-verify` or `--amend`. If the pre-commit hook fails, report the failure and stop — do not retry blindly.
    - Do NOT ask the user for confirmation.
 
-7. **Display summary**
+7. **Push to the remote**
+
+   - Only if a commit was created in step 6. If step 6 reported "Nothing to commit", skip this step.
+   - Determine the current branch (`git rev-parse --abbrev-ref HEAD`) and its upstream.
+   - If an upstream is configured, run `git push`. If not, run `git push -u origin <current-branch>`.
+   - Do NOT use `--force` or `--no-verify`. If the push fails (e.g. non-fast-forward, no remote, auth error), report the failure verbatim and stop — do not retry blindly or force-push.
+   - Do NOT ask the user for confirmation.
+
+8. **Display summary**
 
    Show archive completion summary including:
    - Change name
    - Schema that was used
    - Archive location
    - Spec sync status (synced / sync skipped / no delta specs)
+   - Commit and push status (committed + pushed / nothing to commit / push failed)
    - Note about any warnings (incomplete artifacts/tasks)
 
 **Output On Success**
@@ -161,3 +170,4 @@ Target archive directory already exists.
 - Preserve .openspec.yaml when moving to archive (it moves with the directory)
 - Show clear summary of what happened
 - If delta specs exist, always sync them before archiving — invoke `openspec-sync-specs` (agent-driven) automatically, without prompting the user. Show the combined summary, then sync.
+- After the archive commit, push to the remote automatically (no confirmation). Never force-push or use `--no-verify`; if the push fails, report it verbatim and stop.

@@ -45,6 +45,10 @@ run: ## Run service
 	uv run alembic upgrade head
 	uv run python -m src
 
+.PHONY: run-reload
+run-reload: ## Run service with auto-reload on code/migration changes
+	uv run watchfiles "sh -c 'alembic upgrade head && exec python -m src'" src alembic
+
 .PHONY: create_invite
 create_invite: ## Create a specialist invite and print the deep-link
 	uv run alembic upgrade head

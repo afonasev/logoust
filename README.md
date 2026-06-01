@@ -45,6 +45,7 @@ Clean Architecture под `src/`:
 
 - `make init` — установить зависимости и pre-commit-хуки.
 - `make run` — `alembic upgrade head` + запуск бота в long-polling.
+- `make run-reload` — то же, но с авто-перезапуском при изменениях в `src/` и `alembic/` (для разработки).
 - `make create_invite` — создать приглашение специалиста и напечатать deep-link.
 - `make check` — формат + линт + type-check + тесты (требуется до commit).
 - `make format` / `make lint` / `make type-check` / `make test` — отдельные шаги.

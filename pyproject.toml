@@ -1,0 +1,145 @@
+[project]
+name = "service"
+version = "1.0"
+description = ""
+requires-python = ">=3.13"
+dependencies = [
+    "aiogram>=3,<4",
+    "aiosqlite",
+    "alembic",
+    "greenlet",
+    "pydantic-settings",
+    "sqlalchemy>=2.0,<3",
+    "structlog>=24.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+### Ruff
+
+[tool.ruff]
+line-length = 88
+preview = true
+src = ["src", "tests"]
+target-version = "py313"
+unsafe-fixes = true
+
+[tool.ruff.lint]
+# Comprehensive rule set for strict checking
+select = ["ALL"]
+ignore = [
+    "E501",   # Line too long (formatter handles this)
+    "CPY001", # Missing copyright notice at top of file
+    "COM812", # he following rule may cause conflicts when used with the formatter
+    "ANN",    # type annotation (use TY)
+    "D",      # Missing docstring
+    "DOC201", # `return` is not documented in docstring
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+preview = false
+exclude = ["**/*.md"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.pylint]
+max-nested-blocks = 3
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "F401", # Allow unused imports in __init__.py
+]
+"alembic/env.py" = [
+    "INP001", # Alembic env.py is a script, not part of a package
+]
+"alembic/versions/*.py" = [
+    "INP001", # Alembic migrations are scripts, not part of a package
+]
+"tests/**/*.py" = [
+    "S101",    # Allow assert in tests
+    "S105",    # Hardcoded strings in test data are not passwords
+    "S106",    # Same — keyword args carry test fixtures, not credentials
+    "PLR2004", # Allow magic values in tests
+    "PLC0415", # Allow local imports inside test functions (lazy setup)
+    "FBT",     # Allow boolean args in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+combine-as-imports = true
+force-sort-within-sections = true
+
+### TY
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.ty.rules]
+unresolved-import = "ignore" # https://github.com/astral-sh/ty/issues/269
+invalid-key = "ignore"
+
+### Tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "--cov-fail-under=100",
+    "--cov-report=term-missing",
+    "--cov=src",
+    "--strict-config",
+    "--strict-markers",
+    "--verbose",
+    "-W error",
+]
+filterwarnings = [
+    "error", # Treat all warnings as errors by default
+    # Uncomment to selectively ignore specific third-party warnings if needed:
+    # "ignore::DeprecationWarning:some_noisy_library",
+    # "ignore::UserWarning:another_library",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/.venv/*",
+    "*/venv/*",
+    "*/scripts/*",
+    "src/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+    "@overload",
+]
+omit = []
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.6.0",
+    "ruff==0.15.8",
+]

@@ -1,0 +1,10 @@
+# .claudeignore
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.log
+*.lock
+__pycache__/
+.venv/

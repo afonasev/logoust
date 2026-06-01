@@ -1,0 +1,72 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# local databases
+*.db
+
+# test databases (pytest fixtures)
+.test-dbs/
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.pytest_cache/
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+.hypothesis/
+
+# dotenv
+.env
+
+# virtualenv
+venv/
+ENV/
+
+# intellij ide
+.idea/
+
+# git worktrees
+.worktrees/
+.superpowers/
+.claude/worktrees/
+
+# Playwright CLI artifacts
+.playwright-cli/
+
+# Seed data downloads
+data/
+
+# DB backups
+backups/
+
+# Application logs
+logs/

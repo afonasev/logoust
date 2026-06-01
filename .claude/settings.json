@@ -1,0 +1,34 @@
+{
+  "effortLevel": "high",
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(make check:*)",
+      "Bash(make format:*)",
+      "Bash(make lint:*)",
+      "Bash(make test:*)",
+      "Bash(make type-check:*)",
+      "Bash(uv add:*)",
+      "Bash(uv sync:*)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/effort_advisor.py\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false,
+    "playwright@claude-plugins-official": false,
+    "pyright-lsp@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": false,
+    "context7@claude-plugins-official": false
+  }
+}

@@ -5,8 +5,9 @@
 ## Сборка приложения
 
 - `src/bot/dispatcher.py::build_dispatcher(messages, session_factory) -> Dispatcher` — собирает `Dispatcher`, подключает единственный роутер.
-- `src/bot/handlers/start.py::build_router(messages, session_factory) -> Router` — регистрирует обработчик `/start`.
-- `src/bot/handlers/start.py::make_start_handler(messages, session_factory)` — фабрика хендлера (вынесена для удобства тестов).
+- `src/bot/handlers/start.py::build_router(messages, session_factory) -> Router` — регистрирует обработчик `/start` и fallback на вставленный код/ссылку.
+- `src/bot/handlers/start.py::make_start_handler(messages, session_factory)` — фабрика хендлера `/start` (вынесена для удобства тестов).
+- `src/bot/handlers/start.py::make_token_handler(messages, session_factory)` — фабрика fallback-хендлера: ловит обычный текст и через `extract_token()` достаёт токен из голого кода или deep-link.
 - `src/__main__.py` — точка входа: грузит `settings`, инициализирует logging, создаёт `Bot`, `session_factory`, `messages`, `Dispatcher`, запускает `dp.start_polling(bot)`.
 
 ## Хендлеры
@@ -14,6 +15,7 @@
 | Команда | Файл | Что делает |
 | --- | --- | --- |
 | `/start [<token>]` | `src/bot/handlers/start.py` | Ищет специалиста по токену, идемпотентно проставляет `chat_id`/`username`/`welcomed_at`, отвечает текстом из каталога. Четыре ветки: welcomed, already_welcomed, unknown_token, no_token. |
+| Текст с кодом/ссылкой | `src/bot/handlers/start.py` (`make_token_handler`) | Fallback: если специалист вставил в чат голый токен или deep-link целиком — извлекает токен (`extract_token`) и проводит тот же онбординг, что и `/start <token>`. На сообщения, не похожие на токен, молчит. Зарегистрирован после `/start`, поэтому `/start <token>` обрабатывается штатно. |
 
 Других команд (включая `/help`) сознательно нет — приветствие не должно врать о возможностях.
 

@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock
 from aiogram.filters import CommandObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.handlers.start import build_router, make_start_handler
+from src.bot.handlers.start import (
+    build_router,
+    extract_token,
+    make_start_handler,
+    make_token_handler,
+)
 from src.bot.messages import BotMessages
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.invites import create_invite
@@ -98,4 +103,88 @@ def test_build_router_registers_start_handler(
 ):
     router = build_router(messages, session_factory)
     assert router.name == "start"
-    assert len(router.message.handlers) == 1
+    assert len(router.message.handlers) == 2
+
+
+def test_extract_token_from_bare_code():
+    assert extract_token("tqHQOW3p8fPsmbEN3xDoIg") == "tqHQOW3p8fPsmbEN3xDoIg"
+
+
+def test_extract_token_from_deep_link():
+    link = "https://t.me/logoust_test?start=tqHQOW3p8fPsmbEN3xDoIg"
+    assert extract_token(link) == "tqHQOW3p8fPsmbEN3xDoIg"
+
+
+def test_extract_token_strips_surrounding_whitespace():
+    assert extract_token("  tqHQOW3p8fPsmbEN3xDoIg\n") == "tqHQOW3p8fPsmbEN3xDoIg"
+
+
+def test_extract_token_rejects_plain_message():
+    assert extract_token("привет, как дела?") is None
+
+
+def test_extract_token_rejects_wrong_length():
+    assert extract_token("short") is None
+
+
+async def test_token_handler_welcomes_on_pasted_code(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemySpecialistsRepo(session)
+    specialist = await create_invite(repo)
+
+    handler = make_token_handler(messages, session_factory)
+    msg = _fake_message()
+    msg.text = specialist.invite_token
+    await handler(msg)
+    msg.answer.assert_awaited_once_with(messages.start.welcome)
+
+
+async def test_token_handler_welcomes_on_pasted_link(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemySpecialistsRepo(session)
+    specialist = await create_invite(repo)
+
+    handler = make_token_handler(messages, session_factory)
+    msg = _fake_message()
+    msg.text = f"https://t.me/logoust_test?start={specialist.invite_token}"
+    await handler(msg)
+    msg.answer.assert_awaited_once_with(messages.start.welcome)
+
+
+async def test_token_handler_ignores_plain_message(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    handler = make_token_handler(messages, session_factory)
+    msg = _fake_message()
+    msg.text = "привет"
+    await handler(msg)
+    msg.answer.assert_not_awaited()
+
+
+async def test_token_handler_skips_when_no_from_user(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    handler = make_token_handler(messages, session_factory)
+    msg = _fake_message(user=None)
+    msg.text = "tqHQOW3p8fPsmbEN3xDoIg"
+    await handler(msg)
+    msg.answer.assert_not_awaited()
+
+
+async def test_token_handler_skips_when_no_text(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    handler = make_token_handler(messages, session_factory)
+    msg = _fake_message()
+    msg.text = None
+    await handler(msg)
+    msg.answer.assert_not_awaited()

@@ -75,4 +75,4 @@
 
 - [x] Создать `openspec/specs/specialists/spec.md` с описанием текущего поведения (онбординг через invite).
 - [x] `openspec validate specialists`.
-- [ ] Архивировать изменение: `openspec archive add-specialist-invite-onboarding`.
+- [x] Архивировать изменение: `openspec archive add-specialist-invite-onboarding`.

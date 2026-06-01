@@ -85,6 +85,4 @@ class SqlAlchemySpecialistsRepo:
         except IntegrityError as exc:
             await self._session.rollback()
             msg = f"chat_id={telegram_chat_id} already bound to another specialist"
-            raise ChatIdConflictError(
-                msg
-            ) from exc
+            raise ChatIdConflictError(msg) from exc

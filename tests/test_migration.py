@@ -57,3 +57,44 @@ def test_initial_migration_creates_specialists_table(
     insp = inspect(engine)
     assert "specialists" not in insp.get_table_names()
     engine.dispose()
+
+
+def test_clients_migration_creates_clients_table(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(sync_url)
+    insp = inspect(engine)
+    columns = {c["name"] for c in insp.get_columns("clients")}
+    expected = {
+        "id",
+        "specialist_id",
+        "child_name",
+        "contact_name",
+        "contact_phone",
+        "contact_telegram",
+        "extra_contacts",
+        "note",
+        "status",
+        "archived_at",
+        "created_at",
+        "updated_at",
+    }
+    assert columns == expected
+
+    index_names = {i["name"] for i in insp.get_indexes("clients")}
+    assert "ix_clients_specialist_status" in index_names
+
+    command.downgrade(cfg, "base")
+    insp = inspect(engine)
+    assert "clients" not in insp.get_table_names()
+    engine.dispose()

@@ -66,7 +66,8 @@ async def test_welcomed_branch(
     handler = make_start_handler(messages, session_factory)
     msg = _fake_message()
     await handler(msg, _cmd(specialist.invite_token))
-    msg.answer.assert_awaited_once_with(messages.start.welcome)
+    msg.answer.assert_awaited_once()
+    assert msg.answer.await_args.args[0] == messages.start.welcome
 
 
 async def test_already_welcomed_branch(
@@ -80,11 +81,11 @@ async def test_already_welcomed_branch(
     handler = make_start_handler(messages, session_factory)
     first = _fake_message()
     await handler(first, _cmd(specialist.invite_token))
-    first.answer.assert_awaited_once_with(messages.start.welcome)
+    assert first.answer.await_args.args[0] == messages.start.welcome
 
     second = _fake_message()
     await handler(second, _cmd(specialist.invite_token))
-    second.answer.assert_awaited_once_with(messages.start.already_welcomed)
+    assert second.answer.await_args.args[0] == messages.start.already_welcomed
 
 
 async def test_handler_skips_when_no_from_user(
@@ -139,7 +140,8 @@ async def test_token_handler_welcomes_on_pasted_code(
     msg = _fake_message()
     msg.text = specialist.invite_token
     await handler(msg)
-    msg.answer.assert_awaited_once_with(messages.start.welcome)
+    msg.answer.assert_awaited_once()
+    assert msg.answer.await_args.args[0] == messages.start.welcome
 
 
 async def test_token_handler_welcomes_on_pasted_link(
@@ -154,7 +156,8 @@ async def test_token_handler_welcomes_on_pasted_link(
     msg = _fake_message()
     msg.text = f"https://t.me/logoust_test?start={specialist.invite_token}"
     await handler(msg)
-    msg.answer.assert_awaited_once_with(messages.start.welcome)
+    msg.answer.assert_awaited_once()
+    assert msg.answer.await_args.args[0] == messages.start.welcome
 
 
 async def test_token_handler_ignores_plain_message(

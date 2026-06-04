@@ -11,5 +11,6 @@ def test_build_dispatcher_includes_start_router(
 ):
     dp = build_dispatcher(messages, session_factory)
     assert isinstance(dp, Dispatcher)
-    sub_routers = [r for r in dp.sub_routers if r.name == "start"]
-    assert len(sub_routers) == 1
+    names = {r.name for r in dp.sub_routers}
+    assert "start" in names
+    assert "clients" in names

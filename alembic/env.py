@@ -4,6 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from src.config import settings
+import src.infrastructure.clients_repo  # noqa: F401  # register ORM models
 from src.infrastructure.db import Base
 import src.infrastructure.specialists_repo  # noqa: F401  # register ORM models
 

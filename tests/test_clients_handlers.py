@@ -1,0 +1,609 @@
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from src.bot.handlers.clients import (
+    AddClient,
+    ClientsHandlers,
+    EditClient,
+    SpecialistMiddleware,
+    build_main_keyboard,
+    render_card,
+)
+from src.bot.messages import BotMessages
+from src.domain.client import Client, ClientStatus
+from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.clients import (
+    NewClient,
+    add_client,
+    archive_client,
+    list_clients,
+)
+from src.services.invites import consume_invite, create_invite
+
+if TYPE_CHECKING:
+    from aiogram.types import TelegramObject
+
+_SPECIALIST_ID = 1
+
+
+class FakeState:
+    def __init__(
+        self, data: dict[str, Any] | None = None, state: object | None = None
+    ) -> None:
+        self.store: dict[str, Any] = dict(data or {})
+        self.state = state
+
+    async def get_data(self) -> dict[str, Any]:
+        return dict(self.store)
+
+    async def update_data(self, **kwargs: Any) -> dict[str, Any]:
+        self.store.update(kwargs)
+        return dict(self.store)
+
+    async def set_state(self, state: object) -> None:
+        self.state = state
+
+    async def clear(self) -> None:
+        self.store.clear()
+        self.state = None
+
+
+def _state(data: dict[str, Any] | None = None, state: object | None = None) -> Any:
+    # Returned as Any so it satisfies the FSMContext-typed handler parameters.
+    return FakeState(data, state)
+
+
+def _handlers(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+) -> ClientsHandlers:
+    return ClientsHandlers(messages, session_factory)
+
+
+def _fake_message(text: str | None = None) -> AsyncMock:
+    msg = AsyncMock()
+    msg.text = text
+    msg.answer = AsyncMock()
+    return msg
+
+
+def _fake_callback(data: str | None = None) -> AsyncMock:
+    cb = AsyncMock()
+    cb.data = data
+    cb.answer = AsyncMock()
+    cb.message = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.message.edit_text = AsyncMock()
+    cb.message.edit_reply_markup = AsyncMock()
+    return cb
+
+
+def _first_text(mock: AsyncMock) -> Any:
+    call = mock.await_args
+    assert call is not None
+    return call.args[0]
+
+
+def _markup(mock: AsyncMock) -> Any:
+    call = mock.await_args
+    assert call is not None
+    return call.kwargs["reply_markup"]
+
+
+def _button_texts(markup: Any) -> list[str]:
+    return [btn.text for row in markup.inline_keyboard for btn in row]
+
+
+async def _seed_client(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    specialist_id: int = _SPECIALIST_ID,
+    child_name: str = "Петя",
+    status: ClientStatus = ClientStatus.ACTIVE,
+) -> Client:
+    async with session_factory() as session:
+        repo = SqlAlchemyClientsRepo(session)
+        client = await add_client(
+            repo,
+            NewClient(
+                specialist_id=specialist_id,
+                child_name=child_name,
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        if status is ClientStatus.ARCHIVED:
+            await archive_client(repo, client_id=client.id, specialist_id=specialist_id)
+            client = await repo.get_for_specialist(client.id, specialist_id)
+            assert client is not None
+    return client
+
+
+# --- pure helpers -------------------------------------------------------------
+
+
+def test_build_main_keyboard_has_clients_button(messages: BotMessages):
+    kb = build_main_keyboard(messages)
+    assert kb.keyboard[0][0].text == messages.clients.button
+
+
+def test_render_card_active_uses_dash_for_empty(messages: BotMessages):
+    now = datetime.now(UTC)
+    client = Client(
+        id=1,
+        specialist_id=1,
+        child_name="Петя",
+        contact_name="Мама",
+        contact_phone=None,
+        contact_telegram=None,
+        extra_contacts=None,
+        note=None,
+        status=ClientStatus.ACTIVE,
+        archived_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    text = render_card(client, messages.clients)
+    assert "Петя" in text
+    assert messages.clients.dash in text
+    assert messages.clients.status_active in text
+
+
+def test_render_card_archived_shows_values(messages: BotMessages):
+    now = datetime.now(UTC)
+    client = Client(
+        id=1,
+        specialist_id=1,
+        child_name="Лиза",
+        contact_name="Папа",
+        contact_phone="+79161234567",
+        contact_telegram="masha",
+        extra_contacts="бабушка",
+        note="любит сказки",
+        status=ClientStatus.ARCHIVED,
+        archived_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    text = render_card(client, messages.clients)
+    assert "+79161234567" in text
+    assert messages.clients.status_archived in text
+
+
+# --- menu ---------------------------------------------------------------------
+
+
+async def test_show_menu_sends_inline_menu(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message()
+    state = _state(data={"x": 1})
+    await h.show_menu(msg, state)
+    assert _first_text(msg.answer) == messages.clients.menu_title
+    assert state.store == {}
+
+
+async def test_open_menu_edits_to_menu(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(data={"x": 1}, state="some")
+    await h.open_menu(cb, state)
+    assert _first_text(cb.message.edit_text) == messages.clients.menu_title
+    cb.answer.assert_awaited_once()
+    assert state.state is None
+
+
+# --- listing & card -----------------------------------------------------------
+
+
+async def test_show_list_active_with_clients(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_client(session_factory, child_name="Аня")
+    await _seed_client(session_factory, child_name="Боря")
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:list:active")
+    await h.show_list(cb, _SPECIALIST_ID)
+    assert _first_text(cb.message.edit_text) == messages.clients.list_active_title
+
+
+async def test_show_list_active_empty(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:list:active")
+    await h.show_list(cb, _SPECIALIST_ID)
+    assert _first_text(cb.message.edit_text) == messages.clients.empty_active
+
+
+async def test_show_archive_first_page_shows_date(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_client(
+        session_factory, child_name="Архивный", status=ClientStatus.ARCHIVED
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:list:archived")
+    await h.show_archive(cb, _SPECIALIST_ID)
+    assert _first_text(cb.message.edit_text) == messages.clients.archive_title.format(
+        page=1
+    )
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert any(t.startswith("Архивный · ") for t in labels)  # имя + дата
+
+
+async def test_show_archive_empty(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:list:archived")
+    await h.show_archive(cb, _SPECIALIST_ID)
+    assert _first_text(cb.message.edit_text) == messages.clients.empty_archived
+
+
+async def test_show_archive_row_without_date(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    assert client.id is not None
+    async with session_factory() as session:
+        await SqlAlchemyClientsRepo(session).set_status(
+            client.id,
+            _SPECIALIST_ID,
+            ClientStatus.ARCHIVED,
+            archived_at=None,
+            updated_at=datetime.now(UTC),
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:list:archived")
+    await h.show_archive(cb, _SPECIALIST_ID)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert "Петя" in labels  # без даты — только имя, без " · "
+
+
+async def test_show_archive_pagination(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+):
+    monkeypatch.setattr("src.bot.handlers.clients._ARCHIVE_PAGE_SIZE", 2)
+    for i in range(3):
+        await _seed_client(
+            session_factory, child_name=f"Z{i}", status=ClientStatus.ARCHIVED
+        )
+    h = _handlers(messages, session_factory)
+
+    cb0 = _fake_callback("clients:list:archived")
+    await h.show_archive(cb0, _SPECIALIST_ID)
+    t0 = _button_texts(_markup(cb0.message.edit_text))
+    assert "▶" in t0
+    assert "◀" not in t0
+
+    cb1 = _fake_callback("clients:arch:1")
+    await h.show_archive(cb1, _SPECIALIST_ID)
+    t1 = _button_texts(_markup(cb1.message.edit_text))
+    assert "◀" in t1
+    assert "▶" not in t1
+
+
+async def test_show_card_renders(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory, child_name="Петя")
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    assert "Петя" in _first_text(cb.message.edit_text)
+
+
+async def test_show_card_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:card:999")
+    await h.show_card(cb, _SPECIALIST_ID)
+    cb.answer.assert_awaited_once_with(messages.clients.not_found, show_alert=True)
+    cb.message.edit_text.assert_not_awaited()
+
+
+# --- archive / restore --------------------------------------------------------
+
+
+async def test_archive_moves_to_archive(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:archive:{client.id}")
+    await h.archive(cb, _SPECIALIST_ID)
+
+    async with session_factory() as session:
+        assert client.id is not None
+        stored = await SqlAlchemyClientsRepo(session).get_for_specialist(
+            client.id, _SPECIALIST_ID
+        )
+    assert stored is not None
+    assert stored.status is ClientStatus.ARCHIVED
+    cb.message.edit_text.assert_awaited_once()
+
+
+async def test_restore_moves_to_active(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory, status=ClientStatus.ARCHIVED)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:restore:{client.id}")
+    await h.restore(cb, _SPECIALIST_ID)
+
+    async with session_factory() as session:
+        assert client.id is not None
+        stored = await SqlAlchemyClientsRepo(session).get_for_specialist(
+            client.id, _SPECIALIST_ID
+        )
+    assert stored is not None
+    assert stored.status is ClientStatus.ACTIVE
+
+
+# --- add wizard ---------------------------------------------------------------
+
+
+async def test_start_add_sets_state(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state()
+    await h.start_add(cb, state)
+    assert state.state == AddClient.child_name
+    assert _first_text(cb.message.edit_text) == messages.clients.ask_child_name
+
+
+async def test_add_child_name_empty_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("   ")
+    state = _state(state=AddClient.child_name)
+    await h.add_child_name(msg, state)
+    assert _first_text(msg.answer) == messages.clients.empty_required
+    assert state.state == AddClient.child_name
+
+
+async def test_add_child_name_ok(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("Петя")
+    state = _state()
+    await h.add_child_name(msg, state)
+    assert state.store["child_name"] == "Петя"
+    assert state.state == AddClient.contact_name
+    assert _first_text(msg.answer) == messages.clients.ask_contact_name
+
+
+async def test_add_contact_name_empty_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("")
+    state = _state(state=AddClient.contact_name)
+    await h.add_contact_name(msg, state)
+    assert _first_text(msg.answer) == messages.clients.empty_required
+
+
+async def test_add_contact_name_ok(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("Мама")
+    state = _state()
+    await h.add_contact_name(msg, state)
+    assert state.store["contact_name"] == "Мама"
+    assert state.state == AddClient.contact_phone
+    assert _first_text(msg.answer) == messages.clients.ask_phone
+
+
+async def test_add_phone_stores_and_advances(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("89161234567")
+    state = _state()
+    await h.add_phone(msg, state)
+    assert state.store["contact_phone"] == "89161234567"
+    assert state.state == AddClient.contact_telegram
+    assert _first_text(msg.answer) == messages.clients.ask_telegram
+
+
+async def test_skip_phone_advances(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state()
+    await h.skip_phone(cb, state)
+    assert state.store["contact_phone"] is None
+    assert state.state == AddClient.contact_telegram
+
+
+async def test_add_telegram_creates_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("@masha")
+    state = _state(
+        data={
+            "child_name": "Петя",
+            "contact_name": "Мама",
+            "contact_phone": "89161234567",
+        }
+    )
+    await h.add_telegram(msg, state, _SPECIALIST_ID)
+    assert msg.answer.await_args_list[0].args[0] == messages.clients.added
+    assert state.store == {}
+
+    async with session_factory() as session:
+        clients = await list_clients(
+            SqlAlchemyClientsRepo(session),
+            specialist_id=_SPECIALIST_ID,
+            status=ClientStatus.ACTIVE,
+        )
+    assert [c.child_name for c in clients] == ["Петя"]
+
+
+async def test_skip_telegram_creates_via_callback_message(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(
+        data={
+            "child_name": "Петя",
+            "contact_name": "Мама",
+            "contact_phone": "89161234567",
+        }
+    )
+    await h.skip_telegram(cb, state, _SPECIALIST_ID)
+    assert cb.message.answer.await_args_list[0].args[0] == messages.clients.added
+    cb.answer.assert_awaited_once()
+
+
+async def test_create_without_contact_channel_reasks_phone(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(
+        data={
+            "child_name": "Петя",
+            "contact_name": "Мама",
+            "contact_phone": None,
+        }
+    )
+    await h.skip_telegram(cb, state, _SPECIALIST_ID)
+    assert (
+        cb.message.answer.await_args_list[0].args[0]
+        == messages.clients.need_contact_channel
+    )
+    assert state.state == AddClient.contact_phone
+
+
+async def test_cancel_clears_state(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(data={"child_name": "Петя"}, state=AddClient.contact_name)
+    await h.cancel(cb, state)
+    assert state.store == {}
+    assert _first_text(cb.message.edit_text) == messages.clients.cancelled
+
+
+# --- edit a field -------------------------------------------------------------
+
+
+async def test_start_edit_shows_field_picker(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:edit:5")
+    await h.start_edit(cb)
+    cb.message.edit_reply_markup.assert_awaited_once()
+    cb.answer.assert_awaited_once()
+
+
+async def test_pick_field_sets_waiting_state(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:setfield:5:note")
+    state = _state()
+    await h.pick_field(cb, state)
+    assert state.state == EditClient.waiting_value
+    assert state.store == {"client_id": 5, "field": "note"}
+
+
+async def test_apply_edit_updates_field(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("важно")
+    state = _state(data={"client_id": client.id, "field": "note"})
+    await h.apply_edit(msg, state, _SPECIALIST_ID)
+    assert _first_text(msg.answer) == messages.clients.updated
+    assert state.store == {}
+
+    async with session_factory() as session:
+        assert client.id is not None
+        stored = await SqlAlchemyClientsRepo(session).get_for_specialist(
+            client.id, _SPECIALIST_ID
+        )
+    assert stored is not None
+    assert stored.note == "важно"
+
+
+async def test_apply_edit_rejects_empty_required(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("   ")
+    state = _state(data={"client_id": client.id, "field": "child_name"})
+    await h.apply_edit(msg, state, _SPECIALIST_ID)
+    assert _first_text(msg.answer) == messages.clients.empty_required
+    assert state.store != {}
+
+
+# --- middleware ---------------------------------------------------------------
+
+
+async def test_middleware_injects_specialist_id(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    async with session_factory() as session:
+        repo = SqlAlchemySpecialistsRepo(session)
+        specialist = await create_invite(repo)
+        await consume_invite(repo, specialist.invite_token, chat_id=555, username=None)
+
+    middleware = SpecialistMiddleware(session_factory)
+    captured: dict[str, Any] = {}
+
+    async def handler(_event: object, data: dict[str, Any]) -> str:  # noqa: RUF029
+        captured["specialist_id"] = data["specialist_id"]
+        return "ok"
+
+    data = {"event_from_user": _user(555)}
+    result = await middleware(handler, cast("TelegramObject", object()), data)
+    assert result == "ok"
+    assert captured["specialist_id"] == specialist.id
+
+
+async def test_middleware_drops_unknown_user(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    middleware = SpecialistMiddleware(session_factory)
+    called = False
+
+    async def handler(_event: object, _data: dict[str, Any]) -> str:  # noqa: RUF029
+        nonlocal called
+        called = True
+        return "ok"
+
+    data = {"event_from_user": _user(404)}
+    result = await middleware(handler, cast("TelegramObject", object()), data)
+    assert result is None
+    assert called is False
+
+
+def _user(user_id: int) -> AsyncMock:
+    user = AsyncMock()
+    user.id = user_id
+    return user

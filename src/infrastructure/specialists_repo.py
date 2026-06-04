@@ -63,6 +63,14 @@ class SqlAlchemySpecialistsRepo:
             return None
         return to_domain(orm)
 
+    async def find_by_chat_id(self, chat_id: int) -> Specialist | None:
+        stmt = select(SpecialistORM).where(SpecialistORM.telegram_chat_id == chat_id)
+        result = await self._session.execute(stmt)
+        orm = result.scalar_one_or_none()
+        if orm is None:
+            return None
+        return to_domain(orm)
+
     async def mark_welcomed(
         self,
         specialist_id: int,

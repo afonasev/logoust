@@ -11,19 +11,23 @@ src/
 ├── __main__.py               # entrypoint: запускает aiogram-бота
 │
 ├── domain/                   # сущности, протоколы репозиториев
-│   └── specialist.py
+│   ├── specialist.py
+│   └── client.py
 │
 ├── services/                 # use-cases, depend on domain
-│   └── invites.py
+│   ├── invites.py
+│   └── clients.py
 │
 ├── infrastructure/           # ORM, async-сессии, репозитории
 │   ├── db.py
-│   └── specialists_repo.py
+│   ├── specialists_repo.py
+│   └── clients_repo.py
 │
 ├── bot/                      # adapter-слой: aiogram dispatcher + хендлеры
 │   ├── dispatcher.py
 │   ├── handlers/
-│   │   └── start.py
+│   │   ├── start.py
+│   │   └── clients.py
 │   ├── messages.py
 │   └── messages.toml
 │
@@ -39,6 +43,10 @@ src/
 - `bot/`, `cli/` — adapter-слои. Импортируют `services/`, `infrastructure/`, `domain/`, `config`. Никогда наоборот.
 
 `bot/` и `cli/` — две «двери» в приложение: пользовательский Telegram-канал и административный shell. Обе через `services/` дёргают одну и ту же бизнес-логику.
+
+Бизнес-правила (валидация минимума клиента, нормализация телефона/Telegram) живут в `domain/`/`services/`, а не в хендлерах — чтобы не зависеть от способа ввода. Это держит дверь открытой для второго адаптера (например, Telegram Mini App) поверх тех же use-cases без переписывания логики.
+
+Авторизация в `bot/`-канале — через aiogram inner-middleware `SpecialistMiddleware` (`bot/handlers/clients.py`): резолвит специалиста по `chat_id` и инжектит `specialist_id` в хендлеры, отсекая неонбординнутых.
 
 ## Поток данных: онбординг
 

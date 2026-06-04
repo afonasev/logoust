@@ -7,6 +7,7 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.handlers.clients import build_main_keyboard
 from src.bot.messages import BotMessages
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.invites import ConsumeResult, consume_invite
@@ -58,9 +59,14 @@ async def _consume_and_reply(
         )
 
     if result is ConsumeResult.WELCOMED:
-        await message.answer(messages.start.welcome)
+        await message.answer(
+            messages.start.welcome, reply_markup=build_main_keyboard(messages)
+        )
     elif result is ConsumeResult.ALREADY_WELCOMED:
-        await message.answer(messages.start.already_welcomed)
+        await message.answer(
+            messages.start.already_welcomed,
+            reply_markup=build_main_keyboard(messages),
+        )
     else:
         await message.answer(messages.start.unknown_token)
 

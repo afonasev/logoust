@@ -25,6 +25,10 @@ class SpecialistsRepo(Protocol):
         self, token: str
     ) -> Specialist | None: ...
 
+    async def find_by_chat_id(  # pragma: no cover
+        self, chat_id: int
+    ) -> Specialist | None: ...
+
     async def mark_welcomed(  # pragma: no cover
         self,
         specialist_id: int,

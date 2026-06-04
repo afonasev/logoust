@@ -38,6 +38,26 @@ async def test_find_by_token_returns_none_when_missing(session: AsyncSession):
     assert await repo.find_by_token("nope") is None
 
 
+async def test_find_by_chat_id_returns_welcomed_specialist(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-chat"))
+    assert saved.id is not None
+    await repo.mark_welcomed(
+        saved.id,
+        telegram_chat_id=777,
+        telegram_username="ivanov",
+        welcomed_at=datetime.now(UTC),
+    )
+    found = await repo.find_by_chat_id(777)
+    assert found is not None
+    assert found.id == saved.id
+
+
+async def test_find_by_chat_id_returns_none_when_missing(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    assert await repo.find_by_chat_id(123) is None
+
+
 async def test_mark_welcomed_sets_fields(session: AsyncSession):
     repo = SqlAlchemySpecialistsRepo(session)
     saved = await repo.add(_make("token-b"))

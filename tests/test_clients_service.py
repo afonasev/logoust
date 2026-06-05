@@ -16,7 +16,9 @@ from src.services.clients import (
     NewClient,
     add_client,
     archive_client,
+    create_client_invite,
     edit_client_field,
+    link_client_by_token,
     list_active_page,
     list_archived_page,
     list_clients,
@@ -278,6 +280,85 @@ async def test_list_active_page_sorted_and_paginated(session: AsyncSession):
     assert [c.child_name for c in p1.clients] == ["Яков"]
     assert p1.has_prev is True
     assert p1.has_next is False
+
+
+async def test_create_client_invite_generates_token(session: AsyncSession):
+    repo, client = await _add(session)
+    assert client.id is not None
+    updated = await create_client_invite(repo, client_id=client.id, specialist_id=1)
+    assert updated is not None
+    assert updated.invite_token is not None
+    assert updated.telegram_chat_id is None
+
+
+async def test_create_client_invite_reuses_existing_token(session: AsyncSession):
+    repo, client = await _add(session)
+    assert client.id is not None
+    first = await create_client_invite(repo, client_id=client.id, specialist_id=1)
+    second = await create_client_invite(repo, client_id=client.id, specialist_id=1)
+    assert first is not None
+    assert second is not None
+    assert first.invite_token == second.invite_token
+
+
+async def test_create_client_invite_other_owner_returns_none(session: AsyncSession):
+    repo, client = await _add(session, specialist_id=1)
+    assert client.id is not None
+    result = await create_client_invite(repo, client_id=client.id, specialist_id=2)
+    assert result is None
+
+
+async def test_link_client_by_token_binds_chat_id(session: AsyncSession):
+    repo, client = await _add(session)
+    assert client.id is not None
+    invited = await create_client_invite(repo, client_id=client.id, specialist_id=1)
+    assert invited is not None
+    assert invited.invite_token is not None
+
+    linked = await link_client_by_token(repo, invited.invite_token, chat_id=555)
+    assert linked is not None
+    assert linked.telegram_chat_id == 555
+    assert linked.linked_at is not None
+
+
+async def test_link_client_by_token_rebind_overwrites(session: AsyncSession):
+    repo, client = await _add(session)
+    assert client.id is not None
+    invited = await create_client_invite(repo, client_id=client.id, specialist_id=1)
+    assert invited is not None
+    assert invited.invite_token is not None
+
+    await link_client_by_token(repo, invited.invite_token, chat_id=111)
+    rebound = await link_client_by_token(repo, invited.invite_token, chat_id=222)
+    assert rebound is not None
+    assert rebound.telegram_chat_id == 222
+
+
+async def test_link_client_by_token_unknown_returns_none(session: AsyncSession):
+    repo, _ = await _add(session)
+    result = await link_client_by_token(repo, "no-such-token", chat_id=1)
+    assert result is None
+
+
+async def test_link_one_account_to_two_cards(session: AsyncSession):
+    # One Telegram account may bind to several client cards (testing scenario).
+    repo, masha = await _add(session, child_name="Маша")
+    _, petya = await _add(session, child_name="Петя")
+    assert masha.id is not None
+    assert petya.id is not None
+    t1 = await create_client_invite(repo, client_id=masha.id, specialist_id=1)
+    t2 = await create_client_invite(repo, client_id=petya.id, specialist_id=1)
+    assert t1 is not None
+    assert t1.invite_token is not None
+    assert t2 is not None
+    assert t2.invite_token is not None
+
+    a = await link_client_by_token(repo, t1.invite_token, chat_id=777)
+    b = await link_client_by_token(repo, t2.invite_token, chat_id=777)
+    assert a is not None
+    assert a.telegram_chat_id == 777
+    assert b is not None
+    assert b.telegram_chat_id == 777
 
 
 async def test_list_clients_filters_by_status(session: AsyncSession):

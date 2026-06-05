@@ -162,6 +162,62 @@ async def test_set_status_returns_none_for_other_owner(session: AsyncSession):
     assert result is None
 
 
+async def test_set_invite_token_returns_none_for_other_owner(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    saved = await repo.add(_make(specialist_id=1))
+    assert saved.id is not None
+    result = await repo.set_invite_token(
+        saved.id, 2, "tok", updated_at=datetime.now(UTC)
+    )
+    assert result is None
+
+
+async def test_link_telegram_returns_none_for_missing_client(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    ts = datetime.now(UTC)
+    result = await repo.link_telegram(
+        999, telegram_chat_id=1, username=None, linked_at=ts, updated_at=ts
+    )
+    assert result is None
+
+
+async def test_link_telegram_autofills_empty_username(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    saved = await repo.add(_make())  # _make leaves contact_telegram=None
+    assert saved.id is not None
+    ts = datetime.now(UTC)
+    linked = await repo.link_telegram(
+        saved.id, telegram_chat_id=7, username="masha", linked_at=ts, updated_at=ts
+    )
+    assert linked is not None
+    assert linked.contact_telegram == "masha"
+
+
+async def test_link_telegram_keeps_manual_username(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    ts = datetime.now(UTC)
+    await repo.update_fields(saved.id, 1, {"contact_telegram": "manual"}, updated_at=ts)
+    linked = await repo.link_telegram(
+        saved.id, telegram_chat_id=7, username="auto", linked_at=ts, updated_at=ts
+    )
+    assert linked is not None
+    assert linked.contact_telegram == "manual"  # ручной ввод не затирается
+
+
+async def test_find_by_invite_token_roundtrip(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    ts = datetime.now(UTC)
+    await repo.set_invite_token(saved.id, 1, "cli-token-xyz", updated_at=ts)
+    found = await repo.find_by_invite_token("cli-token-xyz")
+    assert found is not None
+    assert found.id == saved.id
+    assert await repo.find_by_invite_token("missing") is None
+
+
 def test_to_domain_maps_fields():
     now = datetime(2026, 6, 4, tzinfo=UTC)
     orm = ClientORM(

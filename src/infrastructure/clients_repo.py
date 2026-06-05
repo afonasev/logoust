@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -35,6 +36,14 @@ class ClientORM(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Канал связи. invite_token уникален (поиск при онбординге); telegram_chat_id
+    # не уникален намеренно — один аккаунт может быть привязан к нескольким
+    # карточкам (тестирование специалистом под своим аккаунтом).
+    invite_token: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True
+    )
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    linked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -62,6 +71,9 @@ def to_domain(orm: ClientORM) -> Client:
         archived_at=orm.archived_at,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
+        invite_token=orm.invite_token,
+        telegram_chat_id=orm.telegram_chat_id,
+        linked_at=orm.linked_at,
     )
 
 
@@ -172,6 +184,53 @@ class SqlAlchemyClientsRepo:
         orm.status = status.value
         orm.archived_at = archived_at
         orm.updated_at = updated_at
+        await self._session.commit()
+        return to_domain(orm)
+
+    async def set_invite_token(
+        self,
+        client_id: int,
+        specialist_id: int,
+        token: str,
+        *,
+        updated_at: datetime,
+    ) -> Client | None:
+        orm = await self._get_owned(client_id, specialist_id)
+        if orm is None:
+            return None
+        orm.invite_token = token
+        orm.updated_at = updated_at
+        await self._session.commit()
+        return to_domain(orm)
+
+    async def find_by_invite_token(self, token: str) -> Client | None:
+        stmt = select(ClientORM).where(ClientORM.invite_token == token)
+        result = await self._session.execute(stmt)
+        orm = result.scalar_one_or_none()
+        return to_domain(orm) if orm is not None else None
+
+    async def link_telegram(
+        self,
+        client_id: int,
+        *,
+        telegram_chat_id: int,
+        username: str | None,
+        linked_at: datetime,
+        updated_at: datetime,
+    ) -> Client | None:
+        # Idempotent rebind: всегда перезаписываем chat_id/linked_at (см. design.md).
+        # Поиск по id без specialist_id — клиент переходит по ссылке сам, владелец
+        # уже зафиксирован токеном.
+        orm = await self._session.get(ClientORM, client_id)
+        if orm is None:
+            return None
+        orm.telegram_chat_id = telegram_chat_id
+        orm.linked_at = linked_at
+        orm.updated_at = updated_at
+        # Автозахват username из Telegram: заполняем поле, только если специалист
+        # не вписал контакт вручную (ручной ввод не затираем).
+        if username and not orm.contact_telegram:
+            orm.contact_telegram = username
         await self._session.commit()
         return to_domain(orm)
 

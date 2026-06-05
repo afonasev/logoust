@@ -7,9 +7,12 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.deeplink import CLIENT_TOKEN_PREFIX
 from src.bot.handlers.clients import build_main_keyboard
 from src.bot.messages import BotMessages
+from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.clients import link_client_by_token
 from src.services.invites import ConsumeResult, consume_invite
 
 logger = logging.getLogger(__name__)
@@ -22,6 +25,18 @@ TokenHandler = Callable[[Message], Awaitable[None]]
 # specialist can connect by copying either the link or just the code.
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{22}")
 _START_PARAM = "start="
+
+
+def extract_client_token(text: str) -> str | None:
+    """Bare client token from a `cli_`-prefixed code or deep-link, else None."""
+    candidate = text.strip()
+    if _START_PARAM in candidate:
+        candidate = candidate.split(_START_PARAM, 1)[1].split("&", 1)[0].strip()
+    if not candidate.startswith(CLIENT_TOKEN_PREFIX):
+        return None
+    bare = candidate[len(CLIENT_TOKEN_PREFIX) :]
+    match = _TOKEN_RE.fullmatch(bare)
+    return match.group(0) if match else None
 
 
 def extract_token(text: str) -> str | None:
@@ -71,6 +86,30 @@ async def _consume_and_reply(
         await message.answer(messages.start.unknown_token)
 
 
+async def _link_client_and_reply(
+    message: Message,
+    token: str,
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bind the client's Telegram to a card by token, then reply to the client.
+
+    The caller must ensure `message.from_user` is not None.
+    """
+    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    async with session_factory() as session:
+        client = await link_client_by_token(
+            SqlAlchemyClientsRepo(session),
+            token,
+            chat_id=message.from_user.id,
+            username=message.from_user.username,
+        )
+    if client is None:
+        await message.answer(messages.clients.link_unknown)
+    else:
+        await message.answer(messages.clients.linked)
+
+
 def make_start_handler(
     messages: BotMessages,
     session_factory: async_sessionmaker[AsyncSession],
@@ -84,6 +123,11 @@ def make_start_handler(
             await message.answer(messages.start.no_token)
             return
 
+        if token.startswith(CLIENT_TOKEN_PREFIX):
+            bare = token[len(CLIENT_TOKEN_PREFIX) :]
+            await _link_client_and_reply(message, bare, messages, session_factory)
+            return
+
         await _consume_and_reply(message, token, messages, session_factory)
 
     return handle_start
@@ -95,6 +139,15 @@ def make_token_handler(
 ) -> TokenHandler:
     async def handle_token(message: Message) -> None:
         if message.from_user is None or message.text is None:
+            return
+
+        # Try the client token first: a `cli_`-prefixed payload is unambiguous and
+        # must not fall through to specialist onboarding.
+        client_token = extract_client_token(message.text)
+        if client_token is not None:
+            await _link_client_and_reply(
+                message, client_token, messages, session_factory
+            )
             return
 
         token = extract_token(message.text)

@@ -39,6 +39,12 @@ class ClientsMessages:
     need_contact_channel: str
     edit_prompt: str
     not_found: str
+    tg_linked_badge: str
+    invite_button: str
+    invite_button_linked: str
+    invite_forward: str
+    linked: str
+    link_unknown: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +174,12 @@ def load_messages(path: Path) -> BotMessages:
             need_contact_channel=_require(data, "clients.need_contact_channel"),
             edit_prompt=_require(data, "clients.edit_prompt"),
             not_found=_require(data, "clients.not_found"),
+            tg_linked_badge=_require(data, "clients.tg_linked_badge"),
+            invite_button=_require(data, "clients.invite_button"),
+            invite_button_linked=_require(data, "clients.invite_button_linked"),
+            invite_forward=_require(data, "clients.invite_forward").strip(),
+            linked=_require(data, "clients.linked"),
+            link_unknown=_require(data, "clients.link_unknown"),
         ),
         schedule=ScheduleMessages(
             button=_require(data, "schedule.button"),

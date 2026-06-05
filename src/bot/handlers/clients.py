@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.deeplink import build_client_start_link
 from src.bot.messages import BotMessages, ClientsMessages, ScheduleMessages
 from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
@@ -32,6 +33,7 @@ from src.services.clients import (
     NewClient,
     add_client,
     archive_client,
+    create_client_invite,
     edit_client_field,
     list_active_page,
     list_archived_page,
@@ -220,8 +222,25 @@ def _future_button(
     ]
 
 
-def _card_keyboard(
-    client: Client, appts: list[Appointment], tz: str, m: ScheduleMessages, back: str
+def _invite_button(client: Client, cm: ClientsMessages) -> InlineKeyboardButton:
+    # Label reflects whether the client already bound their Telegram. Re-tapping
+    # reuses the same token, so the action is safe to repeat after linking.
+    label = (
+        cm.invite_button_linked
+        if client.telegram_chat_id is not None
+        else cm.invite_button
+    )
+    return InlineKeyboardButton(text=label, callback_data=f"clients:invite:{client.id}")
+
+
+def _card_keyboard(  # noqa: PLR0913
+    client: Client,
+    appts: list[Appointment],
+    tz: str,
+    *,
+    m: ScheduleMessages,
+    cm: ClientsMessages,
+    back: str,
 ) -> InlineKeyboardMarkup:
     if client.status is ClientStatus.ARCHIVED:
         status_btn = InlineKeyboardButton(
@@ -233,13 +252,14 @@ def _card_keyboard(
             text=_BTN_ARCHIVE, callback_data=f"clients:archiveask:{client.id}"
         )
     rows = [_future_button(appt, tz, m) for appt in appts]
+    rows.append(
+        [InlineKeyboardButton(text=m.btn_add, callback_data=f"sched:new:{client.id}")]
+    )
+    # Inviting to the bot is only offered on active cards.
+    if client.status is ClientStatus.ACTIVE:
+        rows.append([_invite_button(client, cm)])
     rows.extend(
         [
-            [
-                InlineKeyboardButton(
-                    text=m.btn_add, callback_data=f"sched:new:{client.id}"
-                )
-            ],
             [
                 InlineKeyboardButton(
                     text=_BTN_EDIT, callback_data=f"clients:edit:{client.id}"
@@ -320,6 +340,19 @@ def _or_dash(value: str | None, dash: str) -> str:
     return value or dash
 
 
+def _telegram_field(client: Client, m: ClientsMessages) -> str:
+    # Combine the manually-entered @username (auto-linked by Telegram → tap opens
+    # the chat) with a badge when the client is bound to the bot. Two distinct
+    # signals: username is how the specialist reaches the parent; the badge means
+    # the notification channel is live.
+    parts: list[str] = []
+    if client.contact_telegram:
+        parts.append(f"@{client.contact_telegram}")
+    if client.telegram_chat_id is not None:
+        parts.append(m.tg_linked_badge)
+    return " ".join(parts) if parts else m.dash
+
+
 def render_card(client: Client, m: ClientsMessages) -> str:
     if client.status is ClientStatus.ARCHIVED:
         status = m.status_archived
@@ -329,7 +362,7 @@ def render_card(client: Client, m: ClientsMessages) -> str:
         child=client.child_name,
         contact=client.contact_name,
         phone=_or_dash(client.contact_phone, m.dash),
-        telegram=_or_dash(client.contact_telegram, m.dash),
+        telegram=_telegram_field(client, m),
         extra=_or_dash(client.extra_contacts, m.dash),
         note=_or_dash(client.note, m.dash),
         status=status,
@@ -382,7 +415,7 @@ class SpecialistMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-class ClientsHandlers:
+class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients router
     def __init__(
         self,
         messages: BotMessages,
@@ -514,9 +547,34 @@ class ClientsHandlers:
         if not appts:
             text = f"{text}\n\n{sm.client_future_empty}"
         keyboard = _card_keyboard(
-            client, appts, specialist.timezone, sm, back or _back_target(client.status)
+            client,
+            appts,
+            specialist.timezone,
+            m=sm,
+            cm=self._m,
+            back=back or _back_target(client.status),
         )
         return text, keyboard
+
+    # --- invite to bot --------------------------------------------------------
+
+    async def send_invite(self, callback: CallbackQuery, specialist_id: int) -> None:
+        client_id = _parse_id(callback.data)
+        async with self._session_factory() as session:
+            client = await create_client_invite(
+                SqlAlchemyClientsRepo(session),
+                client_id=client_id,
+                specialist_id=specialist_id,
+            )
+        if client is None or client.invite_token is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        link = build_client_start_link(client.invite_token)
+        # Separate message so the specialist can forward it to the client as-is.
+        await _callback_message(callback).answer(
+            self._m.invite_forward.format(link=link)
+        )
+        await callback.answer()
 
     # --- archive / restore ----------------------------------------------------
 
@@ -715,6 +773,7 @@ def build_router(
     router.callback_query.register(h.show_archive, F.data == "clients:list:archived")
     router.callback_query.register(h.show_archive, F.data.startswith("clients:arch:"))
     router.callback_query.register(h.show_card, F.data.startswith("clients:card:"))
+    router.callback_query.register(h.send_invite, F.data.startswith("clients:invite:"))
     router.callback_query.register(h.start_edit, F.data.startswith("clients:edit:"))
     router.callback_query.register(h.pick_field, F.data.startswith("clients:setfield:"))
     router.callback_query.register(

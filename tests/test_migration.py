@@ -93,6 +93,9 @@ def test_clients_migration_creates_clients_table(
         "archived_at",
         "created_at",
         "updated_at",
+        "invite_token",
+        "telegram_chat_id",
+        "linked_at",
     }
     assert columns == expected
 
@@ -102,6 +105,61 @@ def test_clients_migration_creates_clients_table(
     command.downgrade(cfg, "base")
     insp = inspect(engine)
     assert "clients" not in insp.get_table_names()
+    engine.dispose()
+
+
+def test_client_telegram_link_migration_adds_columns(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0005 and seed a client that predates the telegram link columns.
+    command.upgrade(cfg, "0004")
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO clients "
+                "(specialist_id, child_name, contact_name, status, "
+                "created_at, updated_at) "
+                "VALUES (1, 'Маша', 'Мама', 'active', '2026-05-01', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    client_columns = {c["name"] for c in insp.get_columns("clients")}
+    assert {"invite_token", "telegram_chat_id", "linked_at"} <= client_columns
+    index_names = {i["name"] for i in insp.get_indexes("clients")}
+    assert "ix_clients_invite_token" in index_names
+
+    # Existing client backfills to NULL — valid "not invited yet" state.
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT invite_token, telegram_chat_id, linked_at "
+                "FROM clients WHERE child_name = 'Маша'"
+            )
+        ).one()
+    assert row == (None, None, None)
+
+    command.downgrade(cfg, "0004")
+    insp = inspect(engine)
+    client_columns = {c["name"] for c in insp.get_columns("clients")}
+    assert "invite_token" not in client_columns
     engine.dispose()
 
 

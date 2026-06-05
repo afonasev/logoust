@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import enum
 import logging
+import secrets
 
 from src.domain.client import (
     Client,
@@ -15,6 +16,7 @@ from src.domain.client import (
 
 logger = logging.getLogger(__name__)
 
+_TOKEN_BYTES = 16  # secrets.token_urlsafe(16) → 22-char URL-safe token
 _REQUIRED_FIELDS = frozenset({"child_name", "contact_name"})
 _EDITABLE_FIELDS = frozenset(
     {
@@ -182,6 +184,57 @@ async def restore_client(
         extra={"specialist_id": specialist_id, "client_id": client_id},
     )
     return True
+
+
+async def create_client_invite(
+    repo: ClientsRepo, *, client_id: int, specialist_id: int
+) -> Client | None:
+    """Лениво выдать клиенту invite_token (переиспользуя существующий).
+
+    Возвращает обновлённую карточку, где задан `invite_token`, либо None, если
+    карточка не принадлежит специалисту.
+    """
+    client = await repo.get_for_specialist(client_id, specialist_id)
+    if client is None:
+        return None
+    if client.invite_token:
+        return client  # ссылка стабильна — переиспользуем существующий токен
+    token = secrets.token_urlsafe(_TOKEN_BYTES)
+    updated = await repo.set_invite_token(
+        client_id, specialist_id, token, updated_at=datetime.now(UTC)
+    )
+    logger.info(
+        "client.invite_created",
+        extra={"specialist_id": specialist_id, "client_id": client_id},
+    )
+    return updated
+
+
+async def link_client_by_token(
+    repo: ClientsRepo, token: str, *, chat_id: int, username: str | None = None
+) -> Client | None:
+    """Привязать Telegram клиента по invite_token (idempotent rebind).
+
+    `username` (если есть) автозаполняет пустой `contact_telegram`.
+    Возвращает обновлённую карточку, либо None для неизвестного токена.
+    """
+    client = await repo.find_by_invite_token(token)
+    if client is None or client.id is None:
+        logger.info("client.link_unknown", extra={"token_prefix": token[:6]})
+        return None
+    now = datetime.now(UTC)
+    updated = await repo.link_telegram(
+        client.id,
+        telegram_chat_id=chat_id,
+        username=username,
+        linked_at=now,
+        updated_at=now,
+    )
+    logger.info(
+        "client.linked",
+        extra={"specialist_id": client.specialist_id, "client_id": client.id},
+    )
+    return updated
 
 
 async def list_clients(

@@ -39,6 +39,11 @@ class Client:
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Канал связи: invite_token выдаёт специалист; telegram_chat_id
+    # захватывается, когда клиент переходит по cli_-ссылке и стартует бота.
+    invite_token: str | None = None
+    telegram_chat_id: int | None = None
+    linked_at: datetime | None = None
 
 
 _NON_DIGITS = re.compile(r"[^0-9]")
@@ -111,5 +116,28 @@ class ClientsRepo(Protocol):
         status: ClientStatus,
         *,
         archived_at: datetime | None,
+        updated_at: datetime,
+    ) -> Client | None: ...
+
+    async def set_invite_token(  # pragma: no cover
+        self,
+        client_id: int,
+        specialist_id: int,
+        token: str,
+        *,
+        updated_at: datetime,
+    ) -> Client | None: ...
+
+    async def find_by_invite_token(  # pragma: no cover
+        self, token: str
+    ) -> Client | None: ...
+
+    async def link_telegram(  # pragma: no cover
+        self,
+        client_id: int,
+        *,
+        telegram_chat_id: int,
+        username: str | None,
+        linked_at: datetime,
         updated_at: datetime,
     ) -> Client | None: ...

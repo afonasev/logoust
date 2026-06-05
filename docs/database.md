@@ -76,18 +76,23 @@
 | `note`             | TEXT        | да   | Свободная заметка.                                     |
 | `status`           | VARCHAR(16) | нет  | `active` \| `archived` (enum строкой).                 |
 | `archived_at`      | DATETIME    | да   | Время архивации; `NULL` у активного.                   |
+| `invite_token`     | VARCHAR(64) | да   | Токен приглашения клиента в бота; уникален. `NULL` — не приглашён. |
+| `telegram_chat_id` | BIGINT      | да   | `chat_id` клиента, захваченный при онбординге. **НЕ** уникален — один аккаунт может быть привязан к нескольким карточкам. |
+| `linked_at`        | DATETIME    | да   | Время последней привязки Telegram; `NULL` — не привязан. |
 | `created_at`       | DATETIME    | нет  | `lambda: datetime.now(UTC)`.                           |
 | `updated_at`       | DATETIME    | нет  | Обновляется при любом изменении полей/статуса.         |
 
 Индексы:
 
 - `ix_clients_specialist_status` — составной по `(specialist_id, status)`. Обслуживает выборки списков по статусу и (по левому префиксу) «все мои». Архив дополнительно сортируется по `archived_at` убыванию (свежие сверху) и листается через `LIMIT/OFFSET`; на текущих объёмах сортировку делает SQLite в памяти, отдельный индекс по `archived_at` пока не нужен (YAGNI).
+- `ix_clients_invite_token` — уникальный по `invite_token`. Обслуживает поиск карточки при онбординге клиента по `cli_`-deep-link. Несколько `NULL` допускаются (клиент ещё не приглашён).
 
 Решения по схеме:
 
 - Контакт хранится «плоскими» полями (один основной родитель + `extra_contacts`), без отдельной таблицы контактов — YAGNI; второй родитель идёт в свободный текст.
 - Удаления нет: неактивный клиент уходит в `archived`, данные карточки сохраняются.
 - Минимум при создании валидируется в `services` (имя ребёнка + имя контакта + хотя бы один из `contact_phone`/`contact_telegram`), а не в БД — правило не зависит от способа ввода.
+- `telegram_chat_id` намеренно **не** уникален (в отличие от `specialists`): специалист может тестировать рассылку под своим аккаунтом, привязав его к нескольким карточкам. Маршрутизация оператора идёт через `specialists`, по `clients.telegram_chat_id` никто не ищет.
 
 ## Миграции
 
@@ -96,6 +101,7 @@
 - `0002_clients.py` — создаёт таблицу `clients`, FK на `specialists.id` и индекс `ix_clients_specialist_status`.
 - `0003_appointments.py` — создаёт таблицу `appointments` (FK на `specialists` и `clients`, два индекса) и добавляет в `specialists` колонки настроек расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) с `server_default`. Down-ревизия удаляет таблицу и колонки.
 - `0004_working_days.py` — добавляет в `specialists` колонку `working_days` (`String`, `server_default="0,1,2,3,4"` — Пн–Пт). Down-ревизия — `drop_column`.
+- `0005_client_telegram_link.py` — добавляет в `clients` колонки `invite_token`, `telegram_chat_id`, `linked_at` (все nullable) и уникальный индекс `ix_clients_invite_token`. Существующие строки → `NULL` (валидное «не приглашён»). Down-ревизия удаляет индекс и колонки.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

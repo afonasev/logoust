@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 _SPECIALIST_ID = 1
 
 
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
 class FakeState:
     def __init__(
         self, data: dict[str, Any] | None = None, state: object | None = None
@@ -182,7 +186,52 @@ def test_render_card_archived_shows_values(messages: BotMessages):
     )
     text = render_card(client, messages.clients)
     assert "+79161234567" in text
+    assert "@masha" in text  # username auto-links to the chat
     assert messages.clients.status_archived in text
+
+
+def test_render_card_telegram_shows_badge_when_linked(messages: BotMessages):
+    now_ = now()
+    client = Client(
+        id=1,
+        specialist_id=1,
+        child_name="Петя",
+        contact_name="Мама",
+        contact_phone=None,
+        contact_telegram="masha",
+        extra_contacts=None,
+        note=None,
+        status=ClientStatus.ACTIVE,
+        archived_at=None,
+        created_at=now_,
+        updated_at=now_,
+        telegram_chat_id=42,
+    )
+    text = render_card(client, messages.clients)
+    assert "@masha" in text
+    assert messages.clients.tg_linked_badge in text
+
+
+def test_render_card_telegram_badge_only_without_username(messages: BotMessages):
+    now_ = now()
+    client = Client(
+        id=1,
+        specialist_id=1,
+        child_name="Петя",
+        contact_name="Мама",
+        contact_phone=None,
+        contact_telegram=None,
+        extra_contacts=None,
+        note=None,
+        status=ClientStatus.ACTIVE,
+        archived_at=None,
+        created_at=now_,
+        updated_at=now_,
+        telegram_chat_id=42,
+    )
+    text = render_card(client, messages.clients)
+    assert messages.clients.tg_linked_badge in text
+    assert "@" not in text
 
 
 # --- menu ---------------------------------------------------------------------
@@ -433,6 +482,106 @@ async def test_show_card_not_found(
     await h.show_card(cb, _SPECIALIST_ID)
     cb.answer.assert_awaited_once_with(messages.clients.not_found, show_alert=True)
     cb.message.edit_text.assert_not_awaited()
+
+
+# --- invite to bot ------------------------------------------------------------
+
+
+async def test_card_shows_invite_button_when_not_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    markup = _markup(cb.message.edit_text)
+    labels = _button_texts(markup)
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert messages.clients.invite_button in labels
+    assert f"clients:invite:{client.id}" in cbs
+
+
+async def test_card_shows_linked_label_after_binding(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory)
+    assert client.id is not None
+    async with session_factory() as session:
+        repo = SqlAlchemyClientsRepo(session)
+        await repo.set_invite_token(client.id, _SPECIALIST_ID, "tok", updated_at=now())
+        await repo.link_telegram(
+            client.id,
+            telegram_chat_id=42,
+            username=None,
+            linked_at=now(),
+            updated_at=now(),
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert messages.clients.invite_button_linked in labels
+
+
+async def test_archived_card_has_no_invite_button(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, status=ClientStatus.ARCHIVED)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    cbs = [
+        b.callback_data
+        for row in _markup(cb.message.edit_text).inline_keyboard
+        for b in row
+    ]
+    assert all(not (c and c.startswith("clients:invite:")) for c in cbs)
+
+
+async def test_send_invite_sends_forwardable_link(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:invite:{client.id}")
+    await h.send_invite(cb, _SPECIALIST_ID)
+    sent = _first_text(cb.message.answer)
+    assert "https://t.me/test_bot?start=cli_" in sent
+    cb.answer.assert_awaited_once()
+
+    # The card now carries a persisted token.
+    async with session_factory() as session:
+        assert client.id is not None
+        stored = await SqlAlchemyClientsRepo(session).get_for_specialist(
+            client.id, _SPECIALIST_ID
+        )
+    assert stored is not None
+    assert stored.invite_token is not None
+
+
+async def test_send_invite_reuses_link(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    cb1 = _fake_callback(f"clients:invite:{client.id}")
+    await h.send_invite(cb1, _SPECIALIST_ID)
+    cb2 = _fake_callback(f"clients:invite:{client.id}")
+    await h.send_invite(cb2, _SPECIALIST_ID)
+    assert _first_text(cb1.message.answer) == _first_text(cb2.message.answer)
+
+
+async def test_send_invite_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("clients:invite:999")
+    await h.send_invite(cb, _SPECIALIST_ID)
+    cb.answer.assert_awaited_once_with(messages.clients.not_found, show_alert=True)
+    cb.message.answer.assert_not_awaited()
 
 
 # --- archive / restore --------------------------------------------------------

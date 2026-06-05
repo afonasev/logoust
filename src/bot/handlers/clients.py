@@ -19,12 +19,21 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.deeplink import build_client_start_link
-from src.bot.messages import BotMessages, ClientsMessages, ScheduleMessages
+from src.bot.messages import (
+    BotMessages,
+    ClientsMessages,
+    RecurringMessages,
+    ScheduleMessages,
+)
 from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
 from src.domain.schedule import format_ru_short, utc_to_wall
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringExceptionsRepo,
+    SqlAlchemyRecurringRepo,
+)
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import list_client_future, nearest_future_by_client
 from src.services.clients import (
@@ -39,6 +48,7 @@ from src.services.clients import (
     list_archived_page,
     restore_client,
 )
+from src.services.recurring import SeriesContext, load_series_context, settle
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +112,12 @@ def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
 
 
 def _appt_label(
-    appt: Appointment, tz: str, sm: ScheduleMessages, *, with_comment: bool = True
+    appt: Appointment,
+    tz: str,
+    sm: ScheduleMessages,
+    *,
+    recur_mark: str,
+    with_comment: bool = True,
 ) -> str:
     wall = utc_to_wall(appt.starts_at, tz)
     comment = (
@@ -110,16 +125,19 @@ def _appt_label(
         if with_comment and appt.comment
         else ""
     )
-    return f"📅 {format_ru_short(wall.date())} {wall:%H:%M}{comment}"
+    # A plain recurring occurrence shows 🔁; everything else (one-off, moved) 📅.
+    prefix = recur_mark if appt.recurring_mark else "📅"
+    return f"{prefix} {format_ru_short(wall.date())} {wall:%H:%M}{comment}"
 
 
-def _client_row(
+def _client_row(  # noqa: PLR0913
     client: Client,
     nearest: dict[int, Appointment],
     tz: str,
     sm: ScheduleMessages,
     *,
     page: int,
+    recur_mark: str,
 ) -> list[InlineKeyboardButton]:
     # Two columns: the client (→ card) and its nearest appointment (→ that
     # appointment's card, to reschedule), or a "create appointment" button if none.
@@ -136,16 +154,23 @@ def _client_row(
         )
     else:
         second = InlineKeyboardButton(
-            text=_appt_label(appt, tz, sm, with_comment=False),
-            callback_data=f"sched:card:{appt.id}~{back}",
+            text=_appt_label(appt, tz, sm, recur_mark=recur_mark, with_comment=False),
+            callback_data=_appt_callback(appt, back),
         )
     return [client_btn, second]
 
 
 def _active_keyboard(
-    page: ClientsPage, nearest: dict[int, Appointment], tz: str, sm: ScheduleMessages
+    page: ClientsPage,
+    nearest: dict[int, Appointment],
+    tz: str,
+    sm: ScheduleMessages,
+    recur_mark: str,
 ) -> InlineKeyboardMarkup:
-    rows = [_client_row(c, nearest, tz, sm, page=page.page) for c in page.clients]
+    rows = [
+        _client_row(c, nearest, tz, sm, page=page.page, recur_mark=recur_mark)
+        for c in page.clients
+    ]
     nav = []
     if page.has_prev:
         nav.append(
@@ -208,16 +233,27 @@ def _archive_keyboard(page: ClientsPage) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _appt_callback(appt: Appointment, back: str) -> str:
+    # A virtual series occurrence (id is None) opens the series card; a real row
+    # opens its appointment card.
+    if appt.id is None:
+        assert appt.series_id is not None  # noqa: S101 — virtual rows carry a series
+        assert appt.origin_date is not None  # noqa: S101
+        # Carry the origin (e.g. the client card) so the series card returns there.
+        return f"recur:card:{appt.series_id}:{appt.origin_date.isoformat()}~{back}"
+    return f"sched:card:{appt.id}~{back}"
+
+
 def _future_button(
-    appt: Appointment, tz: str, m: ScheduleMessages
+    appt: Appointment, tz: str, m: ScheduleMessages, recur_mark: str
 ) -> list[InlineKeyboardButton]:
     # Tapping a future appointment opens its card (reschedule / cancel there);
     # back from there returns to this client's card.
     back = f"clients:card:{appt.client_id}"
     return [
         InlineKeyboardButton(
-            text=_appt_label(appt, tz, m),
-            callback_data=f"sched:card:{appt.id}~{back}",
+            text=_appt_label(appt, tz, m, recur_mark=recur_mark),
+            callback_data=_appt_callback(appt, back),
         )
     ]
 
@@ -240,6 +276,7 @@ def _card_keyboard(  # noqa: PLR0913
     *,
     m: ScheduleMessages,
     cm: ClientsMessages,
+    rm: RecurringMessages,
     back: str,
 ) -> InlineKeyboardMarkup:
     if client.status is ClientStatus.ARCHIVED:
@@ -251,11 +288,13 @@ def _card_keyboard(  # noqa: PLR0913
         status_btn = InlineKeyboardButton(
             text=_BTN_ARCHIVE, callback_data=f"clients:archiveask:{client.id}"
         )
-    rows = [_future_button(appt, tz, m) for appt in appts]
+    rows = [_future_button(appt, tz, m, rm.mark) for appt in appts]
     rows.append(
         [InlineKeyboardButton(text=m.btn_add, callback_data=f"sched:new:{client.id}")]
     )
-    # Inviting to the bot is only offered on active cards.
+    # Inviting to the bot is only offered on active cards. A recurring series is
+    # created from the normal "записать" flow (a question before the comment), not
+    # a separate button here.
     if client.status is ClientStatus.ACTIVE:
         rows.append([_invite_button(client, cm)])
     rows.extend(
@@ -411,6 +450,18 @@ class SpecialistMiddleware(BaseMiddleware):
             )
         if specialist is None:
             return None
+        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        # Freeze any passed recurring occurrences into history on interaction
+        # (no scheduler). Idempotent + daily-guarded, so it is cheap to repeat.
+        async with self._session_factory() as session:
+            await settle(
+                SqlAlchemyRecurringRepo(session),
+                SqlAlchemyRecurringExceptionsRepo(session),
+                SqlAlchemyAppointmentsRepo(session),
+                specialist_id=specialist.id,
+                now=datetime.now(UTC),
+                tz=specialist.timezone,
+            )
         data["specialist_id"] = specialist.id
         return await handler(event, data)
 
@@ -424,6 +475,18 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
         self._messages = messages
         self._m = messages.clients
         self._session_factory = session_factory
+
+    @staticmethod
+    async def _series_context(
+        session: AsyncSession, specialist_id: int, tz: str
+    ) -> SeriesContext:
+        return await load_series_context(
+            SqlAlchemyRecurringRepo(session),
+            SqlAlchemyRecurringExceptionsRepo(session),
+            specialist_id=specialist_id,
+            now=datetime.now(UTC),
+            tz=tz,
+        )
 
     # --- home: active clients -------------------------------------------------
 
@@ -439,18 +502,26 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             )
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
             assert specialist is not None  # noqa: S101 — middleware guarantees it
+            series = await self._series_context(
+                session, specialist_id, specialist.timezone
+            )
             nearest = await nearest_future_by_client(
                 SqlAlchemyAppointmentsRepo(session),
                 specialist_id=specialist_id,
                 tz=specialist.timezone,
                 now=datetime.now(UTC),
+                series=series,
             )
         if page_num == 0 and not page.clients:
             text = self._m.empty_active
         else:
             text = self._m.list_active_title
         keyboard = _active_keyboard(
-            page, nearest, specialist.timezone, self._messages.schedule
+            page,
+            nearest,
+            specialist.timezone,
+            self._messages.schedule,
+            self._messages.recurring.mark,
         )
         return text, keyboard
 
@@ -533,12 +604,16 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
             assert specialist is not None  # noqa: S101 — middleware guarantees it
+            series = await self._series_context(
+                session, specialist_id, specialist.timezone
+            )
             appts = await list_client_future(
                 SqlAlchemyAppointmentsRepo(session),
                 specialist_id=specialist_id,
                 client_id=client.id,
                 tz=specialist.timezone,
                 now=datetime.now(UTC),
+                series=series,
             )
         sm = self._messages.schedule
         # Future appointments are buttons below; no header needed. Note only when
@@ -552,6 +627,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             specialist.timezone,
             m=sm,
             cm=self._m,
+            rm=self._messages.recurring,
             back=back or _back_target(client.status),
         )
         return text, keyboard

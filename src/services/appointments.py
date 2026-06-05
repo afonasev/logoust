@@ -14,6 +14,12 @@ from src.domain.schedule import (
     wall_to_utc,
 )
 from src.domain.specialist import Specialist
+from src.services.recurring import (
+    SeriesContext,
+    next_occurrence,
+    occurrences_landing_in,
+    series_taken_times,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,27 +47,35 @@ def _ensure_not_past(day: date, tz: str, now: datetime) -> None:
         raise PastDateError
 
 
-async def taken_slot_times(
+async def taken_slot_times(  # noqa: PLR0913
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
     day: date,
     tz: str,
     exclude_id: int | None = None,
+    series: SeriesContext | None = None,
 ) -> set[str]:
     """Wall-clock `HH:MM` times the specialist already has booked on `day`.
 
     `exclude_id` drops the appointment being rescheduled so its own current slot
-    is not flagged as taken.
+    is not flagged as taken. When `series` is given, future repeats of active
+    series also count as taken (with this date's skips/moves applied).
     """
     start = day_start_utc(day, tz)
     end = day_start_utc(day + timedelta(days=1), tz)
     rows = await repo.list_for_specialist_between(specialist_id, start=start, end=end)
-    return {
+    taken = {
         f"{utc_to_wall(appt.starts_at, tz):%H:%M}"
         for appt in rows
         if appt.id != exclude_id
     }
+    if series is not None:
+        for s in series.series:
+            taken |= series_taken_times(
+                s, series.for_series(s.id), day, tz, series.today
+            )
+    return taken
 
 
 @dataclass(slots=True)
@@ -76,6 +90,7 @@ async def list_free_windows(
     specialist: Specialist,
     now: datetime,
     days: int = 5,
+    series: SeriesContext | None = None,
 ) -> list[DayWindows]:
     """Free windows for the specialist's next `days` working days, from today.
 
@@ -95,7 +110,7 @@ async def list_free_windows(
     result: list[DayWindows] = []
     for day in next_working_days(today, working, days):
         taken = await taken_slot_times(
-            repo, specialist_id=specialist.id, day=day, tz=tz
+            repo, specialist_id=specialist.id, day=day, tz=tz, series=series
         )
         free = [slot for slot in slots if slot not in taken]
         if day == today:
@@ -200,12 +215,42 @@ async def list_specialist_future_grouped(
 
 
 async def list_specialist_day(
-    repo: AppointmentsRepo, *, specialist_id: int, day: date, tz: str
+    repo: AppointmentsRepo,
+    *,
+    specialist_id: int,
+    day: date,
+    tz: str,
+    series: SeriesContext | None = None,
 ) -> list[Appointment]:
-    """Appointments of the specialist on a single calendar day in `tz`."""
+    """Appointments of the specialist on a single calendar day in `tz`.
+
+    With `series`, virtual occurrences of active series that land on `day` are
+    merged in (id=None, series flagged) and the result is re-sorted by time.
+    """
     start = day_start_utc(day, tz)
     end = day_start_utc(day + timedelta(days=1), tz)
-    return await repo.list_for_specialist_between(specialist_id, start=start, end=end)
+    rows = await repo.list_for_specialist_between(specialist_id, start=start, end=end)
+    if series is None:
+        return rows
+    virtual = _virtual_on_day(series, day, tz)
+    return sorted([*rows, *virtual], key=lambda appt: appt.starts_at)
+
+
+def _virtual_on_day(series: SeriesContext, day: date, tz: str) -> list[Appointment]:
+    """Virtual series occurrences whose instant lands on `day`."""
+    occurrences: list[Appointment] = []
+    for s in series.series:
+        occurrences.extend(
+            occurrences_landing_in(
+                s,
+                series.for_series(s.id),
+                day,
+                day + timedelta(days=1),
+                tz,
+                series.today,
+            )
+        )
+    return occurrences
 
 
 async def _nearest_appt_day(
@@ -252,24 +297,25 @@ async def adjacent_shown_day(  # noqa: PLR0913
     return min(candidates) if forward else max(candidates)
 
 
-async def schedule_landing_day(
+async def schedule_landing_day(  # noqa: PLR0913
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
     working_days: set[int],
     tz: str,
     today: date,
+    series: SeriesContext | None = None,
 ) -> date:
     """Day the schedule opens on: today when it is shown, else the next shown day.
 
-    Today is shown when it is a working day or already has appointments. When it
-    is an empty non-working day, land on the nearest forward shown day; if there
-    is none, stay on today (it will render the "no appointments" message).
+    Today is shown when it is a working day or already has appointments (a series
+    repeat counts). When it is an empty non-working day, land on the nearest
+    forward shown day; if there is none, stay on today (renders "no appointments").
     """
     if today.weekday() in working_days:
         return today
     todays = await list_specialist_day(
-        repo, specialist_id=specialist_id, day=today, tz=tz
+        repo, specialist_id=specialist_id, day=today, tz=tz, series=series
     )
     if todays:
         return today
@@ -285,14 +331,41 @@ async def schedule_landing_day(
 
 
 async def list_specialist_week(
-    repo: AppointmentsRepo, *, specialist_id: int, tz: str, now: datetime
+    repo: AppointmentsRepo,
+    *,
+    specialist_id: int,
+    tz: str,
+    now: datetime,
+    series: SeriesContext | None = None,
 ) -> list[DayGroup]:
-    """Appointments from today through the next six days, grouped by day."""
+    """Appointments from today through the next six days, grouped by day.
+
+    With `series`, virtual occurrences of active series that land within the week
+    are merged in (id=None, series flagged).
+    """
     today = today_in_tz(now, tz)
     start = day_start_utc(today, tz)
     end = day_start_utc(today + timedelta(days=7), tz)
     rows = await repo.list_for_specialist_between(specialist_id, start=start, end=end)
+    if series is not None:
+        rows = sorted(
+            [*rows, *_virtual_in_week(series, today, tz)],
+            key=lambda appt: appt.starts_at,
+        )
     return group_by_day(rows, tz)
+
+
+def _virtual_in_week(series: SeriesContext, today: date, tz: str) -> list[Appointment]:
+    """Virtual occurrences whose instant falls within [today, today+7) days."""
+    week_end = today + timedelta(days=7)
+    occurrences: list[Appointment] = []
+    for s in series.series:
+        occurrences.extend(
+            occurrences_landing_in(
+                s, series.for_series(s.id), today, week_end, tz, series.today
+            )
+        )
+    return occurrences
 
 
 @dataclass(slots=True)
@@ -332,27 +405,59 @@ async def list_specialist_history_week(
 
 
 async def nearest_future_by_client(
-    repo: AppointmentsRepo, *, specialist_id: int, tz: str, now: datetime
+    repo: AppointmentsRepo,
+    *,
+    specialist_id: int,
+    tz: str,
+    now: datetime,
+    series: SeriesContext | None = None,
 ) -> dict[int, Appointment]:
-    """Map client_id → that client's earliest upcoming appointment (if any)."""
+    """Map client_id → that client's earliest upcoming appointment (if any).
+
+    A series' nearest repeat competes with real appointments for the earliest slot.
+    """
     boundary = day_start_utc(today_in_tz(now, tz), tz)
     rows = await repo.list_future_for_specialist(specialist_id, since=boundary)
     nearest: dict[int, Appointment] = {}
     for appt in rows:  # rows are ascending, so the first per client is the nearest
         nearest.setdefault(appt.client_id, appt)
+    if series is not None:
+        for s in series.series:
+            occ = next_occurrence(s, series.for_series(s.id), tz, series.today)
+            current = nearest.get(s.client_id)
+            if occ is not None and (
+                current is None or occ.starts_at < current.starts_at
+            ):
+                nearest[s.client_id] = occ
     return nearest
 
 
-async def list_client_future(
+async def list_client_future(  # noqa: PLR0913
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
     client_id: int,
     tz: str,
     now: datetime,
+    series: SeriesContext | None = None,
 ) -> list[Appointment]:
+    """Future one-off appointments of a client, plus the nearest repeat per series.
+
+    Only the single nearest occurrence of each of the client's active series is
+    added (marked virtual), not the infinite tail.
+    """
     boundary = day_start_utc(today_in_tz(now, tz), tz)
-    return await repo.list_future_for_client(specialist_id, client_id, since=boundary)
+    rows = await repo.list_future_for_client(specialist_id, client_id, since=boundary)
+    if series is None:
+        return rows
+    extra: list[Appointment] = []
+    for s in series.series:
+        if s.client_id != client_id:
+            continue
+        occ = next_occurrence(s, series.for_series(s.id), tz, series.today)
+        if occ is not None:
+            extra.append(occ)
+    return sorted([*rows, *extra], key=lambda appt: appt.starts_at)
 
 
 async def list_client_history_page(  # noqa: PLR0913

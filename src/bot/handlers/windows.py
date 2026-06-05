@@ -9,8 +9,13 @@ from src.bot.handlers.clients import SpecialistMiddleware
 from src.bot.messages import BotMessages, WindowsMessages
 from src.domain.schedule import format_ru_date, parse_working_days
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringExceptionsRepo,
+    SqlAlchemyRecurringRepo,
+)
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import DayWindows, list_free_windows
+from src.services.recurring import load_series_context
 from src.services.specialists import get_settings
 
 logger = logging.getLogger(__name__)
@@ -51,11 +56,21 @@ class WindowsHandlers:
             if not parse_working_days(specialist.working_days):
                 await message.answer(self._m.no_working_days)
                 return
+            # Future repeats of active series occupy slots too, so they must be
+            # subtracted from free windows (availability spec).
+            series = await load_series_context(
+                SqlAlchemyRecurringRepo(session),
+                SqlAlchemyRecurringExceptionsRepo(session),
+                specialist_id=specialist_id,
+                now=datetime.now(UTC),
+                tz=specialist.timezone,
+            )
             windows = await list_free_windows(
                 SqlAlchemyAppointmentsRepo(session),
                 specialist=specialist,
                 now=datetime.now(UTC),
                 days=_WINDOW_DAYS,
+                series=series,
             )
         await message.answer(render_windows(windows, self._m))
 

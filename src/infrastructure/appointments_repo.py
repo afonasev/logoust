@@ -1,6 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     delete,
     select,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +25,13 @@ class AppointmentORM(Base):
     __table_args__ = (
         Index("ix_appointments_specialist_starts", "specialist_id", "starts_at"),
         Index("ix_appointments_client_starts", "client_id", "starts_at"),
+        # Idempotency anchor for settle's insert-or-ignore of past occurrences.
+        Index(
+            "uq_appointments_series_origin",
+            "series_id",
+            "origin_date",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -34,6 +43,11 @@ class AppointmentORM(Base):
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set together on series occurrences (NULL on one-off appointments).
+    series_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("recurring_appointments.id"), nullable=True
+    )
+    origin_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -64,6 +78,8 @@ def to_domain(orm: AppointmentORM) -> Appointment:
         comment=orm.comment,
         created_at=_as_utc(orm.created_at),
         updated_at=_as_utc(orm.updated_at),
+        series_id=orm.series_id,
+        origin_date=orm.origin_date,
     )
 
 
@@ -189,6 +205,28 @@ class SqlAlchemyAppointmentsRepo:
         orm.updated_at = updated_at
         await self._session.commit()
         return to_domain(orm)
+
+    async def insert_occurrence(self, occurrence: Appointment) -> bool:
+        # Insert-or-ignore on UNIQUE(series_id, origin_date): settle may run
+        # concurrently or repeatedly, so a duplicate occurrence is a no-op, not an
+        # error. Returns True when a new row was actually written.
+        stmt = (
+            sqlite_insert(AppointmentORM)
+            .values(
+                specialist_id=occurrence.specialist_id,
+                client_id=occurrence.client_id,
+                starts_at=occurrence.starts_at,
+                comment=occurrence.comment,
+                series_id=occurrence.series_id,
+                origin_date=occurrence.origin_date,
+                created_at=occurrence.created_at,
+                updated_at=occurrence.updated_at,
+            )
+            .on_conflict_do_nothing(index_elements=["series_id", "origin_date"])
+        )
+        result = await self._session.execute(stmt)
+        await self._session.commit()
+        return result.rowcount > 0
 
     async def delete(self, appointment_id: int, specialist_id: int) -> bool:
         stmt = delete(AppointmentORM).where(

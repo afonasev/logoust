@@ -16,6 +16,7 @@ from src.domain.appointment import Appointment
 from src.domain.schedule import today_in_tz, wall_to_utc
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -302,7 +303,7 @@ async def test_pick_day_excludes_rescheduled_appointment(
     assert "🟢 14:00" in labels
 
 
-async def test_pick_slot_create_asks_comment(
+async def test_pick_slot_create_asks_regular(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
@@ -310,8 +311,24 @@ async def test_pick_slot_create_asks_comment(
     cb = _fake_callback("sched:slot:1400")
     state = _state(data={"flow": "create", "client_id": 1, "day": "2030-01-15"})
     await h.pick_slot(cb, state, _SP)
+    # The create flow now asks "make it regular?" before the comment.
+    assert state.store["hhmm"] == "14:00"
+    assert _texts(cb.message.answer)[0] == messages.schedule.ask_regular
+
+
+async def test_choose_regular_no_then_asks_comment(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:reg:0")
+    state = _state(
+        data={"flow": "create", "client_id": 1, "day": "2030-01-15", "hhmm": "14:00"}
+    )
+    await h.choose_regular(cb, state)
+    assert state.store["regular"] is False
     assert state.state == Schedule.comment
-    assert _texts(cb.message.answer)[0] == messages.schedule.ask_comment
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.ask_comment
 
 
 async def test_apply_comment_creates_appointment(
@@ -363,6 +380,34 @@ async def test_skip_comment_creates_without_comment(
     assert rows[0].comment is None
 
 
+async def test_regular_flow_creates_series(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("каждую неделю")
+    state = _state(
+        data={
+            "flow": "create",
+            "client_id": client_id,
+            "day": "2030-01-15",  # a Tuesday
+            "hhmm": "14:00",
+            "regular": True,
+        }
+    )
+    await h.apply_comment(msg, state, _SP)
+    # The regular branch creates a series (not a one-off) and shows its card.
+    assert messages.recurring.created in _texts(msg.answer)
+    async with session_factory() as session:
+        series = await SqlAlchemyRecurringRepo(session).list_active_for_specialist(_SP)
+    assert len(series) == 1
+    assert series[0].start_date == date(2030, 1, 15)
+    assert series[0].weekday == date(2030, 1, 15).weekday()
+    assert series[0].time_hhmm == "14:00"
+    assert series[0].comment == "каждую неделю"
+
+
 async def test_custom_time_valid_then_comment(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
@@ -376,7 +421,8 @@ async def test_custom_time_valid_then_comment(
     msg = _fake_message("14:37")
     await h.apply_custom_time(msg, state, _SP)
     assert state.store["hhmm"] == "14:37"
-    assert state.state == Schedule.comment
+    # After a valid time the create flow asks the "regular?" question.
+    assert _texts(msg.answer)[0] == messages.schedule.ask_regular
 
 
 async def test_custom_time_invalid_reasks(
@@ -495,16 +541,20 @@ async def test_confirm_then_do_delete(
     appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
     h = _handlers(messages, session_factory)
 
-    confirm_cb = _fake_callback(f"sched:del:{appt.id}")
+    back = f"clients:card:{client_id}"
+    confirm_cb = _fake_callback(f"sched:del:{appt.id}~{back}")
     await h.confirm_delete(confirm_cb)
     assert _texts(confirm_cb.message.edit_text)[0] == messages.schedule.confirm_delete
-    assert f"sched:delyes:{appt.id}" in _callbacks(
+    # The confirm step threads the origin through to the irreversible action.
+    assert f"sched:delyes:{appt.id}~{back}" in _callbacks(
         _markup(confirm_cb.message.edit_text)
     )
 
-    del_cb = _fake_callback(f"sched:delyes:{appt.id}")
+    del_cb = _fake_callback(f"sched:delyes:{appt.id}~{back}")
     await h.do_delete(del_cb, _SP)
     assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
+    # After deletion the back button returns to the card's origin, not the feed.
+    assert _callbacks(_markup(del_cb.message.edit_text)) == [back]
     async with session_factory() as session:
         assert appt.id is not None
         assert (

@@ -69,6 +69,18 @@ RU_WEEKDAYS: list[str] = [
     "воскресенье",
 ]
 
+# "Every <weekday>" in the grammatically correct accusative case (gender varies),
+# for the recurring-series rule line ("Каждый вторник", "Каждую среду", …).
+RU_WEEKDAYS_EVERY: list[str] = [
+    "Каждый понедельник",
+    "Каждый вторник",
+    "Каждую среду",
+    "Каждый четверг",
+    "Каждую пятницу",
+    "Каждую субботу",
+    "Каждое воскресенье",
+]
+
 # Short weekday headers for the inline calendar, Monday-first.
 RU_WEEKDAYS_SHORT: list[str] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]  # noqa: RUF001
 
@@ -176,6 +188,33 @@ def next_working_days(today: date, working_days: set[int], count: int) -> list[d
         if cursor.weekday() in working_days:
             result.append(cursor)
         cursor += timedelta(days=1)
+    return result
+
+
+def next_weekday_on_or_after(today: date, weekday: int) -> date:
+    """Nearest date with `weekday` (Mon=0…Sun=6) at `today` or later.
+
+    Returns `today` itself when it already falls on `weekday`.
+    """
+    days_ahead = (weekday - today.weekday()) % len(RU_WEEKDAYS)
+    return today + timedelta(days=days_ahead)
+
+
+def series_occurrences(
+    start_date: date, weekday: int, range_start: date, range_end: date
+) -> list[date]:
+    """Weekly occurrence dates in the half-open `[range_start, range_end)`.
+
+    The series repeats every 7 days from `start_date` (all on `weekday`). Only
+    dates at or after both `start_date` and `range_start` are returned, stepping
+    by a week until `range_end` is reached. An empty range yields `[]`.
+    """
+    lower = max(start_date, range_start)
+    cursor = next_weekday_on_or_after(lower, weekday)
+    result: list[date] = []
+    while cursor < range_end:
+        result.append(cursor)
+        cursor += timedelta(days=7)
     return result
 
 

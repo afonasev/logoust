@@ -5,8 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.windows import WindowsHandlers, render_windows
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
-from src.domain.schedule import next_working_days, today_in_tz
+from src.domain.recurring import RecurringAppointment
+from src.domain.schedule import format_ru_date, next_working_days, today_in_tz
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import DayWindows, create_appointment
 from src.services.invites import create_invite
@@ -98,3 +100,36 @@ async def test_show_renders_free_and_fully_booked_day(
     assert messages.windows.title in text
     assert messages.windows.empty_day in text  # the fully-booked target day
     assert "09:00" in text  # other working days still have free slots
+
+
+async def test_show_excludes_series_repeat_slot(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    now = datetime.now(UTC)
+    today = today_in_tz(now, _TZ)
+    # The next working day with the series' weekday gets a repeat at 14:00.
+    target = next_working_days(today, {0, 1, 2, 3, 4}, 5)[1]
+    async with session_factory() as session:
+        await SqlAlchemyRecurringRepo(session).add(
+            RecurringAppointment(
+                id=None,
+                specialist_id=sp_id,
+                client_id=1,
+                weekday=target.weekday(),
+                time_hhmm="14:00",
+                comment=None,
+                active=True,
+                start_date=target,
+                materialized_through=target,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    msg = _fake_message()
+    await _handlers(messages, session_factory).show(msg, sp_id)
+    text = _text(msg)
+    # The target day's 14:00 slot is occupied by the repeat → not a free window.
+    day_header = messages.windows.day_header.format(date=format_ru_date(target))
+    block = text.split(day_header, 1)[1].split("\n\n", 1)[0]
+    assert "14:00" not in block

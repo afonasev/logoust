@@ -69,6 +69,9 @@ class ScheduleMessages:
     ask_custom_time: str
     bad_time: str
     ask_comment: str
+    ask_regular: str
+    btn_regular_yes: str
+    btn_regular_no: str
     past_date: str
     created: str
     rescheduled: str
@@ -85,6 +88,34 @@ class ScheduleMessages:
     btn_history: str
     btn_today: str
     btn_week: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecurringMessages:
+    button: str
+    mark: str
+    pick_weekday: str
+    pick_move_date: str
+    pick_time: str
+    ask_custom_time: str
+    bad_time: str
+    ask_comment: str
+    created: str
+    not_found: str
+    card: str
+    line: str
+    btn_edit: str
+    btn_move_date: str
+    btn_skip_date: str
+    btn_stop: str
+    confirm_stop: str
+    btn_confirm_stop: str
+    stopped: str
+    cancelled: str
+    skip_confirm: str
+    btn_confirm_skip: str
+    skipped: str
+    moved: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +154,7 @@ class BotMessages:
     start: StartMessages
     clients: ClientsMessages
     schedule: ScheduleMessages
+    recurring: RecurringMessages
     settings: SettingsMessages
     windows: WindowsMessages
 
@@ -202,6 +234,9 @@ def load_messages(path: Path) -> BotMessages:
             ask_custom_time=_require(data, "schedule.ask_custom_time"),
             bad_time=_require(data, "schedule.bad_time"),
             ask_comment=_require(data, "schedule.ask_comment"),
+            ask_regular=_require(data, "schedule.ask_regular"),
+            btn_regular_yes=_require(data, "schedule.btn_regular_yes"),
+            btn_regular_no=_require(data, "schedule.btn_regular_no"),
             past_date=_require(data, "schedule.past_date"),
             created=_require(data, "schedule.created"),
             rescheduled=_require(data, "schedule.rescheduled"),
@@ -218,6 +253,32 @@ def load_messages(path: Path) -> BotMessages:
             btn_history=_require(data, "schedule.btn_history"),
             btn_today=_require(data, "schedule.btn_today"),
             btn_week=_require(data, "schedule.btn_week"),
+        ),
+        recurring=RecurringMessages(
+            button=_require(data, "recurring.button"),
+            mark=_require(data, "recurring.mark"),
+            pick_weekday=_require(data, "recurring.pick_weekday"),
+            pick_move_date=_require(data, "recurring.pick_move_date"),
+            pick_time=_require(data, "recurring.pick_time"),
+            ask_custom_time=_require(data, "recurring.ask_custom_time"),
+            bad_time=_require(data, "recurring.bad_time"),
+            ask_comment=_require(data, "recurring.ask_comment"),
+            created=_require(data, "recurring.created"),
+            not_found=_require(data, "recurring.not_found"),
+            card=_require(data, "recurring.card").strip(),
+            line=_require(data, "recurring.line"),
+            btn_edit=_require(data, "recurring.btn_edit"),
+            btn_move_date=_require(data, "recurring.btn_move_date"),
+            btn_skip_date=_require(data, "recurring.btn_skip_date"),
+            btn_stop=_require(data, "recurring.btn_stop"),
+            confirm_stop=_require(data, "recurring.confirm_stop"),
+            btn_confirm_stop=_require(data, "recurring.btn_confirm_stop"),
+            stopped=_require(data, "recurring.stopped"),
+            cancelled=_require(data, "recurring.cancelled"),
+            skip_confirm=_require(data, "recurring.skip_confirm"),
+            btn_confirm_skip=_require(data, "recurring.btn_confirm_skip"),
+            skipped=_require(data, "recurring.skipped"),
+            moved=_require(data, "recurring.moved"),
         ),
         settings=SettingsMessages(
             button=_require(data, "settings.button"),

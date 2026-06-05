@@ -189,12 +189,15 @@ def test_appointments_migration_creates_table_and_backfills_settings(
 
     insp = inspect(engine)
     appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    # series_id/origin_date are added later by 0006; this test runs to head.
     assert appt_columns == {
         "id",
         "specialist_id",
         "client_id",
         "starts_at",
         "comment",
+        "series_id",
+        "origin_date",
         "created_at",
         "updated_at",
     }
@@ -216,6 +219,71 @@ def test_appointments_migration_creates_table_and_backfills_settings(
     assert "appointments" not in insp.get_table_names()
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "timezone" not in specialist_columns
+    engine.dispose()
+
+
+def test_recurring_migration_adds_tables_and_appointment_columns(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0006 and seed a one-off appointment that predates the series cols.
+    command.upgrade(cfg, "0005")
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO clients "
+                "(specialist_id, child_name, contact_name, status, "
+                "created_at, updated_at) "
+                "VALUES (1, 'Маша', 'Мама', 'active', '2026-05-01', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO appointments "
+                "(specialist_id, client_id, starts_at, created_at, updated_at) "
+                "VALUES (1, 1, '2026-05-02 09:00', '2026-05-01', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    assert "recurring_appointments" in insp.get_table_names()
+    assert "recurring_exceptions" in insp.get_table_names()
+    appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    assert {"series_id", "origin_date"} <= appt_columns
+    index_names = {i["name"] for i in insp.get_indexes("appointments")}
+    assert "uq_appointments_series_origin" in index_names
+    recurring_indexes = {i["name"] for i in insp.get_indexes("recurring_appointments")}
+    assert "ix_recurring_specialist_active" in recurring_indexes
+
+    # The pre-existing one-off appointment backfills both columns to NULL.
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT series_id, origin_date FROM appointments")
+        ).one()
+    assert row == (None, None)
+
+    command.downgrade(cfg, "0005")
+    insp = inspect(engine)
+    assert "recurring_appointments" not in insp.get_table_names()
+    assert "recurring_exceptions" not in insp.get_table_names()
+    appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    assert "series_id" not in appt_columns
     engine.dispose()
 
 

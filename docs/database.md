@@ -45,6 +45,8 @@
 | `client_id`     | INTEGER  | нет  | FK → `clients.id`. Клиент записи.                  |
 | `starts_at`     | DATETIME | нет  | Время начала в **aware UTC** (настенное ↔ UTC через `timezone` специалиста). |
 | `comment`       | TEXT     | да   | Необязательный комментарий к записи.               |
+| `series_id`     | INTEGER  | да   | FK → `recurring_appointments.id`. `NULL` у разовой записи; заполнен у материализованной occurrence серии. |
+| `origin_date`   | DATE     | да   | Плановая дата occurrence серии. `NULL` у разовой записи. |
 | `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                       |
 | `updated_at`    | DATETIME | нет  | Обновляется при переносе (`starts_at`).            |
 
@@ -52,6 +54,7 @@
 
 - `ix_appointments_specialist_starts` — составной по `(specialist_id, starts_at)`. Обслуживает ленту специалиста (будущие/история по времени) и по левому префиксу — «все мои».
 - `ix_appointments_client_starts` — составной по `(client_id, starts_at)`. Обслуживает списки записей в карточке клиента.
+- `uq_appointments_series_origin` — **уникальный** по `(series_id, origin_date)`. Делает материализацию прошедших occurrence (`settle`) идемпотентной: повторная/конкурентная вставка той же occurrence — no-op (`INSERT … ON CONFLICT DO NOTHING`).
 
 Решения по схеме:
 
@@ -59,6 +62,45 @@
 - Удаление записи — жёсткое (физический `DELETE`), в отличие от клиентов; архива нет.
 - Перенос меняет только `starts_at` (и `updated_at`); `comment` и `client_id` не трогаются.
 - Пагинация истории — паттерн «`LIMIT page_size + 1`» (без `COUNT`), как у архива клиентов.
+- `series_id`/`origin_date` оба `NULL` ⇒ разовая запись (как раньше); оба заполнены ⇒ материализованная прошедшая occurrence регулярной серии — история и расписание прошедших дней читают её как обычную запись. FK на `recurring_appointments` объявлен в ORM, но в миграции колонка добавлена без inline-FK: SQLite не обеспечивает FK и не умеет ALTER-ить ограничение без пересоздания таблицы (см. [решение от 2026-06-05](decisions/2026-06-05_recurring_materialized_past_virtual_future.md)).
+
+### `recurring_appointments`
+
+Правило еженедельной регулярной записи («серия»). Принадлежит специалисту и клиенту; повторяется в свой день недели и настенное время бесконечно, пока `active`.
+
+| Колонка                | Тип        | NULL | Замечание                                              |
+| ---------------------- | ---------- | ---- | ------------------------------------------------------ |
+| `id`                   | INTEGER    | нет  | PK, autoincrement.                                     |
+| `specialist_id`        | INTEGER    | нет  | FK → `specialists.id`. Владелец серии.                 |
+| `client_id`            | INTEGER    | нет  | FK → `clients.id`. Клиент серии.                       |
+| `weekday`              | INTEGER    | нет  | День недели `date.weekday()` (Пн=0…Вс=6).             |
+| `time_hhmm`            | VARCHAR(5) | нет  | Настенное время `ЧЧ:ММ` в `timezone` специалиста; в UTC конвертируется отдельно на каждую дату (DST-safe). |
+| `comment`              | TEXT       | да   | Необязательный комментарий серии.                     |
+| `active`               | BOOLEAN    | нет  | `false` ⇒ серия остановлена: будущие повторы исчезают, прошлые строки остаются. |
+| `start_date`           | DATE       | нет  | Первая дата серии (ближайший `weekday` ≥ дня создания); якорь недельной сетки. |
+| `materialized_through` | DATE       | нет  | Докуда прошлое уже застывлено в строки `appointments`; дневной guard для `settle`. |
+| `created_at`           | DATETIME   | нет  | `lambda: datetime.now(UTC)`.                          |
+| `updated_at`           | DATETIME   | нет  | Обновляется при стопе/редактировании.                |
+
+Индексы:
+
+- `ix_recurring_specialist_active` — составной по `(specialist_id, active)`. Обслуживает выборку активных серий специалиста (`settle` и слияние виртуального будущего в чтениях).
+
+### `recurring_exceptions`
+
+Исключение для одной даты серии — унифицированно для пропуска и переноса.
+
+| Колонка         | Тип      | NULL | Замечание                                                       |
+| --------------- | -------- | ---- | --------------------------------------------------------------- |
+| `id`            | INTEGER  | нет  | PK, autoincrement.                                              |
+| `series_id`     | INTEGER  | нет  | FK → `recurring_appointments.id`. Серия исключения.            |
+| `original_date` | DATE     | нет  | Плановая дата серии, к которой относится исключение.           |
+| `new_starts_at` | DATETIME | да   | `NULL` ⇒ пропуск (occurrence нет); задано (aware UTC) ⇒ перенос на это время. |
+| `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                                    |
+
+Ограничения:
+
+- `uq_exception_series_date` — `UNIQUE(series_id, original_date)`. Пропуск и перенос одной даты — одна строка (`upsert`): повторный пропуск/перенос перезаписывает `new_starts_at`.
 
 ### `clients`
 
@@ -102,6 +144,7 @@
 - `0003_appointments.py` — создаёт таблицу `appointments` (FK на `specialists` и `clients`, два индекса) и добавляет в `specialists` колонки настроек расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) с `server_default`. Down-ревизия удаляет таблицу и колонки.
 - `0004_working_days.py` — добавляет в `specialists` колонку `working_days` (`String`, `server_default="0,1,2,3,4"` — Пн–Пт). Down-ревизия — `drop_column`.
 - `0005_client_telegram_link.py` — добавляет в `clients` колонки `invite_token`, `telegram_chat_id`, `linked_at` (все nullable) и уникальный индекс `ix_clients_invite_token`. Существующие строки → `NULL` (валидное «не приглашён»). Down-ревизия удаляет индекс и колонки.
+- `0006_recurring_appointments.py` — создаёт таблицы `recurring_appointments` (индекс `ix_recurring_specialist_active`) и `recurring_exceptions` (`UNIQUE(series_id, original_date)`); добавляет в `appointments` колонки `series_id`, `origin_date` (обе nullable) и уникальный индекс `uq_appointments_series_origin`. Существующие записи → `series_id`/`origin_date = NULL` (разовые, поведение не меняется). Колонки добавлены без inline-FK (SQLite не ALTER-ит ограничения). Down-ревизия удаляет индекс, колонки и обе таблицы.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

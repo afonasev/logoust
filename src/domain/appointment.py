@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 
@@ -12,6 +12,15 @@ class Appointment:
     comment: str | None
     created_at: datetime
     updated_at: datetime
+    # Recurring-series back-reference. Both NULL = a one-off appointment. A real
+    # row with both set is a materialised past occurrence; a virtual future
+    # occurrence is an Appointment with id=None and these set (see design.md).
+    series_id: int | None = None
+    origin_date: date | None = None
+    # Transient display flag (never persisted): True only for a plain future series
+    # occurrence, so lists show the 🔁 marker. A moved/rescheduled single date is
+    # individualised and carries False, so it is not marked as recurring.
+    recurring_mark: bool = False
 
 
 class AppointmentsRepo(Protocol):
@@ -61,4 +70,8 @@ class AppointmentsRepo(Protocol):
 
     async def delete(  # pragma: no cover
         self, appointment_id: int, specialist_id: int
+    ) -> bool: ...
+
+    async def insert_occurrence(  # pragma: no cover
+        self, occurrence: "Appointment"
     ) -> bool: ...

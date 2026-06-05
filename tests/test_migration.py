@@ -40,6 +40,10 @@ def test_initial_migration_creates_specialists_table(
         "telegram_username",
         "welcomed_at",
         "created_at",
+        "timezone",
+        "day_start",
+        "day_end",
+        "slot_minutes",
     }
     assert set(columns) == expected
 
@@ -97,4 +101,60 @@ def test_clients_migration_creates_clients_table(
     command.downgrade(cfg, "base")
     insp = inspect(engine)
     assert "clients" not in insp.get_table_names()
+    engine.dispose()
+
+
+def test_appointments_migration_creates_table_and_backfills_settings(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0003 and seed a specialist that predates the schedule settings.
+    command.upgrade(cfg, "0002")
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    assert appt_columns == {
+        "id",
+        "specialist_id",
+        "client_id",
+        "starts_at",
+        "comment",
+        "created_at",
+        "updated_at",
+    }
+    index_names = {i["name"] for i in insp.get_indexes("appointments")}
+    assert "ix_appointments_specialist_starts" in index_names
+    assert "ix_appointments_client_starts" in index_names
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT timezone, day_start, day_end, slot_minutes "
+                "FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).one()
+    assert row == ("Asia/Yekaterinburg", "09:00", "20:00", 60)
+
+    command.downgrade(cfg, "0002")
+    insp = inspect(engine)
+    assert "appointments" not in insp.get_table_names()
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "timezone" not in specialist_columns
     engine.dispose()

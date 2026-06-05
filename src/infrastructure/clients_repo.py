@@ -108,6 +108,22 @@ class SqlAlchemyClientsRepo:
         result = await self._session.execute(stmt)
         return [to_domain(orm) for orm in result.scalars().all()]
 
+    async def list_active(
+        self, specialist_id: int, *, limit: int, offset: int
+    ) -> list[Client]:
+        stmt = (
+            select(ClientORM)
+            .where(
+                ClientORM.specialist_id == specialist_id,
+                ClientORM.status == ClientStatus.ACTIVE.value,
+            )
+            .order_by(ClientORM.child_name)
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(stmt)
+        return [to_domain(orm) for orm in result.scalars().all()]
+
     async def list_archived(
         self, specialist_id: int, *, limit: int, offset: int
     ) -> list[Client]:

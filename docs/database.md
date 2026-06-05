@@ -14,6 +14,10 @@
 | `telegram_username` | VARCHAR(64) | да | `from_user.username` на момент `/start`. |
 | `welcomed_at`       | DATETIME  | да   | `NULL` ⇒ приглашение не использовано.    |
 | `created_at`        | DATETIME  | нет  | `lambda: datetime.now(UTC)`.             |
+| `timezone`          | VARCHAR(64) | нет | IANA-таймзона специалиста. Server-default `Asia/Yekaterinburg`. |
+| `day_start`         | VARCHAR(5) | нет | Начало рабочего дня `ЧЧ:ММ`. Server-default `09:00`. |
+| `day_end`           | VARCHAR(5) | нет | Конец рабочего дня `ЧЧ:ММ`. Server-default `20:00`. |
+| `slot_minutes`      | INTEGER   | нет  | Длина слота в минутах. Server-default `60`. |
 
 Индексы:
 
@@ -26,6 +30,33 @@
 - `welcomed_at` служит и таймстампом, и маркером идемпотентности: повторный `/start` по тому же токену не приведёт к повторной записи.
 - `telegram_username` — необязательное аудит-поле. Может быть `NULL` для пользователей без публичного username.
 - Поле `name` сознательно не вводится — по требованию заказчика.
+- Настройки расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) добавлены с `server_default`, чтобы у уже онбординнутых специалистов сразу была рабочая сетка. `timezone` управляет конверсией настенного времени записей ↔ UTC (см. [решение от 2026-06-04](decisions/2026-06-04_appointment_time_in_utc_per_specialist_tz.md)).
+
+### `appointments`
+
+Записи клиента на приём. Принадлежат одновременно специалисту и клиенту; все выборки фильтруются по `specialist_id`.
+
+| Колонка         | Тип      | NULL | Замечание                                          |
+| --------------- | -------- | ---- | -------------------------------------------------- |
+| `id`            | INTEGER  | нет  | PK, autoincrement.                                 |
+| `specialist_id` | INTEGER  | нет  | FK → `specialists.id`. Владелец записи.            |
+| `client_id`     | INTEGER  | нет  | FK → `clients.id`. Клиент записи.                  |
+| `starts_at`     | DATETIME | нет  | Время начала в **aware UTC** (настенное ↔ UTC через `timezone` специалиста). |
+| `comment`       | TEXT     | да   | Необязательный комментарий к записи.               |
+| `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                       |
+| `updated_at`    | DATETIME | нет  | Обновляется при переносе (`starts_at`).            |
+
+Индексы:
+
+- `ix_appointments_specialist_starts` — составной по `(specialist_id, starts_at)`. Обслуживает ленту специалиста (будущие/история по времени) и по левому префиксу — «все мои».
+- `ix_appointments_client_starts` — составной по `(client_id, starts_at)`. Обслуживает списки записей в карточке клиента.
+
+Решения по схеме:
+
+- `starts_at` хранится в UTC; граница «будущее/история» и группировка по дням считаются по календарному дню в `timezone` специалиста, а не по времени сервера.
+- Удаление записи — жёсткое (физический `DELETE`), в отличие от клиентов; архива нет.
+- Перенос меняет только `starts_at` (и `updated_at`); `comment` и `client_id` не трогаются.
+- Пагинация истории — паттерн «`LIMIT page_size + 1`» (без `COUNT`), как у архива клиентов.
 
 ### `clients`
 
@@ -61,6 +92,7 @@
 - Каталог: `alembic/versions/`.
 - `0001_initial.py` — создаёт таблицу `specialists` и оба индекса.
 - `0002_clients.py` — создаёт таблицу `clients`, FK на `specialists.id` и индекс `ix_clients_specialist_status`.
+- `0003_appointments.py` — создаёт таблицу `appointments` (FK на `specialists` и `clients`, два индекса) и добавляет в `specialists` колонки настроек расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) с `server_default`. Down-ревизия удаляет таблицу и колонки.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

@@ -17,6 +17,7 @@ from src.services.clients import (
     add_client,
     archive_client,
     edit_client_field,
+    list_active_page,
     list_archived_page,
     list_clients,
     restore_client,
@@ -253,6 +254,28 @@ async def test_list_archived_page_flags_and_trimming(session: AsyncSession):
 
     p1 = await list_archived_page(repo, specialist_id=1, page=1, page_size=2)
     assert len(p1.clients) == 1
+    assert p1.has_prev is True
+    assert p1.has_next is False
+
+
+async def test_list_active_page_sorted_and_paginated(session: AsyncSession):
+    repo, _ = await _add(session, child_name="Архивный")
+    archived = await repo.list_by_status(1, ClientStatus.ACTIVE)
+    assert archived[0].id is not None
+    await archive_client(repo, client_id=archived[0].id, specialist_id=1)
+    for name in ["Яков", "Аня", "Боря"]:
+        await _add(session, child_name=name)
+
+    p0 = await list_active_page(repo, specialist_id=1, page=0, page_size=2)
+    assert [c.child_name for c in p0.clients] == [
+        "Аня",
+        "Боря",
+    ]  # by name, archived out
+    assert p0.has_prev is False
+    assert p0.has_next is True
+
+    p1 = await list_active_page(repo, specialist_id=1, page=1, page_size=2)
+    assert [c.child_name for c in p1.clients] == ["Яков"]
     assert p1.has_prev is True
     assert p1.has_next is False
 

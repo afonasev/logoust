@@ -1,6 +1,13 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+
+# Defaults for a freshly invited specialist; also the migration's server-defaults.
+DEFAULT_TIMEZONE = "Asia/Yekaterinburg"
+DEFAULT_DAY_START = "09:00"
+DEFAULT_DAY_END = "20:00"
+DEFAULT_SLOT_MINUTES = 60
 
 
 class ChatIdConflictError(Exception):
@@ -15,6 +22,11 @@ class Specialist:
     telegram_username: str | None
     welcomed_at: datetime | None
     created_at: datetime
+    # Schedule settings drive slot generation and wall-time ↔ UTC conversion.
+    timezone: str = DEFAULT_TIMEZONE
+    day_start: str = DEFAULT_DAY_START
+    day_end: str = DEFAULT_DAY_END
+    slot_minutes: int = DEFAULT_SLOT_MINUTES
 
 
 class SpecialistsRepo(Protocol):
@@ -37,3 +49,11 @@ class SpecialistsRepo(Protocol):
         telegram_username: str | None,
         welcomed_at: datetime,
     ) -> None: ...
+
+    async def get(  # pragma: no cover
+        self, specialist_id: int
+    ) -> Specialist | None: ...
+
+    async def update_settings(  # pragma: no cover
+        self, specialist_id: int, fields: Mapping[str, object]
+    ) -> Specialist | None: ...

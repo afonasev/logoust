@@ -35,7 +35,7 @@ class EditResult(enum.Enum):
 
 
 @dataclass(slots=True)
-class ArchivePage:
+class ClientsPage:
     clients: list[Client]
     page: int
     has_prev: bool
@@ -190,16 +190,36 @@ async def list_clients(
     return await repo.list_by_status(specialist_id, status)
 
 
-async def list_archived_page(
-    repo: ClientsRepo, *, specialist_id: int, page: int, page_size: int
-) -> ArchivePage:
+async def client_name_map(repo: ClientsRepo, *, specialist_id: int) -> dict[int, str]:
+    """Map client_id → child_name across both statuses for schedule rendering."""
+    active = await repo.list_by_status(specialist_id, ClientStatus.ACTIVE)
+    archived = await repo.list_by_status(specialist_id, ClientStatus.ARCHIVED)
+    return {c.id: c.child_name for c in (*active, *archived) if c.id is not None}
+
+
+def _to_page(rows: list[Client], *, page: int, page_size: int) -> ClientsPage:
     # Fetch one extra row to detect a next page without a separate COUNT query.
-    rows = await repo.list_archived(
-        specialist_id, limit=page_size + 1, offset=page * page_size
-    )
-    return ArchivePage(
+    return ClientsPage(
         clients=rows[:page_size],
         page=page,
         has_prev=page > 0,
         has_next=len(rows) > page_size,
     )
+
+
+async def list_active_page(
+    repo: ClientsRepo, *, specialist_id: int, page: int, page_size: int
+) -> ClientsPage:
+    rows = await repo.list_active(
+        specialist_id, limit=page_size + 1, offset=page * page_size
+    )
+    return _to_page(rows, page=page, page_size=page_size)
+
+
+async def list_archived_page(
+    repo: ClientsRepo, *, specialist_id: int, page: int, page_size: int
+) -> ClientsPage:
+    rows = await repo.list_archived(
+        specialist_id, limit=page_size + 1, offset=page * page_size
+    )
+    return _to_page(rows, page=page, page_size=page_size)

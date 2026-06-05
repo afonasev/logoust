@@ -30,6 +30,7 @@ class ClientsMessages:
     ask_phone: str
     ask_telegram: str
     added: str
+    archive_confirm: str
     archived: str
     restored: str
     updated: str
@@ -41,9 +42,69 @@ class ClientsMessages:
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleMessages:
+    button: str
+    dash: str
+    day_title: str
+    day_empty: str
+    week_title: str
+    week_empty: str
+    history_title: str
+    history_empty: str
+    client_future_empty: str
+    client_history_title: str
+    client_history_empty: str
+    day_header: str
+    line: str
+    line_full: str
+    comment_suffix: str
+    pick_date: str
+    pick_time: str
+    ask_custom_time: str
+    bad_time: str
+    ask_comment: str
+    past_date: str
+    created: str
+    rescheduled: str
+    deleted: str
+    not_found: str
+    confirm_delete: str
+    card: str
+    btn_add: str
+    btn_client_history: str
+    btn_reschedule: str
+    btn_delete: str
+    btn_confirm_delete: str
+    btn_other_time: str
+    btn_history: str
+    btn_today: str
+    btn_week: str
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsMessages:
+    button: str
+    title: str
+    btn_timezone: str
+    btn_day_start: str
+    btn_day_end: str
+    btn_slot: str
+    pick_timezone: str
+    ask_day_start: str
+    ask_day_end: str
+    ask_slot: str
+    bad_time: str
+    bad_slot: str
+    saved: str
+    not_found: str
+
+
+@dataclass(frozen=True, slots=True)
 class BotMessages:
     start: StartMessages
     clients: ClientsMessages
+    schedule: ScheduleMessages
+    settings: SettingsMessages
 
 
 def _require(data: dict[str, Any], path: str) -> Any:
@@ -84,6 +145,7 @@ def load_messages(path: Path) -> BotMessages:
             ask_phone=_require(data, "clients.ask_phone"),
             ask_telegram=_require(data, "clients.ask_telegram"),
             added=_require(data, "clients.added"),
+            archive_confirm=_require(data, "clients.archive_confirm"),
             archived=_require(data, "clients.archived"),
             restored=_require(data, "clients.restored"),
             updated=_require(data, "clients.updated"),
@@ -92,6 +154,60 @@ def load_messages(path: Path) -> BotMessages:
             need_contact_channel=_require(data, "clients.need_contact_channel"),
             edit_prompt=_require(data, "clients.edit_prompt"),
             not_found=_require(data, "clients.not_found"),
+        ),
+        schedule=ScheduleMessages(
+            button=_require(data, "schedule.button"),
+            dash=_require(data, "schedule.dash"),
+            day_title=_require(data, "schedule.day_title"),
+            day_empty=_require(data, "schedule.day_empty"),
+            week_title=_require(data, "schedule.week_title"),
+            week_empty=_require(data, "schedule.week_empty"),
+            history_title=_require(data, "schedule.history_title"),
+            history_empty=_require(data, "schedule.history_empty"),
+            client_future_empty=_require(data, "schedule.client_future_empty"),
+            client_history_title=_require(data, "schedule.client_history_title"),
+            client_history_empty=_require(data, "schedule.client_history_empty"),
+            day_header=_require(data, "schedule.day_header"),
+            line=_require(data, "schedule.line"),
+            line_full=_require(data, "schedule.line_full"),
+            comment_suffix=_require(data, "schedule.comment_suffix"),
+            pick_date=_require(data, "schedule.pick_date"),
+            pick_time=_require(data, "schedule.pick_time"),
+            ask_custom_time=_require(data, "schedule.ask_custom_time"),
+            bad_time=_require(data, "schedule.bad_time"),
+            ask_comment=_require(data, "schedule.ask_comment"),
+            past_date=_require(data, "schedule.past_date"),
+            created=_require(data, "schedule.created"),
+            rescheduled=_require(data, "schedule.rescheduled"),
+            deleted=_require(data, "schedule.deleted"),
+            not_found=_require(data, "schedule.not_found"),
+            confirm_delete=_require(data, "schedule.confirm_delete"),
+            card=_require(data, "schedule.card").strip(),
+            btn_add=_require(data, "schedule.btn_add"),
+            btn_client_history=_require(data, "schedule.btn_client_history"),
+            btn_reschedule=_require(data, "schedule.btn_reschedule"),
+            btn_delete=_require(data, "schedule.btn_delete"),
+            btn_confirm_delete=_require(data, "schedule.btn_confirm_delete"),
+            btn_other_time=_require(data, "schedule.btn_other_time"),
+            btn_history=_require(data, "schedule.btn_history"),
+            btn_today=_require(data, "schedule.btn_today"),
+            btn_week=_require(data, "schedule.btn_week"),
+        ),
+        settings=SettingsMessages(
+            button=_require(data, "settings.button"),
+            title=_require(data, "settings.title").strip(),
+            btn_timezone=_require(data, "settings.btn_timezone"),
+            btn_day_start=_require(data, "settings.btn_day_start"),
+            btn_day_end=_require(data, "settings.btn_day_end"),
+            btn_slot=_require(data, "settings.btn_slot"),
+            pick_timezone=_require(data, "settings.pick_timezone"),
+            ask_day_start=_require(data, "settings.ask_day_start"),
+            ask_day_end=_require(data, "settings.ask_day_end"),
+            ask_slot=_require(data, "settings.ask_slot"),
+            bad_time=_require(data, "settings.bad_time"),
+            bad_slot=_require(data, "settings.bad_slot"),
+            saved=_require(data, "settings.saved"),
+            not_found=_require(data, "settings.not_found"),
         ),
     )
 

@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 import logging
 from typing import Any, cast
 
@@ -18,25 +18,30 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.messages import BotMessages, ClientsMessages
+from src.bot.messages import BotMessages, ClientsMessages, ScheduleMessages
+from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
+from src.domain.schedule import format_ru_short, utc_to_wall
+from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.appointments import list_client_future, nearest_future_by_client
 from src.services.clients import (
-    ArchivePage,
+    ClientsPage,
     EditResult,
     NewClient,
     add_client,
     archive_client,
     edit_client_field,
+    list_active_page,
     list_archived_page,
-    list_clients,
     restore_client,
 )
 
 logger = logging.getLogger(__name__)
 
-# Archive list is paginated; active list is short enough to show in full.
+# Both the active home list and the archive are paginated.
+_ACTIVE_PAGE_SIZE = 8
 _ARCHIVE_PAGE_SIZE = 8
 
 # Field keys must match the editable fields accepted by services.edit_client_field.
@@ -50,10 +55,10 @@ _FIELD_LABELS = {
 }
 
 _BTN_ADD = "➕ Добавить"  # noqa: RUF001
-_BTN_ACTIVE = "📋 Активные"
 _BTN_ARCHIVED = "🗄 Архив"
 _BTN_EDIT = "✏️ Изменить"
 _BTN_ARCHIVE = "📦 В архив"  # noqa: RUF001
+_BTN_ARCHIVE_YES = "📦 Да, в архив"
 _BTN_RESTORE = "↩️ Вернуть"
 _BTN_BACK = "⬅️ Назад"
 _BTN_MENU = "⬅️ Меню"
@@ -80,35 +85,87 @@ class EditClient(StatesGroup):
 
 
 def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура специалиста; рядом позже встанет «Расписание»."""
+    """Постоянная клавиатура специалиста: клиенты, расписание, настройки."""
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=messages.clients.button)]],
+        keyboard=[
+            [
+                KeyboardButton(text=messages.clients.button),
+                KeyboardButton(text=messages.schedule.button),
+            ],
+            [KeyboardButton(text=messages.settings.button)],
+        ],
         resize_keyboard=True,
     )
 
 
-def _menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=_BTN_ADD, callback_data=_CB_ADD)],
-            [
-                InlineKeyboardButton(
-                    text=_BTN_ACTIVE, callback_data="clients:list:active"
-                ),
-                InlineKeyboardButton(
-                    text=_BTN_ARCHIVED, callback_data="clients:list:archived"
-                ),
-            ],
+def _appt_label(
+    appt: Appointment, tz: str, sm: ScheduleMessages, *, with_comment: bool = True
+) -> str:
+    wall = utc_to_wall(appt.starts_at, tz)
+    comment = (
+        sm.comment_suffix.format(comment=appt.comment)
+        if with_comment and appt.comment
+        else ""
+    )
+    return f"📅 {format_ru_short(wall.date())} {wall:%H:%M}{comment}"
+
+
+def _client_row(
+    client: Client,
+    nearest: dict[int, Appointment],
+    tz: str,
+    sm: ScheduleMessages,
+    *,
+    page: int,
+) -> list[InlineKeyboardButton]:
+    # Two columns: the client (→ card) and its nearest appointment (→ that
+    # appointment's card, to reschedule), or a "create appointment" button if none.
+    # Both carry the active-list page as the back target. No comment on the appt
+    # button here — it stays compact in the list.
+    back = f"clients:active:{page}"
+    client_btn = InlineKeyboardButton(
+        text=client.child_name, callback_data=f"clients:card:{client.id}~{back}"
+    )
+    appt = nearest.get(client.id) if client.id is not None else None
+    if appt is None:
+        second = InlineKeyboardButton(
+            text=sm.btn_add, callback_data=f"sched:new:{client.id}"
+        )
+    else:
+        second = InlineKeyboardButton(
+            text=_appt_label(appt, tz, sm, with_comment=False),
+            callback_data=f"sched:card:{appt.id}~{back}",
+        )
+    return [client_btn, second]
+
+
+def _active_keyboard(
+    page: ClientsPage, nearest: dict[int, Appointment], tz: str, sm: ScheduleMessages
+) -> InlineKeyboardMarkup:
+    rows = [_client_row(c, nearest, tz, sm, page=page.page) for c in page.clients]
+    nav = []
+    if page.has_prev:
+        nav.append(
+            InlineKeyboardButton(
+                text=_BTN_PREV, callback_data=f"clients:active:{page.page - 1}"
+            )
+        )
+    if page.has_next:
+        nav.append(
+            InlineKeyboardButton(
+                text=_BTN_NEXT, callback_data=f"clients:active:{page.page + 1}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [
+            InlineKeyboardButton(text=_BTN_ADD, callback_data=_CB_ADD),
+            InlineKeyboardButton(
+                text=_BTN_ARCHIVED, callback_data="clients:list:archived"
+            ),
         ]
     )
-
-
-def _list_keyboard(clients: list[Client]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=c.child_name, callback_data=f"clients:card:{c.id}")]
-        for c in clients
-    ]
-    rows.append([InlineKeyboardButton(text=_BTN_MENU, callback_data=_CB_MENU)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -116,13 +173,18 @@ def _fmt_date(value: datetime | None) -> str:
     return value.strftime("%d.%m.%Y") if value is not None else ""
 
 
-def _archive_keyboard(page: ArchivePage) -> InlineKeyboardMarkup:
+def _archive_keyboard(page: ClientsPage) -> InlineKeyboardMarkup:
+    back = f"clients:arch:{page.page}"  # back from a card returns to this archive page
     rows = []
     for c in page.clients:
         date = _fmt_date(c.archived_at)
         label = f"{c.child_name} · {date}" if date else c.child_name
         rows.append(
-            [InlineKeyboardButton(text=label, callback_data=f"clients:card:{c.id}")]
+            [
+                InlineKeyboardButton(
+                    text=label, callback_data=f"clients:card:{c.id}~{back}"
+                )
+            ]
         )
     nav = []
     if page.has_prev:
@@ -143,31 +205,76 @@ def _archive_keyboard(page: ArchivePage) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _card_keyboard(client: Client) -> InlineKeyboardMarkup:
+def _future_button(
+    appt: Appointment, tz: str, m: ScheduleMessages
+) -> list[InlineKeyboardButton]:
+    # Tapping a future appointment opens its card (reschedule / cancel there);
+    # back from there returns to this client's card.
+    back = f"clients:card:{appt.client_id}"
+    return [
+        InlineKeyboardButton(
+            text=_appt_label(appt, tz, m),
+            callback_data=f"sched:card:{appt.id}~{back}",
+        )
+    ]
+
+
+def _card_keyboard(
+    client: Client, appts: list[Appointment], tz: str, m: ScheduleMessages, back: str
+) -> InlineKeyboardMarkup:
     if client.status is ClientStatus.ARCHIVED:
         status_btn = InlineKeyboardButton(
             text=_BTN_RESTORE, callback_data=f"clients:restore:{client.id}"
         )
     else:
+        # Archiving asks for confirmation first (clients:archiveask:<id>).
         status_btn = InlineKeyboardButton(
-            text=_BTN_ARCHIVE, callback_data=f"clients:archive:{client.id}"
+            text=_BTN_ARCHIVE, callback_data=f"clients:archiveask:{client.id}"
         )
+    rows = [_future_button(appt, tz, m) for appt in appts]
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text=m.btn_add, callback_data=f"sched:new:{client.id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_BTN_EDIT, callback_data=f"clients:edit:{client.id}"
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_client_history,
+                    callback_data=f"sched:chist:{client.id}:0",
+                ),
+                status_btn,
+            ],
+            [InlineKeyboardButton(text=_BTN_BACK, callback_data=back)],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _archive_confirm_keyboard(client_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=_BTN_EDIT, callback_data=f"clients:edit:{client.id}"
-                )
-            ],
-            [status_btn],
-            [
+                    text=_BTN_ARCHIVE_YES, callback_data=f"clients:archive:{client_id}"
+                ),
                 InlineKeyboardButton(
-                    text=_BTN_BACK,
-                    callback_data=f"clients:list:{client.status.value}",
-                )
-            ],
+                    text=_BTN_CANCEL, callback_data=f"clients:card:{client_id}"
+                ),
+            ]
         ]
     )
+
+
+def _back_target(status: ClientStatus) -> str:
+    # Active cards return to the paginated active home; archived to the archive.
+    if status is ClientStatus.ARCHIVED:
+        return "clients:list:archived"
+    return "clients:active:0"
 
 
 def _edit_fields_keyboard(client_id: int) -> InlineKeyboardMarkup:
@@ -242,10 +349,11 @@ def _parse_id(callback_data: str | None) -> int:
 
 
 def _parse_page(callback_data: str | None) -> int:
-    # "clients:arch:<n>" carries the page; the archive entry point implies page 0.
-    if callback_data and callback_data.startswith("clients:arch:"):
-        return int(callback_data.rsplit(":", 1)[1])
-    return 0
+    # Paginated callbacks (clients:active:<n>, clients:arch:<n>) carry the page in
+    # the last segment; entry points without a number (e.g. clients:list:archived)
+    # imply page 0.
+    last = (callback_data or "").rsplit(":", 1)[-1]
+    return int(last) if last.isdigit() else 0
 
 
 class SpecialistMiddleware(BaseMiddleware):
@@ -283,34 +391,61 @@ class ClientsHandlers:
         self._m = messages.clients
         self._session_factory = session_factory
 
-    # --- menu -----------------------------------------------------------------
+    # --- home: active clients -------------------------------------------------
 
-    async def show_menu(self, message: Message, state: FSMContext) -> None:
-        # Pressing the reply button is also the escape hatch out of any wizard.
-        await state.clear()
-        await message.answer(self._m.menu_title, reply_markup=_menu_keyboard())
-
-    async def open_menu(self, callback: CallbackQuery, state: FSMContext) -> None:
-        await state.clear()
-        await _callback_message(callback).edit_text(
-            self._m.menu_title, reply_markup=_menu_keyboard()
+    async def _active_view(
+        self, specialist_id: int, page_num: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        async with self._session_factory() as session:
+            page = await list_active_page(
+                SqlAlchemyClientsRepo(session),
+                specialist_id=specialist_id,
+                page=page_num,
+                page_size=_ACTIVE_PAGE_SIZE,
+            )
+            specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
+            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            nearest = await nearest_future_by_client(
+                SqlAlchemyAppointmentsRepo(session),
+                specialist_id=specialist_id,
+                tz=specialist.timezone,
+                now=datetime.now(UTC),
+            )
+        if page_num == 0 and not page.clients:
+            text = self._m.empty_active
+        else:
+            text = self._m.list_active_title
+        keyboard = _active_keyboard(
+            page, nearest, specialist.timezone, self._messages.schedule
         )
+        return text, keyboard
+
+    async def show_menu(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        # Pressing the reply button opens the active list and is also the escape
+        # hatch out of any active wizard.
+        await state.clear()
+        text, keyboard = await self._active_view(specialist_id, 0)
+        await message.answer(text, reply_markup=keyboard)
+
+    async def open_menu(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        await state.clear()
+        await self._edit_active(callback, specialist_id, 0)
+
+    async def show_active(self, callback: CallbackQuery, specialist_id: int) -> None:
+        await self._edit_active(callback, specialist_id, _parse_page(callback.data))
+
+    async def _edit_active(
+        self, callback: CallbackQuery, specialist_id: int, page_num: int
+    ) -> None:
+        text, keyboard = await self._active_view(specialist_id, page_num)
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
     # --- listing & card -------------------------------------------------------
-
-    async def show_list(self, callback: CallbackQuery, specialist_id: int) -> None:
-        async with self._session_factory() as session:
-            clients = await list_clients(
-                SqlAlchemyClientsRepo(session),
-                specialist_id=specialist_id,
-                status=ClientStatus.ACTIVE,
-            )
-        text = self._m.list_active_title if clients else self._m.empty_active
-        await _callback_message(callback).edit_text(
-            text, reply_markup=_list_keyboard(clients)
-        )
-        await callback.answer()
 
     async def show_archive(self, callback: CallbackQuery, specialist_id: int) -> None:
         page_num = _parse_page(callback.data)
@@ -331,10 +466,18 @@ class ClientsHandlers:
         await callback.answer()
 
     async def show_card(self, callback: CallbackQuery, specialist_id: int) -> None:
-        await self._open_card(callback, specialist_id, _parse_id(callback.data))
+        # "clients:card:<id>[~<back-callback>]" — back returns to the origin.
+        head, _, back = (callback.data or "").partition("~")
+        await self._open_card(
+            callback, specialist_id, int(head.rsplit(":", 1)[1]), back or None
+        )
 
     async def _open_card(
-        self, callback: CallbackQuery, specialist_id: int, client_id: int
+        self,
+        callback: CallbackQuery,
+        specialist_id: int,
+        client_id: int,
+        back: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             client = await SqlAlchemyClientsRepo(session).get_for_specialist(
@@ -343,12 +486,45 @@ class ClientsHandlers:
         if client is None:
             await callback.answer(self._m.not_found, show_alert=True)
             return
-        await _callback_message(callback).edit_text(
-            render_card(client, self._m), reply_markup=_card_keyboard(client)
-        )
+        text, keyboard = await self._card_view(client, specialist_id, back)
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
+    async def _card_view(
+        self, client: Client, specialist_id: int, back: str | None = None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        # Card = general info + the client's upcoming appointments as buttons
+        # (tap to reschedule / cancel on the appointment card).
+        assert client.id is not None  # noqa: S101 — persisted clients always have id
+        async with self._session_factory() as session:
+            specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
+            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            appts = await list_client_future(
+                SqlAlchemyAppointmentsRepo(session),
+                specialist_id=specialist_id,
+                client_id=client.id,
+                tz=specialist.timezone,
+                now=datetime.now(UTC),
+            )
+        sm = self._messages.schedule
+        # Future appointments are buttons below; no header needed. Note only when
+        # there are none. Back defaults to the active list / archive by status.
+        text = render_card(client, self._m)
+        if not appts:
+            text = f"{text}\n\n{sm.client_future_empty}"
+        keyboard = _card_keyboard(
+            client, appts, specialist.timezone, sm, back or _back_target(client.status)
+        )
+        return text, keyboard
+
     # --- archive / restore ----------------------------------------------------
+
+    async def ask_archive(self, callback: CallbackQuery) -> None:
+        client_id = _parse_id(callback.data)
+        await _callback_message(callback).edit_text(
+            self._m.archive_confirm, reply_markup=_archive_confirm_keyboard(client_id)
+        )
+        await callback.answer()
 
     async def archive(self, callback: CallbackQuery, specialist_id: int) -> None:
         client_id = _parse_id(callback.data)
@@ -453,14 +629,16 @@ class ClientsHandlers:
             return
         await state.clear()
         await target.answer(self._m.added)
-        await target.answer(
-            render_card(client, self._m), reply_markup=_card_keyboard(client)
-        )
+        text, keyboard = await self._card_view(client, specialist_id)
+        await target.answer(text, reply_markup=keyboard)
 
-    async def cancel(self, callback: CallbackQuery, state: FSMContext) -> None:
+    async def cancel(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         await state.clear()
+        _, keyboard = await self._active_view(specialist_id, 0)
         await _callback_message(callback).edit_text(
-            self._m.cancelled, reply_markup=_menu_keyboard()
+            self._m.cancelled, reply_markup=keyboard
         )
         await callback.answer()
 
@@ -502,7 +680,8 @@ class ClientsHandlers:
             )
             return
         await state.clear()
-        await message.answer(self._m.updated, reply_markup=_menu_keyboard())
+        _, keyboard = await self._active_view(specialist_id, 0)
+        await message.answer(self._m.updated, reply_markup=keyboard)
 
 
 def build_router(
@@ -531,12 +710,15 @@ def build_router(
     router.callback_query.register(
         h.skip_telegram, F.data == _CB_SKIP, AddClient.contact_telegram
     )
-    router.callback_query.register(h.show_list, F.data == "clients:list:active")
+    router.callback_query.register(h.show_active, F.data.startswith("clients:active:"))
     router.callback_query.register(h.show_archive, F.data == "clients:list:archived")
     router.callback_query.register(h.show_archive, F.data.startswith("clients:arch:"))
     router.callback_query.register(h.show_card, F.data.startswith("clients:card:"))
     router.callback_query.register(h.start_edit, F.data.startswith("clients:edit:"))
     router.callback_query.register(h.pick_field, F.data.startswith("clients:setfield:"))
+    router.callback_query.register(
+        h.ask_archive, F.data.startswith("clients:archiveask:")
+    )
     router.callback_query.register(h.archive, F.data.startswith("clients:archive:"))
     router.callback_query.register(h.restore, F.data.startswith("clients:restore:"))
     return router

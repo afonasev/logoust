@@ -128,6 +128,47 @@ def test_to_domain_maps_orm_fields():
     assert domain.welcomed_at is None
 
 
+async def test_add_applies_schedule_defaults(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-defaults"))
+    assert saved.timezone == "Asia/Yekaterinburg"
+    assert saved.day_start == "09:00"
+    assert saved.day_end == "20:00"
+    assert saved.slot_minutes == 60
+
+
+async def test_get_returns_specialist_with_settings(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-get"))
+    assert saved.id is not None
+    fetched = await repo.get(saved.id)
+    assert fetched is not None
+    assert fetched.id == saved.id
+    assert fetched.day_start == "09:00"
+
+
+async def test_get_returns_none_when_missing(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    assert await repo.get(404) is None
+
+
+async def test_update_settings_persists_fields(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-upd"))
+    assert saved.id is not None
+    updated = await repo.update_settings(
+        saved.id, {"timezone": "Europe/Moscow", "slot_minutes": 45}
+    )
+    assert updated is not None
+    assert updated.timezone == "Europe/Moscow"
+    assert updated.slot_minutes == 45
+
+
+async def test_update_settings_returns_none_when_missing(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    assert await repo.update_settings(404, {"slot_minutes": 30}) is None
+
+
 def test_orm_repr_includes_token_prefix():
     orm = SpecialistORM(
         id=1,

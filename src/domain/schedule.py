@@ -1,0 +1,160 @@
+"""Pure time/scheduling helpers shared across services and the bot.
+
+No SQLAlchemy or aiogram imports — only stdlib. All wall-clock ↔ UTC conversion
+goes through `zoneinfo` and an explicit specialist timezone; we never rely on the
+deploy server's local time (see design.md, decision 1).
+"""
+
+from datetime import UTC, date, datetime, time
+import re
+from zoneinfo import ZoneInfo
+
+# Curated list of Russian timezones offered in settings. IANA values keep
+# `zoneinfo` correct forever; labels carry a Moscow-relative hint for the UI.
+RUSSIAN_TIMEZONES: list[tuple[str, str]] = [
+    ("Europe/Kaliningrad", "Калининград (МСК-1)"),  # noqa: RUF001
+    ("Europe/Moscow", "Москва (МСК)"),  # noqa: RUF001
+    ("Europe/Samara", "Самара (МСК+1)"),  # noqa: RUF001
+    ("Asia/Yekaterinburg", "Екатеринбург (МСК+2)"),  # noqa: RUF001
+    ("Asia/Omsk", "Омск (МСК+3)"),  # noqa: RUF001
+    ("Asia/Krasnoyarsk", "Красноярск (МСК+4)"),  # noqa: RUF001
+    ("Asia/Irkutsk", "Иркутск (МСК+5)"),  # noqa: RUF001
+    ("Asia/Yakutsk", "Якутск (МСК+6)"),  # noqa: RUF001
+    ("Asia/Vladivostok", "Владивосток (МСК+7)"),  # noqa: RUF001
+    ("Asia/Magadan", "Магадан (МСК+8)"),  # noqa: RUF001
+    ("Asia/Kamchatka", "Камчатка (МСК+9)"),  # noqa: RUF001
+]
+
+_TIMEZONE_VALUES = frozenset(value for value, _ in RUSSIAN_TIMEZONES)
+
+# Genitive month names: Russian dates read "2 мая", not "2 май". Built by hand so
+# we never depend on a system locale that may be absent in the deploy image.
+RU_MONTHS_GENITIVE: dict[int, str] = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
+
+RU_MONTHS_NOMINATIVE: dict[int, str] = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
+
+RU_WEEKDAYS: list[str] = [
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+]
+
+# Short weekday headers for the inline calendar, Monday-first.
+RU_WEEKDAYS_SHORT: list[str] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]  # noqa: RUF001
+
+_HHMM_RE = re.compile(r"([0-9]{1,2}):([0-9]{2})")
+_MINUTES_IN_HOUR = 60
+_MAX_HOUR = 23
+
+
+def is_known_timezone(tz: str) -> bool:
+    return tz in _TIMEZONE_VALUES
+
+
+def parse_hhmm(raw: str) -> str | None:
+    """Validate free-text time as `HH:MM` in 00:00-23:59, returning it zero-padded.
+
+    Returns None when the format or range is invalid; the caller re-asks.
+    """
+    match = _HHMM_RE.fullmatch(raw.strip())
+    if match is None:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    if hours > _MAX_HOUR or minutes >= _MINUTES_IN_HOUR:
+        return None
+    return f"{hours:02d}:{minutes:02d}"
+
+
+def _to_minutes(hhmm: str) -> int:
+    hours, minutes = hhmm.split(":")
+    return int(hours) * _MINUTES_IN_HOUR + int(minutes)
+
+
+def _from_minutes(total: int) -> str:
+    return f"{total // _MINUTES_IN_HOUR:02d}:{total % _MINUTES_IN_HOUR:02d}"
+
+
+def generate_slots(day_start: str, day_end: str, slot_minutes: int) -> list[str]:
+    """Slots from `day_start`, stepping `slot_minutes`, while start < `day_end`.
+
+    Example: 14:00 / 19:40 / 50 → 14:00, 14:50, 15:40, 16:30, 17:20, 18:10, 19:00.
+    """
+    start = _to_minutes(day_start)
+    end = _to_minutes(day_end)
+    slots: list[str] = []
+    current = start
+    while current < end:
+        slots.append(_from_minutes(current))
+        current += slot_minutes
+    return slots
+
+
+def wall_to_utc(day: date, hhmm: str, tz: str) -> datetime:
+    """Treat (`day`, `hhmm`) as wall time in `tz` and return the aware UTC instant."""
+    hours, minutes = hhmm.split(":")
+    local = datetime(
+        day.year, day.month, day.day, int(hours), int(minutes), tzinfo=ZoneInfo(tz)
+    )
+    return local.astimezone(UTC)
+
+
+def utc_to_wall(moment: datetime, tz: str) -> datetime:
+    """Convert an aware UTC instant to wall time in `tz`."""
+    return moment.astimezone(ZoneInfo(tz))
+
+
+def today_in_tz(now: datetime, tz: str) -> date:
+    """Calendar day in `tz` for the given UTC instant."""
+    return now.astimezone(ZoneInfo(tz)).date()
+
+
+def day_start_utc(day: date, tz: str) -> datetime:
+    """UTC instant of midnight at the start of `day` in `tz`.
+
+    Used as the future/history boundary: an appointment is "future" while its
+    `starts_at` is at or after the start of today in the specialist's timezone,
+    so today's appointments stay in the future feed all day.
+    """
+    local = datetime.combine(day, time.min, tzinfo=ZoneInfo(tz))
+    return local.astimezone(UTC)
+
+
+def format_ru_date(day: date) -> str:
+    """`2 мая, вторник` — day number, genitive month, weekday."""
+    return f"{day.day} {RU_MONTHS_GENITIVE[day.month]}, {RU_WEEKDAYS[day.weekday()]}"
+
+
+def format_ru_short(day: date) -> str:
+    """`2 мая` — day number and genitive month, without the weekday."""
+    return f"{day.day} {RU_MONTHS_GENITIVE[day.month]}"

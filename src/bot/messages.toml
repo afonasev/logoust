@@ -39,6 +39,7 @@ ask_phone = "Телефон контакта? Можно пропустить."
 ask_telegram = "Telegram контакта (@username)? Можно пропустить."
 
 added = "Клиент добавлен."
+archive_confirm = "Переместить клиента в архив?"
 archived = "Клиент перемещён в архив."
 restored = "Клиент возвращён в активные."
 updated = "Готово, обновил."
@@ -47,3 +48,70 @@ empty_required = "Это поле обязательно — пришлите н
 need_contact_channel = "Нужен телефон или Telegram. Пришлите телефон контакта."
 edit_prompt = "Пришлите новое значение для «{label}»:"
 not_found = "Клиент не найден."
+
+[schedule]
+button = "📅 Расписание"
+dash = "—"
+day_title = "📅 {date}"
+day_empty = "На этот день записей нет."
+week_title = "📆 Расписание на неделю:"
+week_empty = "На ближайшую неделю записей нет."
+history_title = "🗂 История: {start} – {end}"
+history_empty = "Прошедших записей пока нет."
+client_future_empty = "У этого клиента нет будущих записей."
+client_history_title = "История записей — {child}, стр. {page}"
+client_history_empty = "У этого клиента нет прошедших записей."
+day_header = "📆 {date}"
+line = "{child} · {time}{comment}"
+line_full = "{child} · {date} · {time}{comment}"
+comment_suffix = " · 🗒 {comment}"
+pick_date = "Выберите дату:"
+pick_time = "Выберите время:"
+ask_custom_time = "Введите время в формате ЧЧ:ММ, например 14:30."
+bad_time = "Не понял время. Нужен формат ЧЧ:ММ, например 14:30. Попробуйте ещё раз."
+ask_comment = "Комментарий к записи? Можно пропустить."
+past_date = "Эта дата уже прошла, выберите другую."
+created = "Запись создана."
+rescheduled = "Запись перенесена."
+deleted = "Запись удалена."
+not_found = "Запись не найдена."
+confirm_delete = "Удалить запись? Действие необратимо."
+
+card = """
+👶 {child}
+📆 {date}
+🕑 {time}
+🗒 Комментарий: {comment}
+"""
+
+btn_add = "➕ Записать"  # noqa: RUF001
+btn_client_history = "🗂 История"
+btn_reschedule = "🔁 Перенести"
+btn_delete = "🗑 Удалить"
+btn_confirm_delete = "Да, удалить"
+btn_other_time = "🕑 Другое время"
+btn_history = "🗂 История"
+btn_today = "📅 Сегодня"
+btn_week = "📆 Неделя"
+
+[settings]
+button = "⚙️ Настройки"
+title = """
+⚙️ Настройки расписания:
+🌐 Таймзона: {timezone}
+🕘 Начало дня: {day_start}
+🕗 Конец дня: {day_end}
+⏱ Длина слота: {slot} мин
+"""
+btn_timezone = "🌐 Таймзона"
+btn_day_start = "🕘 Начало дня"
+btn_day_end = "🕗 Конец дня"
+btn_slot = "⏱ Длина слота"
+pick_timezone = "Выберите таймзону:"
+ask_day_start = "Во сколько начинается рабочий день? Формат ЧЧ:ММ."
+ask_day_end = "Во сколько заканчивается рабочий день? Формат ЧЧ:ММ."
+ask_slot = "Длина слота в минутах (число)?"
+bad_time = "Не понял время. Нужен формат ЧЧ:ММ, например 09:00."
+bad_slot = "Нужно положительное число минут (до 480)."
+saved = "Готово, сохранил."
+not_found = "Не удалось найти ваши настройки."

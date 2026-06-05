@@ -87,6 +87,10 @@ class ClientsRepo(Protocol):
         self, specialist_id: int, status: ClientStatus
     ) -> list[Client]: ...
 
+    async def list_active(  # pragma: no cover
+        self, specialist_id: int, *, limit: int, offset: int
+    ) -> list[Client]: ...
+
     async def list_archived(  # pragma: no cover
         self, specialist_id: int, *, limit: int, offset: int
     ) -> list[Client]: ...

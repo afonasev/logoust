@@ -14,11 +14,17 @@ from src.bot.messages import (
     BotMessages,
     load_messages,
 )
+
+# Import every ORM module so Base.metadata.create_all sees all tables and can
+# resolve cross-table foreign keys (appointments → clients/specialists).
+import src.infrastructure.appointments_repo  # noqa: F401
+import src.infrastructure.clients_repo  # noqa: F401
 from src.infrastructure.db import (
     Base,
     build_engine,
     build_session_factory,
 )
+import src.infrastructure.specialists_repo  # noqa: F401
 
 
 @pytest.fixture

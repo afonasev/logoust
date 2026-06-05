@@ -13,7 +13,9 @@ from src.bot.handlers.clients import (
     render_card,
 )
 from src.bot.messages import BotMessages
+from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus
+from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import (
@@ -97,6 +99,15 @@ def _button_texts(markup: Any) -> list[str]:
     return [btn.text for row in markup.inline_keyboard for btn in row]
 
 
+async def _seed_specialist(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The client card now reads specialist schedule settings (timezone) to render
+    # inline future appointments, so a specialist row must exist.
+    async with session_factory() as session:
+        await create_invite(SqlAlchemySpecialistsRepo(session))
+
+
 async def _seed_client(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -177,25 +188,78 @@ def test_render_card_archived_shows_values(messages: BotMessages):
 # --- menu ---------------------------------------------------------------------
 
 
-async def test_show_menu_sends_inline_menu(
+async def test_show_menu_opens_active_list(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
+    await _seed_client(session_factory, child_name="Аня")
     h = _handlers(messages, session_factory)
     msg = _fake_message()
     state = _state(data={"x": 1})
-    await h.show_menu(msg, state)
-    assert _first_text(msg.answer) == messages.clients.menu_title
+    await h.show_menu(msg, state, _SPECIALIST_ID)
+    assert _first_text(msg.answer) == messages.clients.list_active_title
+    markup = _markup(msg.answer)
+    assert "Аня" in _button_texts(markup)
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    # No appointment yet → second column is a "create appointment" button.
+    assert any(c and c.startswith("sched:new:") for c in cbs)
+    assert "clients:add" in cbs  # «Добавить»
+    assert "clients:list:archived" in cbs  # «Архив»
     assert state.store == {}
 
 
-async def test_open_menu_edits_to_menu(
+async def test_active_list_shows_nearest_appointment(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Аня")
+    assert client.id is not None
+    async with session_factory() as session:
+        now = datetime.now(UTC)
+        await SqlAlchemyAppointmentsRepo(session).add(
+            Appointment(
+                id=None,
+                specialist_id=_SPECIALIST_ID,
+                client_id=client.id,
+                starts_at=datetime(2030, 1, 15, 9, 0, tzinfo=UTC),  # 14:00 +05
+                comment="осмотр",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    h = _handlers(messages, session_factory)
+    msg = _fake_message()
+    await h.show_menu(msg, _state(), _SPECIALIST_ID)
+    markup = _markup(msg.answer)
+    labels = _button_texts(markup)
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    # Two columns: client button + its nearest appointment button (opens the appt).
+    # The list button shows date+time but not the comment (kept compact).
+    assert "Аня" in labels
+    assert any("14:00" in label for label in labels)
+    assert not any("осмотр" in label for label in labels)
+    assert any(c and c.startswith("sched:card:1~") for c in cbs)  # appt card
+
+
+async def test_show_menu_empty(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message()
+    await h.show_menu(msg, _state(), _SPECIALIST_ID)
+    assert _first_text(msg.answer) == messages.clients.empty_active
+
+
+async def test_open_menu_edits_to_active_list(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback()
     state = _state(data={"x": 1}, state="some")
-    await h.open_menu(cb, state)
-    assert _first_text(cb.message.edit_text) == messages.clients.menu_title
+    await h.open_menu(cb, state, _SPECIALIST_ID)
+    assert _first_text(cb.message.edit_text) == messages.clients.empty_active
     cb.answer.assert_awaited_once()
     assert state.state is None
 
@@ -203,24 +267,41 @@ async def test_open_menu_edits_to_menu(
 # --- listing & card -----------------------------------------------------------
 
 
-async def test_show_list_active_with_clients(
+async def test_show_active_with_clients(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     await _seed_client(session_factory, child_name="Аня")
     await _seed_client(session_factory, child_name="Боря")
     h = _handlers(messages, session_factory)
-    cb = _fake_callback("clients:list:active")
-    await h.show_list(cb, _SPECIALIST_ID)
+    cb = _fake_callback("clients:active:0")
+    await h.show_active(cb, _SPECIALIST_ID)
     assert _first_text(cb.message.edit_text) == messages.clients.list_active_title
+    assert "Аня" in _button_texts(_markup(cb.message.edit_text))
 
 
-async def test_show_list_active_empty(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+async def test_show_active_pagination(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
 ):
+    await _seed_specialist(session_factory)
+    monkeypatch.setattr("src.bot.handlers.clients._ACTIVE_PAGE_SIZE", 2)
+    for i in range(3):
+        await _seed_client(session_factory, child_name=f"Z{i}")
     h = _handlers(messages, session_factory)
-    cb = _fake_callback("clients:list:active")
-    await h.show_list(cb, _SPECIALIST_ID)
-    assert _first_text(cb.message.edit_text) == messages.clients.empty_active
+
+    cb0 = _fake_callback("clients:active:0")
+    await h.show_active(cb0, _SPECIALIST_ID)
+    t0 = _button_texts(_markup(cb0.message.edit_text))
+    assert "▶" in t0
+    assert "◀" not in t0
+
+    cb1 = _fake_callback("clients:active:1")
+    await h.show_active(cb1, _SPECIALIST_ID)
+    t1 = _button_texts(_markup(cb1.message.edit_text))
+    assert "◀" in t1
+    assert "▶" not in t1
 
 
 async def test_show_archive_first_page_shows_date(
@@ -296,11 +377,52 @@ async def test_show_archive_pagination(
 async def test_show_card_renders(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     client = await _seed_client(session_factory, child_name="Петя")
     h = _handlers(messages, session_factory)
     cb = _fake_callback(f"clients:card:{client.id}")
     await h.show_card(cb, _SPECIALIST_ID)
-    assert "Петя" in _first_text(cb.message.edit_text)
+    text = _first_text(cb.message.edit_text)
+    assert "Петя" in text
+    # No future appointments yet → empty-future line shown inline.
+    assert messages.schedule.client_future_empty in text
+
+
+async def test_show_card_shows_future_appointments(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Лиза")
+    assert client.id is not None
+    async with session_factory() as session:
+        now = datetime.now(UTC)
+        await SqlAlchemyAppointmentsRepo(session).add(
+            Appointment(
+                id=None,
+                specialist_id=_SPECIALIST_ID,
+                client_id=client.id,
+                starts_at=datetime(2030, 1, 15, 9, 0, tzinfo=UTC),  # 14:00 +05
+                comment="пробное",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    text = _first_text(cb.message.edit_text)
+    # No future-header text — the buttons make it clear; no "empty" note either.
+    assert messages.schedule.client_future_empty not in text
+    markup = _markup(cb.message.edit_text)
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    # The future appointment is a button (opens its card to reschedule/cancel).
+    assert any("14:00" in label and "пробное" in label for label in labels)
+    assert any(c and c.startswith("sched:card:1~") for c in cbs)
+    # Action buttons: edit, archive (confirm), history.
+    assert f"clients:edit:{client.id}" in cbs
+    assert f"clients:archiveask:{client.id}" in cbs
+    assert f"sched:chist:{client.id}:0" in cbs
 
 
 async def test_show_card_not_found(
@@ -316,9 +438,36 @@ async def test_show_card_not_found(
 # --- archive / restore --------------------------------------------------------
 
 
+async def test_ask_archive_shows_confirmation(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:archiveask:{client.id}")
+    await h.ask_archive(cb)
+    assert _first_text(cb.message.edit_text) == messages.clients.archive_confirm
+    cbs = [
+        b.callback_data
+        for row in _markup(cb.message.edit_text).inline_keyboard
+        for b in row
+    ]
+    assert f"clients:archive:{client.id}" in cbs  # confirm
+    assert f"clients:card:{client.id}" in cbs  # cancel → back to card
+    # The confirmation step alone must not archive the client.
+    async with session_factory() as session:
+        assert client.id is not None
+        stored = await SqlAlchemyClientsRepo(session).get_for_specialist(
+            client.id, _SPECIALIST_ID
+        )
+    assert stored is not None
+    assert stored.status is ClientStatus.ACTIVE
+
+
 async def test_archive_moves_to_archive(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     client = await _seed_client(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback(f"clients:archive:{client.id}")
@@ -337,6 +486,7 @@ async def test_archive_moves_to_archive(
 async def test_restore_moves_to_active(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     client = await _seed_client(session_factory, status=ClientStatus.ARCHIVED)
     h = _handlers(messages, session_factory)
     cb = _fake_callback(f"clients:restore:{client.id}")
@@ -436,6 +586,7 @@ async def test_skip_phone_advances(
 async def test_add_telegram_creates_client(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     msg = _fake_message("@masha")
     state = _state(
@@ -461,6 +612,7 @@ async def test_add_telegram_creates_client(
 async def test_skip_telegram_creates_via_callback_message(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback()
     state = _state(
@@ -498,10 +650,11 @@ async def test_create_without_contact_channel_reasks_phone(
 async def test_cancel_clears_state(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback()
     state = _state(data={"child_name": "Петя"}, state=AddClient.contact_name)
-    await h.cancel(cb, state)
+    await h.cancel(cb, state, _SPECIALIST_ID)
     assert state.store == {}
     assert _first_text(cb.message.edit_text) == messages.clients.cancelled
 
@@ -533,6 +686,7 @@ async def test_pick_field_sets_waiting_state(
 async def test_apply_edit_updates_field(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     client = await _seed_client(session_factory)
     h = _handlers(messages, session_factory)
     msg = _fake_message("важно")

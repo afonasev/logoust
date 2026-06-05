@@ -71,6 +71,21 @@ async def test_list_by_status_excludes_other_specialist(session: AsyncSession):
     assert [c.child_name for c in mine] == ["Мой"]
 
 
+async def test_list_active_orders_by_name_and_paginates(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    for name in ["Яков", "Аня", "Боря"]:
+        await repo.add(_make(child_name=name))
+    archived = await repo.add(
+        _make(child_name="Архивный", status=ClientStatus.ARCHIVED)
+    )
+    assert archived.id is not None
+
+    page0 = await repo.list_active(1, limit=2, offset=0)
+    assert [c.child_name for c in page0] == ["Аня", "Боря"]  # archived excluded
+    page1 = await repo.list_active(1, limit=2, offset=2)
+    assert [c.child_name for c in page1] == ["Яков"]
+
+
 async def test_list_archived_orders_desc_and_paginates(session: AsyncSession):
     repo = SqlAlchemyClientsRepo(session)
     base = datetime(2026, 6, 1, tzinfo=UTC)

@@ -19,6 +19,7 @@ class SettingField(enum.Enum):
     DAY_START = "day_start"
     DAY_END = "day_end"
     SLOT_MINUTES = "slot_minutes"
+    REMINDER_TIME = "reminder_time"
 
 
 class SettingsUpdateResult(enum.Enum):
@@ -36,7 +37,11 @@ def _normalize(field: SettingField, raw: str) -> object | None:
     value = raw.strip()
     if field is SettingField.TIMEZONE:
         return value if is_known_timezone(value) else None
-    if field in {SettingField.DAY_START, SettingField.DAY_END}:
+    if field in {
+        SettingField.DAY_START,
+        SettingField.DAY_END,
+        SettingField.REMINDER_TIME,
+    }:
         return parse_hhmm(value)
     return _parse_slot_minutes(value)
 
@@ -68,6 +73,26 @@ async def update_setting(
         extra={"specialist_id": specialist_id, "field": field.value},
     )
     return SettingsUpdateResult.UPDATED
+
+
+async def toggle_reminder(
+    repo: SpecialistsRepo, *, specialist_id: int
+) -> Specialist | None:
+    """Flip the client-reminder on/off flag and persist it.
+
+    Returns the updated specialist, or None if it does not exist.
+    """
+    specialist = await repo.get(specialist_id)
+    if specialist is None:
+        return None
+    updated = await repo.update_settings(
+        specialist_id, {"reminder_enabled": not specialist.reminder_enabled}
+    )
+    logger.info(
+        "specialist.setting_updated",
+        extra={"specialist_id": specialist_id, "field": "reminder_enabled"},
+    )
+    return updated
 
 
 async def toggle_working_day(

@@ -8,6 +8,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_reminder,
     toggle_working_day,
     update_setting,
 )
@@ -144,3 +145,15 @@ async def test_toggle_working_day_removes_then_adds(session: AsyncSession):
 async def test_toggle_working_day_not_found(session: AsyncSession):
     repo = SqlAlchemySpecialistsRepo(session)
     assert await toggle_working_day(repo, specialist_id=404, weekday=0) is None
+
+
+async def test_toggle_reminder_flips_and_handles_missing(session: AsyncSession):
+    specialist_id = await _seed(session)
+    repo = SqlAlchemySpecialistsRepo(session)
+    updated = await toggle_reminder(repo, specialist_id=specialist_id)
+    assert updated is not None
+    assert updated.reminder_enabled is False
+    again = await toggle_reminder(repo, specialist_id=specialist_id)
+    assert again is not None
+    assert again.reminder_enabled is True
+    assert await toggle_reminder(repo, specialist_id=404) is None

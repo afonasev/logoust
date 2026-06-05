@@ -25,6 +25,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_reminder,
     toggle_working_day,
     update_setting,
 )
@@ -40,12 +41,15 @@ _CB_DAY_END = "settings:day_end"
 _CB_SLOT = "settings:slot"
 _CB_WORKDAYS = "settings:workdays"
 _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
+_CB_REMINDER_TOGGLE = "settings:reminder"
+_CB_REMINDER_TIME = "settings:reminder_time"
 
 # Maps the FSM step to the setting it edits and the prompt/error texts.
 _FIELD_BY_CALLBACK = {
     _CB_DAY_START: SettingField.DAY_START,
     _CB_DAY_END: SettingField.DAY_END,
     _CB_SLOT: SettingField.SLOT_MINUTES,
+    _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
 }
 
 
@@ -53,16 +57,19 @@ class EditSetting(StatesGroup):
     day_start = State()
     day_end = State()
     slot = State()
+    reminder_time = State()
 
 
 _STATE_BY_FIELD = {
     SettingField.DAY_START: EditSetting.day_start,
     SettingField.DAY_END: EditSetting.day_end,
     SettingField.SLOT_MINUTES: EditSetting.slot,
+    SettingField.REMINDER_TIME: EditSetting.reminder_time,
 }
 
 
-def _menu_keyboard(m: SettingsMessages) -> InlineKeyboardMarkup:
+def _menu_keyboard(specialist: Specialist, m: SettingsMessages) -> InlineKeyboardMarkup:
+    state = m.state_on if specialist.reminder_enabled else m.state_off
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=m.btn_timezone, callback_data=_CB_TZLIST)],
@@ -72,6 +79,15 @@ def _menu_keyboard(m: SettingsMessages) -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text=m.btn_slot, callback_data=_CB_SLOT)],
             [InlineKeyboardButton(text=m.btn_working_days, callback_data=_CB_WORKDAYS)],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_reminder.format(state=state),
+                    callback_data=_CB_REMINDER_TOGGLE,
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_reminder_time, callback_data=_CB_REMINDER_TIME
+                ),
+            ],
         ]
     )
 
@@ -116,6 +132,8 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         day_end=specialist.day_end,
         slot=specialist.slot_minutes,
         working_days=_format_working_days(specialist.working_days, m),
+        reminders=m.state_on if specialist.reminder_enabled else m.state_off,
+        reminder_time=specialist.reminder_time,
     )
 
 
@@ -150,7 +168,8 @@ class SettingsHandlers:
             await message.answer(self._m.not_found)
             return
         await message.answer(
-            render_settings(specialist, self._m), reply_markup=_menu_keyboard(self._m)
+            render_settings(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m),
         )
 
     async def open_menu(
@@ -162,9 +181,19 @@ class SettingsHandlers:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         await _callback_message(callback).edit_text(
-            render_settings(specialist, self._m), reply_markup=_menu_keyboard(self._m)
+            render_settings(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m),
         )
         await callback.answer()
+
+    async def toggle_reminder(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        async with self._session_factory() as session:
+            await toggle_reminder(
+                SqlAlchemySpecialistsRepo(session), specialist_id=specialist_id
+            )
+        await self.open_menu(callback, state, specialist_id)
 
     async def show_timezones(self, callback: CallbackQuery) -> None:
         await _callback_message(callback).edit_text(
@@ -225,6 +254,8 @@ class SettingsHandlers:
             return self._m.ask_day_start
         if field is SettingField.DAY_END:
             return self._m.ask_day_end
+        if field is SettingField.REMINDER_TIME:
+            return self._m.ask_reminder_time
         return self._m.ask_slot
 
     def _error(self, field: SettingField) -> str:
@@ -256,13 +287,21 @@ class SettingsHandlers:
             return
         await message.answer(self._m.saved)
         await message.answer(
-            render_settings(specialist, self._m), reply_markup=_menu_keyboard(self._m)
+            render_settings(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m),
         )
 
     async def apply_day_start(
         self, message: Message, state: FSMContext, specialist_id: int
     ) -> None:
         await self.apply_value(message, state, specialist_id, SettingField.DAY_START)
+
+    async def apply_reminder_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(
+            message, state, specialist_id, SettingField.REMINDER_TIME
+        )
 
     async def apply_day_end(
         self, message: Message, state: FSMContext, specialist_id: int
@@ -289,6 +328,7 @@ def build_router(
     router.message.register(h.apply_day_start, EditSetting.day_start)
     router.message.register(h.apply_day_end, EditSetting.day_end)
     router.message.register(h.apply_slot, EditSetting.slot)
+    router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
     router.callback_query.register(h.show_timezones, F.data == _CB_TZLIST)
@@ -296,6 +336,8 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_START)
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_END)
     router.callback_query.register(h.ask_value, F.data == _CB_SLOT)
+    router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
+    router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
     router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
     router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))
     return router

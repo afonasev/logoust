@@ -46,7 +46,13 @@ src/
 
 Бизнес-правила (валидация минимума клиента, нормализация телефона/Telegram) живут в `domain/`/`services/`, а не в хендлерах — чтобы не зависеть от способа ввода. Это держит дверь открытой для второго адаптера (например, Telegram Mini App) поверх тех же use-cases без переписывания логики.
 
-Авторизация в `bot/`-канале — через aiogram inner-middleware `SpecialistMiddleware` (`bot/handlers/clients.py`): резолвит специалиста по `chat_id` и инжектит `specialist_id` в хендлеры, отсекая неонбординнутых.
+Авторизация в `bot/`-канале — через aiogram inner-middleware `SpecialistMiddleware` (`bot/handlers/clients.py`): резолвит специалиста по `chat_id` и инжектит `specialist_id` в хендлеры, отсекая неонбординнутых. Исключение — роутер `bot/handlers/reminders.py` (колбэк `appt:cfm:`): его актор — **клиент**, а не специалист, поэтому он намеренно вне `SpecialistMiddleware`; изоляция владельца обеспечивается в сервисе сверкой `chat_id` ответившего с привязанным клиентом напоминания.
+
+## Фоновый планировщик (минутный тик)
+
+Кроме long-polling бот держит фоновый asyncio-таск рядом с polling: `__main__._scheduler_loop` спит до начала следующей минуты и запускает due-джобы. Сейчас джоба одна — дневной проход напоминаний клиентам (`bot/scheduler.run_reminder_pass`). Весь проход обёрнут в `try/except Exception` с логом, поэтому исключение в джобе не роняет polling (`asyncio.gather(start_polling, _scheduler_loop)`).
+
+Цикл со `sleep` живёт в `__main__.py` (исключён из покрытия), а тестируемая логика прохода — в `bot/scheduler.py`. Решение «кому пора» — чистая функция `domain/reminder.is_reminder_due` (настенное время в tz, антидубль через `reminder_last_run_on`, догон через порог `>=`); идемпотентность отправки гарантирует `UNIQUE` журнала `appointment_reminders`. Внешний планировщик/cron сознательно не вводится (YAGNI): один процесс — один тик.
 
 ## Поток данных: онбординг
 

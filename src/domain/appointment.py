@@ -33,6 +33,10 @@ class AppointmentsRepo(Protocol):
         self, appointment_id: int, specialist_id: int
     ) -> Appointment | None: ...
 
+    async def find_by_occurrence(  # pragma: no cover
+        self, specialist_id: int, client_id: int, *, starts_at: datetime
+    ) -> Appointment | None: ...
+
     async def list_future_for_specialist(  # pragma: no cover
         self, specialist_id: int, *, since: datetime
     ) -> list[Appointment]: ...

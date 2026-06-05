@@ -13,10 +13,12 @@ from src.bot.handlers.schedule import (
 )
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
+from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.domain.schedule import today_in_tz, wall_to_utc
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -795,3 +797,111 @@ async def test_client_history_pagination_nav(
     assert f"sched:chist:{client_id}:0" in _callbacks(
         _markup(cb1.message.edit_text)
     )  # ◀
+
+
+# --- confirmation status display ---------------------------------------------
+
+
+async def _seed_reminder_status(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    client_id: int,
+    starts_at: datetime,
+    status: ReminderStatus,
+) -> None:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        repo = SqlAlchemyRemindersRepo(session)
+        reminder = AppointmentReminder(
+            id=None,
+            specialist_id=_SP,
+            client_id=client_id,
+            starts_at=starts_at,
+            series_id=None,
+            origin_date=None,
+            status=ReminderStatus.PENDING,
+            sent_at=now,
+            responded_at=None,
+        )
+        await repo.insert_pending(reminder)
+        assert reminder.id is not None
+        if status is not ReminderStatus.PENDING:
+            await repo.set_status(reminder.id, status, now)
+
+
+async def test_day_view_marks_confirmed_appointment(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, child="Аня")
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)
+    await _seed_appt(session_factory, client_id=client_id, starts_at=starts_at)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=starts_at,
+        status=ReminderStatus.CONFIRMED,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-15")
+    await h.open_day(cb, _SP)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert any(label.startswith(messages.reminder.confirmed_mark) for label in labels)
+
+
+async def test_day_view_no_mark_for_pending(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, child="Аня")
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)
+    await _seed_appt(session_factory, client_id=client_id, starts_at=starts_at)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=starts_at,
+        status=ReminderStatus.PENDING,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-15")
+    await h.open_day(cb, _SP)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert not any(
+        label.startswith(messages.reminder.confirmed_mark) for label in labels
+    )
+
+
+async def test_card_shows_confirmed_mark(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, child="Лиза")
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=_FUTURE,
+        status=ReminderStatus.CONFIRMED,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"sched:card:{appt.id}")
+    await h.show_card(cb, _SP)
+    assert messages.reminder.card_confirmed in _texts(cb.message.edit_text)[0]
+
+
+async def test_card_no_mark_when_declined(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, child="Лиза")
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=_FUTURE,
+        status=ReminderStatus.DECLINED,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"sched:card:{appt.id}")
+    await h.show_card(cb, _SP)
+    assert messages.reminder.card_confirmed not in _texts(cb.message.edit_text)[0]

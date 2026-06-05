@@ -107,6 +107,21 @@ class SqlAlchemyAppointmentsRepo:
         orm = await self._get_owned(appointment_id, specialist_id)
         return to_domain(orm) if orm is not None else None
 
+    async def find_by_occurrence(
+        self, specialist_id: int, client_id: int, *, starts_at: datetime
+    ) -> Appointment | None:
+        # Resolve a one-off appointment by its occurrence key so the decline
+        # notification can link to its card. A rescheduled appointment no longer
+        # matches the reminder's `starts_at` and returns None (documented limit).
+        stmt = select(AppointmentORM).where(
+            AppointmentORM.specialist_id == specialist_id,
+            AppointmentORM.client_id == client_id,
+            AppointmentORM.starts_at == starts_at,
+        )
+        result = await self._session.execute(stmt)
+        orm = result.scalars().first()
+        return to_domain(orm) if orm is not None else None
+
     async def list_future_for_specialist(
         self, specialist_id: int, *, since: datetime
     ) -> list[Appointment]:

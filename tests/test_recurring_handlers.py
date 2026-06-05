@@ -11,12 +11,14 @@ from src.bot.handlers.schedule import (
 )
 from src.bot.messages import BotMessages
 from src.domain.recurring import RecurringAppointment
-from src.domain.schedule import today_in_tz
+from src.domain.reminder import AppointmentReminder, ReminderStatus
+from src.domain.schedule import today_in_tz, wall_to_utc
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
 )
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -273,6 +275,38 @@ async def test_show_card_shows_moved_occurrence_time(
     # ...and the moved next-meeting date/time, not the series' default 14:00.
     assert "24 июня" in text
     assert "16:00" in text
+
+
+async def test_show_card_marks_confirmed_occurrence(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    # Confirm the 2026-06-22 occurrence (14:00 wall in +05 → 09:00 UTC).
+    starts_at = wall_to_utc(date(2026, 6, 22), "14:00", "Asia/Yekaterinburg")
+    async with session_factory() as session:
+        repo = SqlAlchemyRemindersRepo(session)
+        reminder = AppointmentReminder(
+            id=None,
+            specialist_id=_SP,
+            client_id=client_id,
+            starts_at=starts_at,
+            series_id=series_id,
+            origin_date=date(2026, 6, 22),
+            status=ReminderStatus.PENDING,
+            sent_at=datetime.now(UTC),
+            responded_at=None,
+        )
+        await repo.insert_pending(reminder)
+        assert reminder.id is not None
+        await repo.set_status(reminder.id, ReminderStatus.CONFIRMED, datetime.now(UTC))
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:card:{series_id}:2026-06-22")
+    await h.show_card(cb, _SP)
+    assert messages.reminder.card_confirmed in _texts(cb.message.edit_text)[0]
 
 
 async def test_navigate_move_redraws_calendar(

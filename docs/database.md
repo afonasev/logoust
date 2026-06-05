@@ -19,6 +19,9 @@
 | `day_end`           | VARCHAR(5) | нет | Конец рабочего дня `ЧЧ:ММ`. Server-default `20:00`. |
 | `slot_minutes`      | INTEGER   | нет  | Длина слота в минутах. Server-default `60`. |
 | `working_days`      | VARCHAR(20) | нет | Рабочие дни недели — канонически отсортированная строка индексов `date.weekday()` (Пн=0…Вс=6), напр. `0,1,2,3,4`. Server-default `0,1,2,3,4` (Пн–Пт). |
+| `reminder_enabled`  | BOOLEAN     | нет | Включены ли авто-напоминания клиентам. Server-default `1` (opt-out). |
+| `reminder_time`     | VARCHAR(5)  | нет | Настенное `ЧЧ:ММ` ежедневного прохода напоминаний. Server-default `12:00`. |
+| `reminder_last_run_on` | DATE     | да  | Дата (в tz) последнего выполненного прохода напоминаний; антидубль/догон. `NULL` — ещё не выполнялся. |
 
 Индексы:
 
@@ -102,6 +105,26 @@
 
 - `uq_exception_series_date` — `UNIQUE(series_id, original_date)`. Пропуск и перенос одной даты — одна строка (`upsert`): повторный пропуск/перенос перезаписывает `new_starts_at`.
 
+### `appointment_reminders`
+
+Журнал авто-напоминаний клиенту о записи на завтра и его ответа. Occurrence идентифицируется натуральным ключом `(specialist_id, client_id, starts_at)`, поэтому журнал одинаково работает для разовой записи и для виртуального повтора серии (у которого нет строки в `appointments`).
+
+| Колонка         | Тип         | NULL | Замечание                                                          |
+| --------------- | ----------- | ---- | ------------------------------------------------------------------ |
+| `id`            | INTEGER     | нет  | PK, autoincrement. Используется в `callback_data` кнопок.          |
+| `specialist_id` | INTEGER     | нет  | FK → `specialists.id`. Владелец.                                   |
+| `client_id`     | INTEGER     | нет  | FK → `clients.id`. Получатель напоминания.                         |
+| `starts_at`     | DATETIME    | нет  | Время начала occurrence в **aware UTC**; вместе с `client_id` идентифицирует occurrence. |
+| `series_id`     | INTEGER     | да   | `NULL` у разовой записи; задан у (виртуального) повтора серии — для кнопки «Открыть запись». |
+| `origin_date`   | DATE        | да   | Плановая дата occurrence серии; `NULL` у разовой.                  |
+| `status`        | VARCHAR(16) | нет  | `pending` \| `confirmed` \| `declined` (enum строкой).             |
+| `sent_at`       | DATETIME    | нет  | Момент отправки напоминания (aware UTC).                           |
+| `responded_at`  | DATETIME    | да   | Момент последнего ответа клиента; `NULL` — ещё не ответил.         |
+
+Ограничения:
+
+- `uq_reminder_occurrence` — `UNIQUE(specialist_id, client_id, starts_at)`. Делает дневной проход идемпотентным (`INSERT … ON CONFLICT DO NOTHING`): повторный минутный тик и рестарт не плодят дубли и не шлют повторно. Этот же уникальный индекс обслуживает чтение статусов по occurrence (левый префикс `specialist_id, client_id`).
+
 ### `clients`
 
 Картотека клиентов специалиста (ребёнок + основной контакт родителя). Принадлежит специалисту: каждый видит и меняет только своих.
@@ -145,6 +168,7 @@
 - `0004_working_days.py` — добавляет в `specialists` колонку `working_days` (`String`, `server_default="0,1,2,3,4"` — Пн–Пт). Down-ревизия — `drop_column`.
 - `0005_client_telegram_link.py` — добавляет в `clients` колонки `invite_token`, `telegram_chat_id`, `linked_at` (все nullable) и уникальный индекс `ix_clients_invite_token`. Существующие строки → `NULL` (валидное «не приглашён»). Down-ревизия удаляет индекс и колонки.
 - `0006_recurring_appointments.py` — создаёт таблицы `recurring_appointments` (индекс `ix_recurring_specialist_active`) и `recurring_exceptions` (`UNIQUE(series_id, original_date)`); добавляет в `appointments` колонки `series_id`, `origin_date` (обе nullable) и уникальный индекс `uq_appointments_series_origin`. Существующие записи → `series_id`/`origin_date = NULL` (разовые, поведение не меняется). Колонки добавлены без inline-FK (SQLite не ALTER-ит ограничения). Down-ревизия удаляет индекс, колонки и обе таблицы.
+- `0007_appointment_reminders.py` — добавляет в `specialists` колонки `reminder_enabled` (server-default `1`), `reminder_time` (server-default `12:00`), `reminder_last_run_on` (nullable); создаёт таблицу `appointment_reminders` (`UNIQUE(specialist_id, client_id, starts_at)`). Существующие специалисты → напоминания включены на 12:00. Down-ревизия удаляет таблицу и три колонки.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

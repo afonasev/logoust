@@ -227,6 +227,72 @@ async def test_toggle_day_persists_and_redraws(
     assert updated.working_days == "1,2,3,4"
 
 
+def test_render_settings_shows_reminder_state():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    text = render_settings(specialist, m)
+    assert m.state_on in text
+    assert "12:00" in text  # default reminder time
+
+
+async def test_toggle_reminder_flips_flag(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:reminder")
+    await h.toggle_reminder(cb, _state(), _SP)
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.reminder_enabled is False
+
+
+async def test_apply_reminder_time_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("9:30")
+    state = _state(state=EditSetting.reminder_time)
+    await h.apply_reminder_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.reminder_time == "09:30"
+
+
+async def test_apply_reminder_time_invalid_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("25:99")
+    state = _state(state=EditSetting.reminder_time)
+    await h.apply_reminder_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.bad_time
+    assert state.state == EditSetting.reminder_time
+
+
+async def test_ask_value_reminder_time_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:reminder_time")
+    state = _state()
+    await h.ask_value(cb, state)
+    assert state.state == EditSetting.reminder_time
+    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_reminder_time
+
+
 async def test_apply_slot_invalid_then_valid(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

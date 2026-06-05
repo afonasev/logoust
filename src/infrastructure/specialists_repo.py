@@ -1,7 +1,7 @@
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, select
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, String, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -9,6 +9,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.domain.specialist import (
     DEFAULT_DAY_END,
     DEFAULT_DAY_START,
+    DEFAULT_REMINDER_ENABLED,
+    DEFAULT_REMINDER_TIME,
     DEFAULT_SLOT_MINUTES,
     DEFAULT_TIMEZONE,
     DEFAULT_WORKING_DAYS,
@@ -46,6 +48,13 @@ class SpecialistORM(Base):
     working_days: Mapped[str] = mapped_column(
         String(20), nullable=False, default=DEFAULT_WORKING_DAYS
     )
+    reminder_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=DEFAULT_REMINDER_ENABLED
+    )
+    reminder_time: Mapped[str] = mapped_column(
+        String(5), nullable=False, default=DEFAULT_REMINDER_TIME
+    )
+    reminder_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     def __repr__(self) -> str:
         return f"<SpecialistORM id={self.id} token={self.invite_token[:6]}…>"
@@ -64,6 +73,9 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         day_end=orm.day_end,
         slot_minutes=orm.slot_minutes,
         working_days=orm.working_days,
+        reminder_enabled=bool(orm.reminder_enabled),
+        reminder_time=orm.reminder_time,
+        reminder_last_run_on=orm.reminder_last_run_on,
     )
 
 
@@ -114,6 +126,18 @@ class SqlAlchemySpecialistsRepo:
             setattr(orm, key, value)
         await self._session.commit()
         return to_domain(orm)
+
+    async def list_reminder_candidates(self) -> list[Specialist]:
+        stmt = select(SpecialistORM).where(SpecialistORM.reminder_enabled.is_(True))
+        result = await self._session.execute(stmt)
+        return [to_domain(orm) for orm in result.scalars().all()]
+
+    async def mark_reminder_run(self, specialist_id: int, run_on: date) -> None:
+        orm = await self._session.get(SpecialistORM, specialist_id)
+        if orm is None:  # pragma: no cover - pass only marks loaded candidates
+            return
+        orm.reminder_last_run_on = run_on
+        await self._session.commit()
 
     async def mark_welcomed(
         self,

@@ -45,15 +45,21 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            render_as_batch=True,
-        )
+    try:
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                render_as_batch=True,
+            )
 
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        # Dispose so the DBAPI connection is closed promptly instead of waiting on
+        # GC — otherwise back-to-back migration tests in one process surface a
+        # `ResourceWarning` that `-W error` turns into a failure.
+        connectable.dispose()
 
 
 if context.is_offline_mode():

@@ -3,7 +3,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import NullPool, create_engine, inspect, text
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def test_initial_migration_creates_specialists_table(
 
     command.upgrade(cfg, "head")
 
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     insp = inspect(engine)
     columns = {c["name"]: c for c in insp.get_columns("specialists")}
     expected = {
@@ -45,6 +45,10 @@ def test_initial_migration_creates_specialists_table(
         "day_end",
         "slot_minutes",
         "working_days",
+        # Added by 0007; this test runs to head.
+        "reminder_enabled",
+        "reminder_time",
+        "reminder_last_run_on",
     }
     assert set(columns) == expected
 
@@ -77,7 +81,7 @@ def test_clients_migration_creates_clients_table(
 
     command.upgrade(cfg, "head")
 
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     insp = inspect(engine)
     columns = {c["name"] for c in insp.get_columns("clients")}
     expected = {
@@ -121,7 +125,7 @@ def test_client_telegram_link_migration_adds_columns(
 
     # Stop before 0005 and seed a client that predates the telegram link columns.
     command.upgrade(cfg, "0004")
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -176,7 +180,7 @@ def test_appointments_migration_creates_table_and_backfills_settings(
 
     # Stop before 0003 and seed a specialist that predates the schedule settings.
     command.upgrade(cfg, "0002")
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -235,7 +239,7 @@ def test_recurring_migration_adds_tables_and_appointment_columns(
 
     # Stop before 0006 and seed a one-off appointment that predates the series cols.
     command.upgrade(cfg, "0005")
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -287,6 +291,78 @@ def test_recurring_migration_adds_tables_and_appointment_columns(
     engine.dispose()
 
 
+def test_appointment_reminders_migration_adds_table_and_columns(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0007 and seed a specialist that predates the reminder settings.
+    command.upgrade(cfg, "0006")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    assert "appointment_reminders" in insp.get_table_names()
+    reminder_columns = {c["name"] for c in insp.get_columns("appointment_reminders")}
+    assert reminder_columns == {
+        "id",
+        "specialist_id",
+        "client_id",
+        "starts_at",
+        "series_id",
+        "origin_date",
+        "status",
+        "sent_at",
+        "responded_at",
+    }
+    uniques = {
+        u["name"]: u["column_names"]
+        for u in insp.get_unique_constraints("appointment_reminders")
+    }
+    assert uniques.get("uq_reminder_occurrence") == [
+        "specialist_id",
+        "client_id",
+        "starts_at",
+    ]
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert {
+        "reminder_enabled",
+        "reminder_time",
+        "reminder_last_run_on",
+    } <= specialist_columns
+
+    # The pre-existing specialist backfills to enabled at noon (opt-out default).
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT reminder_enabled, reminder_time, reminder_last_run_on "
+                "FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).one()
+    assert row == (1, "12:00", None)
+
+    command.downgrade(cfg, "0006")
+    insp = inspect(engine)
+    assert "appointment_reminders" not in insp.get_table_names()
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "reminder_enabled" not in specialist_columns
+    engine.dispose()
+
+
 def test_working_days_migration_adds_column_and_backfills(
     alembic_config: tuple[Config, str],
     monkeypatch,
@@ -300,7 +376,7 @@ def test_working_days_migration_adds_column_and_backfills(
 
     # Stop before 0004 and seed a specialist that predates working_days.
     command.upgrade(cfg, "0003")
-    engine = create_engine(sync_url)
+    engine = create_engine(sync_url, poolclass=NullPool)
     with engine.begin() as conn:
         conn.execute(
             text(

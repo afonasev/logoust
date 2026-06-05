@@ -119,6 +119,19 @@ class RecurringMessages:
 
 
 @dataclass(frozen=True, slots=True)
+class ReminderMessages:
+    client_text: str
+    btn_confirm: str
+    btn_decline: str
+    confirmed_toast: str
+    declined_toast: str
+    specialist_declined: str
+    btn_open_appt: str
+    confirmed_mark: str
+    card_confirmed: str
+
+
+@dataclass(frozen=True, slots=True)
 class SettingsMessages:
     button: str
     title: str
@@ -127,12 +140,17 @@ class SettingsMessages:
     btn_day_end: str
     btn_slot: str
     btn_working_days: str
+    btn_reminder: str
+    btn_reminder_time: str
+    state_on: str
+    state_off: str
     btn_back: str
     pick_timezone: str
     pick_working_days: str
     ask_day_start: str
     ask_day_end: str
     ask_slot: str
+    ask_reminder_time: str
     no_working_days: str
     bad_time: str
     bad_slot: str
@@ -155,6 +173,7 @@ class BotMessages:
     clients: ClientsMessages
     schedule: ScheduleMessages
     recurring: RecurringMessages
+    reminder: ReminderMessages
     settings: SettingsMessages
     windows: WindowsMessages
 
@@ -280,6 +299,17 @@ def load_messages(path: Path) -> BotMessages:
             skipped=_require(data, "recurring.skipped"),
             moved=_require(data, "recurring.moved"),
         ),
+        reminder=ReminderMessages(
+            client_text=_require(data, "reminder.client_text").strip(),
+            btn_confirm=_require(data, "reminder.btn_confirm"),
+            btn_decline=_require(data, "reminder.btn_decline"),
+            confirmed_toast=_require(data, "reminder.confirmed_toast"),
+            declined_toast=_require(data, "reminder.declined_toast"),
+            specialist_declined=_require(data, "reminder.specialist_declined"),
+            btn_open_appt=_require(data, "reminder.btn_open_appt"),
+            confirmed_mark=_require(data, "reminder.confirmed_mark"),
+            card_confirmed=_require(data, "reminder.card_confirmed"),
+        ),
         settings=SettingsMessages(
             button=_require(data, "settings.button"),
             title=_require(data, "settings.title").strip(),
@@ -288,12 +318,17 @@ def load_messages(path: Path) -> BotMessages:
             btn_day_end=_require(data, "settings.btn_day_end"),
             btn_slot=_require(data, "settings.btn_slot"),
             btn_working_days=_require(data, "settings.btn_working_days"),
+            btn_reminder=_require(data, "settings.btn_reminder"),
+            btn_reminder_time=_require(data, "settings.btn_reminder_time"),
+            state_on=_require(data, "settings.state_on"),
+            state_off=_require(data, "settings.state_off"),
             btn_back=_require(data, "settings.btn_back"),
             pick_timezone=_require(data, "settings.pick_timezone"),
             pick_working_days=_require(data, "settings.pick_working_days"),
             ask_day_start=_require(data, "settings.ask_day_start"),
             ask_day_end=_require(data, "settings.ask_day_end"),
             ask_slot=_require(data, "settings.ask_slot"),
+            ask_reminder_time=_require(data, "settings.ask_reminder_time"),
             no_working_days=_require(data, "settings.no_working_days"),
             bad_time=_require(data, "settings.bad_time"),
             bad_slot=_require(data, "settings.bad_slot"),

@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 # Defaults for a freshly invited specialist; also the migration's server-defaults.
@@ -10,6 +10,9 @@ DEFAULT_DAY_END = "20:00"
 DEFAULT_SLOT_MINUTES = 60
 # Canonical sorted weekday indices (Mon=0…Sun=6); default working days are Mon-Fri.
 DEFAULT_WORKING_DAYS = "0,1,2,3,4"
+# Appointment reminders are opt-out (on by default) and fire at noon wall-time.
+DEFAULT_REMINDER_ENABLED = True
+DEFAULT_REMINDER_TIME = "12:00"
 
 
 class ChatIdConflictError(Exception):
@@ -31,6 +34,11 @@ class Specialist:
     slot_minutes: int = DEFAULT_SLOT_MINUTES
     # Canonical sorted weekday indices (Mon=0…Sun=6), e.g. "0,1,2,3,4".
     working_days: str = DEFAULT_WORKING_DAYS
+    # Daily client-reminder pass: on/off, wall-clock "HH:MM" trigger, and the last
+    # day (in tz) the pass ran — the anti-duplicate / catch-up guard.
+    reminder_enabled: bool = DEFAULT_REMINDER_ENABLED
+    reminder_time: str = DEFAULT_REMINDER_TIME
+    reminder_last_run_on: date | None = None
 
 
 class SpecialistsRepo(Protocol):
@@ -61,3 +69,11 @@ class SpecialistsRepo(Protocol):
     async def update_settings(  # pragma: no cover
         self, specialist_id: int, fields: Mapping[str, object]
     ) -> Specialist | None: ...
+
+    async def list_reminder_candidates(  # pragma: no cover
+        self,
+    ) -> list[Specialist]: ...
+
+    async def mark_reminder_run(  # pragma: no cover
+        self, specialist_id: int, run_on: date
+    ) -> None: ...

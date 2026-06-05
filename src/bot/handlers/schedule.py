@@ -15,9 +15,14 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.clients import SpecialistMiddleware
-from src.bot.messages import BotMessages, RecurringMessages, ScheduleMessages
+from src.bot.messages import (
+    BotMessages,
+    RecurringMessages,
+    ScheduleMessages,
+)
 from src.domain.appointment import Appointment
 from src.domain.recurring import RecurringAppointment, RecurringException
+from src.domain.reminder import ReminderStatus
 from src.domain.schedule import (
     RU_MONTHS_NOMINATIVE,
     RU_WEEKDAYS,
@@ -39,6 +44,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
 )
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import (
     AppointmentsPage,
@@ -67,6 +73,7 @@ from src.services.recurring import (
     skip_date,
     stop_series,
 )
+from src.services.reminder import status_for_occurrence, statuses_for_appointments
 from src.services.specialists import get_settings
 
 logger = logging.getLogger(__name__)
@@ -321,6 +328,8 @@ def _appt_row(  # noqa: PLR0913
     m: ScheduleMessages,
     rm: RecurringMessages,
     back: str,
+    confirmed: set[tuple[int, datetime]],
+    confirmed_mark: str,
 ) -> list[InlineKeyboardButton]:
     # A virtual occurrence (id is None) routes to the series card by
     # series_id/origin_date; a real row routes to its appointment card.
@@ -328,7 +337,11 @@ def _appt_row(  # noqa: PLR0913
     time = f"{utc_to_wall(appt.starts_at, tz):%H:%M}"
     # Only a plain occurrence is marked 🔁; a moved one looks like a one-off.
     mark = f"{rm.mark} " if appt.recurring_mark else ""
-    label = f"{mark}{time} · {child}{_comment_part(appt.comment, m)}"
+    # ✅ leads the row when the client confirmed this occurrence.
+    confirm = (
+        f"{confirmed_mark} " if (appt.client_id, appt.starts_at) in confirmed else ""
+    )
+    label = f"{confirm}{mark}{time} · {child}{_comment_part(appt.comment, m)}"
     if appt.id is None:
         assert appt.series_id is not None  # noqa: S101 — virtual rows carry a series
         assert appt.origin_date is not None  # noqa: S101
@@ -355,9 +368,23 @@ def _day_keyboard(  # noqa: PLR0913
     rm: RecurringMessages,
     prev_day: date | None,
     next_day: date | None,
+    confirmed: set[tuple[int, datetime]],
+    confirmed_mark: str,
 ) -> InlineKeyboardMarkup:
     back = f"sched:day_view:{day.isoformat()}"
-    rows = [_appt_row(appt, names, tz, m=m, rm=rm, back=back) for appt in appts]
+    rows = [
+        _appt_row(
+            appt,
+            names,
+            tz,
+            m=m,
+            rm=rm,
+            back=back,
+            confirmed=confirmed,
+            confirmed_mark=confirmed_mark,
+        )
+        for appt in appts
+    ]
     # ◀/▶ skip empty non-working days: their targets are the nearest shown day in
     # each direction (None ⇒ nothing to show that way, so omit the arrow).
     nav = []
@@ -512,6 +539,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
     ) -> None:
         self._m = messages.schedule
         self._rm = messages.recurring
+        self._rem = messages.reminder
         self._session_factory = session_factory
 
     async def _load_settings(self, specialist_id: int) -> Specialist:
@@ -800,9 +828,18 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 f"sched:day_view:{utc_to_wall(appt.starts_at, tz).date().isoformat()}"
             )
         child = await self._child_name(specialist_id, appt.client_id)
+        async with self._session_factory() as session:
+            status = await status_for_occurrence(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                client_id=appt.client_id,
+                starts_at=appt.starts_at,
+            )
+        text = render_card(appt, child, tz, self._m)
+        if status is ReminderStatus.CONFIRMED:
+            text = f"{text}\n{self._rem.card_confirmed}"
         await _callback_message(callback).edit_text(
-            render_card(appt, child, tz, self._m),
-            reply_markup=_card_keyboard(appt, self._m, back),
+            text, reply_markup=_card_keyboard(appt, self._m, back)
         )
         await callback.answer()
 
@@ -880,6 +917,11 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             names = await client_name_map(
                 SqlAlchemyClientsRepo(session), specialist_id=specialist_id
             )
+            statuses = await statuses_for_appointments(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                appointments=appts,
+            )
             prev_day = await adjacent_shown_day(
                 repo,
                 specialist_id=specialist_id,
@@ -896,6 +938,9 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 day=day,
                 forward=True,
             )
+        confirmed = {
+            key for key, st in statuses.items() if st is ReminderStatus.CONFIRMED
+        }
         return _render_day(day, appts, self._m), _day_keyboard(
             day,
             appts,
@@ -905,6 +950,8 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             rm=self._rm,
             prev_day=prev_day,
             next_day=next_day,
+            confirmed=confirmed,
+            confirmed_mark=self._rem.confirmed_mark,
         )
 
     async def show_week(self, callback: CallbackQuery, specialist_id: int) -> None:
@@ -1194,6 +1241,7 @@ class RecurringHandlers:
     ) -> None:
         self._m = messages.recurring
         self._sm = messages.schedule
+        self._rem = messages.reminder
         self._session_factory = session_factory
 
     async def _load_settings(self, specialist_id: int) -> Specialist:
@@ -1451,16 +1499,26 @@ class RecurringHandlers:
         exception = await self._load_exception(series_id, origin_date)
         back = back or f"sched:day_view:{origin_date.isoformat()}"
         child = await self._child_name(specialist_id, series.client_id)
+        tz = specialist.timezone
+        text = render_series_card(
+            series, child, origin_date, exception, tz, self._m, self._sm.dash
+        )
+        # The occurrence's UTC instant: moved → exception's time, else the rule time.
+        if exception is not None and exception.new_starts_at is not None:
+            starts_at = exception.new_starts_at
+        else:
+            starts_at = wall_to_utc(origin_date, series.time_hhmm, tz)
+        async with self._session_factory() as session:
+            status = await status_for_occurrence(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                client_id=series.client_id,
+                starts_at=starts_at,
+            )
+        if status is ReminderStatus.CONFIRMED:
+            text = f"{text}\n{self._rem.card_confirmed}"
         await _callback_message(callback).edit_text(
-            render_series_card(
-                series,
-                child,
-                origin_date,
-                exception,
-                specialist.timezone,
-                self._m,
-                self._sm.dash,
-            ),
+            text,
             reply_markup=_series_card_keyboard(series_id, origin_date, self._m, back),
         )
         await callback.answer()

@@ -5,7 +5,7 @@ goes through `zoneinfo` and an explicit specialist timezone; we never rely on th
 deploy server's local time (see design.md, decision 1).
 """
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 import re
 from zoneinfo import ZoneInfo
 
@@ -118,6 +118,65 @@ def generate_slots(day_start: str, day_end: str, slot_minutes: int) -> list[str]
         slots.append(_from_minutes(current))
         current += slot_minutes
     return slots
+
+
+_MAX_WEEKDAY = 6  # Sunday, with Monday = 0 (date.weekday convention).
+
+
+def parse_working_days(raw: str) -> list[int]:
+    """Parse a `working_days` string into sorted unique weekday indices (Mon=0…Sun=6).
+
+    Tolerates blanks and out-of-range tokens so a malformed DB value never crashes
+    the screen — invalid entries are simply dropped.
+    """
+    days: set[int] = set()
+    for raw_token in raw.split(","):
+        token = raw_token.strip()
+        if token.isdigit() and 0 <= int(token) <= _MAX_WEEKDAY:
+            days.add(int(token))
+    return sorted(days)
+
+
+def format_working_days(days: list[int]) -> str:
+    """Canonicalise weekday indices into the stored `working_days` string."""
+    return ",".join(str(d) for d in sorted(set(days)))
+
+
+def nearest_working_day(
+    start: date, working_days: set[int], *, forward: bool
+) -> date | None:
+    """Nearest working day at or beyond `start` in one direction (inclusive).
+
+    `forward` scans toward later dates, otherwise earlier. Returns None when
+    `working_days` is empty. A non-empty set always hits within seven consecutive
+    days (a full week covers every weekday), so the scan is bounded.
+    """
+    if not working_days:
+        return None
+    step = timedelta(days=1 if forward else -1)
+    cursor = start
+    for _ in range(len(RU_WEEKDAYS)):
+        if cursor.weekday() in working_days:
+            return cursor
+        cursor += step
+    return None  # pragma: no cover - unreachable for a non-empty working set
+
+
+def next_working_days(today: date, working_days: set[int], count: int) -> list[date]:
+    """The next `count` dates from `today` (inclusive) whose weekday is a working day.
+
+    Empty `working_days` returns `[]` — without this guard the scan would never
+    find a working day and loop forever (see design.md, decision 2).
+    """
+    if not working_days:
+        return []
+    result: list[date] = []
+    cursor = today
+    while len(result) < count:
+        if cursor.weekday() in working_days:
+            result.append(cursor)
+        cursor += timedelta(days=1)
+    return result
 
 
 def wall_to_utc(day: date, hhmm: str, tz: str) -> datetime:

@@ -18,6 +18,7 @@
 | `day_start`         | VARCHAR(5) | нет | Начало рабочего дня `ЧЧ:ММ`. Server-default `09:00`. |
 | `day_end`           | VARCHAR(5) | нет | Конец рабочего дня `ЧЧ:ММ`. Server-default `20:00`. |
 | `slot_minutes`      | INTEGER   | нет  | Длина слота в минутах. Server-default `60`. |
+| `working_days`      | VARCHAR(20) | нет | Рабочие дни недели — канонически отсортированная строка индексов `date.weekday()` (Пн=0…Вс=6), напр. `0,1,2,3,4`. Server-default `0,1,2,3,4` (Пн–Пт). |
 
 Индексы:
 
@@ -30,7 +31,8 @@
 - `welcomed_at` служит и таймстампом, и маркером идемпотентности: повторный `/start` по тому же токену не приведёт к повторной записи.
 - `telegram_username` — необязательное аудит-поле. Может быть `NULL` для пользователей без публичного username.
 - Поле `name` сознательно не вводится — по требованию заказчика.
-- Настройки расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) добавлены с `server_default`, чтобы у уже онбординнутых специалистов сразу была рабочая сетка. `timezone` управляет конверсией настенного времени записей ↔ UTC (см. [решение от 2026-06-04](decisions/2026-06-04_appointment_time_in_utc_per_specialist_tz.md)).
+- Настройки расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`, `working_days`) добавлены с `server_default`, чтобы у уже онбординнутых специалистов сразу была рабочая сетка. `timezone` управляет конверсией настенного времени записей ↔ UTC (см. [решение от 2026-06-04](decisions/2026-06-04_appointment_time_in_utc_per_specialist_tz.md)).
+- `working_days` хранится строкой индексов дней недели (а не битмаской), в духе остальных настроек: парсится/канонизуется хелперами `parse_working_days`/`format_working_days` из `domain/schedule.py`, читаемо в БД. Управляет расчётом свободных окон («ближайшие N рабочих дней»).
 
 ### `appointments`
 
@@ -93,6 +95,7 @@
 - `0001_initial.py` — создаёт таблицу `specialists` и оба индекса.
 - `0002_clients.py` — создаёт таблицу `clients`, FK на `specialists.id` и индекс `ix_clients_specialist_status`.
 - `0003_appointments.py` — создаёт таблицу `appointments` (FK на `specialists` и `clients`, два индекса) и добавляет в `specialists` колонки настроек расписания (`timezone`, `day_start`, `day_end`, `slot_minutes`) с `server_default`. Down-ревизия удаляет таблицу и колонки.
+- `0004_working_days.py` — добавляет в `specialists` колонку `working_days` (`String`, `server_default="0,1,2,3,4"` — Пн–Пт). Down-ревизия — `drop_column`.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

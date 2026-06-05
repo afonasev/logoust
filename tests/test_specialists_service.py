@@ -8,6 +8,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_working_day,
     update_setting,
 )
 
@@ -125,3 +126,21 @@ async def test_update_setting_not_found(session: AsyncSession):
         raw="45",
     )
     assert result is SettingsUpdateResult.NOT_FOUND
+
+
+async def test_toggle_working_day_removes_then_adds(session: AsyncSession):
+    specialist_id = await _seed(session)
+    repo = SqlAlchemySpecialistsRepo(session)
+    # Default Mon-Fri → toggling Monday (0) drops it.
+    updated = await toggle_working_day(repo, specialist_id=specialist_id, weekday=0)
+    assert updated is not None
+    assert updated.working_days == "1,2,3,4"
+    # Toggling Saturday (5) adds it, keeping the set canonically sorted.
+    updated = await toggle_working_day(repo, specialist_id=specialist_id, weekday=5)
+    assert updated is not None
+    assert updated.working_days == "1,2,3,4,5"
+
+
+async def test_toggle_working_day_not_found(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    assert await toggle_working_day(repo, specialist_id=404, weekday=0) is None

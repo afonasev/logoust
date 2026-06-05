@@ -1,7 +1,12 @@
 import enum
 import logging
 
-from src.domain.schedule import is_known_timezone, parse_hhmm
+from src.domain.schedule import (
+    format_working_days,
+    is_known_timezone,
+    parse_hhmm,
+    parse_working_days,
+)
 from src.domain.specialist import Specialist, SpecialistsRepo
 
 logger = logging.getLogger(__name__)
@@ -63,3 +68,29 @@ async def update_setting(
         extra={"specialist_id": specialist_id, "field": field.value},
     )
     return SettingsUpdateResult.UPDATED
+
+
+async def toggle_working_day(
+    repo: SpecialistsRepo, *, specialist_id: int, weekday: int
+) -> Specialist | None:
+    """Flip one weekday in the specialist's working-days set and persist it.
+
+    Reads the current set, inverts `weekday`, writes back the canonicalised
+    string. Returns the updated specialist, or None if it does not exist.
+    """
+    specialist = await repo.get(specialist_id)
+    if specialist is None:
+        return None
+    days = set(parse_working_days(specialist.working_days))
+    if weekday in days:
+        days.discard(weekday)
+    else:
+        days.add(weekday)
+    updated = await repo.update_settings(
+        specialist_id, {"working_days": format_working_days(sorted(days))}
+    )
+    logger.info(
+        "specialist.setting_updated",
+        extra={"specialist_id": specialist_id, "field": "working_days"},
+    )
+    return updated

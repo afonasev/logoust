@@ -5,18 +5,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.appointment import Appointment
 from src.domain.schedule import utc_to_wall, wall_to_utc
+from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.services.appointments import (
     PastDateError,
+    adjacent_shown_day,
     create_appointment,
     delete_appointment,
     group_by_day,
     list_client_future,
     list_client_history_page,
+    list_free_windows,
     list_specialist_future_grouped,
     list_specialist_history_week,
     nearest_future_by_client,
     reschedule_appointment,
+    schedule_landing_day,
     taken_slot_times,
 )
 
@@ -288,3 +292,211 @@ async def test_nearest_future_by_client(session: AsyncSession):
 
 def test_group_by_day_empty():
     assert group_by_day([], _TZ) == []
+
+
+def _specialist(
+    *,
+    working_days: str = "0,1,2,3,4",
+    day_start: str = "09:00",
+    day_end: str = "14:00",
+    slot_minutes: int = 60,
+) -> Specialist:
+    return Specialist(
+        id=_SPECIALIST,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=_NOW,
+        timezone=_TZ,
+        day_start=day_start,
+        day_end=day_end,
+        slot_minutes=slot_minutes,
+        working_days=working_days,
+    )
+
+
+async def test_free_windows_skips_weekend_and_hides_past_today(session: AsyncSession):
+    # today = Thu 2026-06-04, now 11:00 local. Grid 09:00-14:00 hourly.
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session), specialist=_specialist(), now=_NOW
+    )
+    assert [w.day for w in windows] == [
+        date(2026, 6, 4),  # Thu (today)
+        date(2026, 6, 5),  # Fri
+        date(2026, 6, 8),  # Mon — Sat/Sun skipped
+        date(2026, 6, 9),
+        date(2026, 6, 10),
+    ]
+    # Today hides slots at/below 11:00 → only 12:00, 13:00 remain.
+    assert windows[0].free == ["12:00", "13:00"]
+    # A clear future day shows the whole grid, ascending.
+    assert windows[1].free == ["09:00", "10:00", "11:00", "12:00", "13:00"]
+
+
+async def test_free_windows_excludes_taken_slot(session: AsyncSession):
+    await _create(session, day=date(2026, 6, 5), hhmm="10:00")
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session), specialist=_specialist(), now=_NOW
+    )
+    friday = next(w for w in windows if w.day == date(2026, 6, 5))
+    assert friday.free == ["09:00", "11:00", "12:00", "13:00"]
+
+
+async def test_free_windows_day_fully_booked_stays_with_empty_list(
+    session: AsyncSession,
+):
+    for hhmm in ("09:00", "10:00", "11:00", "12:00", "13:00"):
+        await _create(session, day=date(2026, 6, 5), hhmm=hhmm)
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session), specialist=_specialist(), now=_NOW
+    )
+    friday = next(w for w in windows if w.day == date(2026, 6, 5))
+    assert friday.free == []
+    assert len(windows) == 5  # the fully-booked day still counts toward the five
+
+
+async def test_free_windows_empty_working_days_returns_empty(session: AsyncSession):
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session),
+        specialist=_specialist(working_days=""),
+        now=_NOW,
+    )
+    assert windows == []
+
+
+_WD = {0, 1, 2, 3, 4}  # Mon-Fri
+
+
+async def test_adjacent_shown_day_forward_skips_empty_weekend(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 5),
+        forward=True,  # Friday
+    )
+    assert nxt == date(2026, 6, 8)  # Monday; empty Sat/Sun skipped
+
+
+async def test_adjacent_shown_day_backward_skips_empty_weekend(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    prev = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 8),
+        forward=False,  # Monday
+    )
+    assert prev == date(2026, 6, 5)  # Friday
+
+
+async def test_adjacent_shown_day_nonworking_with_appt_not_skipped(
+    session: AsyncSession,
+):
+    await _create(session, day=date(2026, 6, 6), hhmm="14:00")  # Saturday appt
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 5),
+        forward=True,
+    )
+    assert nxt == date(2026, 6, 6)  # the appointment day is nearer than Monday
+
+
+async def test_adjacent_shown_day_empty_working_uses_appointments(
+    session: AsyncSession,
+):
+    await _create(session, day=date(2026, 6, 10), hhmm="09:00")
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=set(),
+        tz=_TZ,
+        day=date(2026, 6, 4),
+        forward=True,
+    )
+    assert nxt == date(2026, 6, 10)
+
+
+async def test_adjacent_shown_day_none_when_nothing_ahead(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=set(),
+        tz=_TZ,
+        day=date(2026, 6, 4),
+        forward=True,
+    )
+    assert nxt is None
+
+
+async def test_adjacent_shown_day_backward_uses_past_appt(session: AsyncSession):
+    await _seed_past(session, date(2026, 6, 2))  # Tuesday, past
+    repo = SqlAlchemyAppointmentsRepo(session)
+    prev = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=set(),
+        tz=_TZ,
+        day=date(2026, 6, 4),
+        forward=False,
+    )
+    assert prev == date(2026, 6, 2)
+
+
+async def test_landing_today_when_working(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    landing = await schedule_landing_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        today=date(2026, 6, 4),  # Thursday, a working day
+    )
+    assert landing == date(2026, 6, 4)
+
+
+async def test_landing_skips_empty_nonworking_today(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    landing = await schedule_landing_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days={0, 1, 2},
+        tz=_TZ,
+        today=date(2026, 6, 4),  # Thursday is non-working here, no appts
+    )
+    assert landing == date(2026, 6, 8)  # jumps to next working day (Monday)
+
+
+async def test_landing_today_when_nonworking_but_has_appt(session: AsyncSession):
+    await _create(session, day=date(2026, 6, 4), hhmm="14:00")
+    repo = SqlAlchemyAppointmentsRepo(session)
+    landing = await schedule_landing_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days={0, 1, 2},
+        tz=_TZ,
+        today=date(2026, 6, 4),
+    )
+    assert landing == date(2026, 6, 4)  # today has an appointment → stays
+
+
+async def test_landing_falls_back_to_today_when_nothing(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    landing = await schedule_landing_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=set(),
+        tz=_TZ,
+        today=date(2026, 6, 4),
+    )
+    assert landing == date(2026, 6, 4)

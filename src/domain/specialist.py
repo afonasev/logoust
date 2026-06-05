@@ -8,6 +8,8 @@ DEFAULT_TIMEZONE = "Asia/Yekaterinburg"
 DEFAULT_DAY_START = "09:00"
 DEFAULT_DAY_END = "20:00"
 DEFAULT_SLOT_MINUTES = 60
+# Canonical sorted weekday indices (Mon=0…Sun=6); default working days are Mon-Fri.
+DEFAULT_WORKING_DAYS = "0,1,2,3,4"
 
 
 class ChatIdConflictError(Exception):
@@ -27,6 +29,8 @@ class Specialist:
     day_start: str = DEFAULT_DAY_START
     day_end: str = DEFAULT_DAY_END
     slot_minutes: int = DEFAULT_SLOT_MINUTES
+    # Canonical sorted weekday indices (Mon=0…Sun=6), e.g. "0,1,2,3,4".
+    working_days: str = DEFAULT_WORKING_DAYS
 
 
 class SpecialistsRepo(Protocol):

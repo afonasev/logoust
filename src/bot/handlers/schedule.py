@@ -24,6 +24,7 @@ from src.domain.schedule import (
     format_ru_short,
     generate_slots,
     parse_hhmm,
+    parse_working_days,
     today_in_tz,
     utc_to_wall,
 )
@@ -35,6 +36,7 @@ from src.services.appointments import (
     AppointmentsPage,
     DayGroup,
     HistoryWeek,
+    adjacent_shown_day,
     create_appointment,
     delete_appointment,
     group_by_day,
@@ -44,6 +46,7 @@ from src.services.appointments import (
     list_specialist_history_week,
     list_specialist_week,
     reschedule_appointment,
+    schedule_landing_day,
     taken_slot_times,
 )
 from src.services.clients import client_name_map
@@ -246,12 +249,15 @@ def _render_day(day: date, appts: list[Appointment], m: ScheduleMessages) -> str
     return header if appts else f"{header}\n\n{m.day_empty}"
 
 
-def _day_keyboard(
+def _day_keyboard(  # noqa: PLR0913
     day: date,
     appts: list[Appointment],
     names: dict[int, str],
     tz: str,
     m: ScheduleMessages,
+    *,
+    prev_day: date | None,
+    next_day: date | None,
 ) -> InlineKeyboardMarkup:
     back = f"sched:day_view:{day.isoformat()}"
     rows = [
@@ -264,23 +270,28 @@ def _day_keyboard(
         )
         for appt in appts
     ]
-    prev_day = (day - timedelta(days=1)).isoformat()
-    next_day = (day + timedelta(days=1)).isoformat()
-    rows.extend(
-        (
-            [
-                InlineKeyboardButton(
-                    text="◀", callback_data=f"sched:day_view:{prev_day}"
-                ),
-                InlineKeyboardButton(
-                    text="▶", callback_data=f"sched:day_view:{next_day}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(text=m.btn_week, callback_data="sched:week"),
-                InlineKeyboardButton(text=m.btn_history, callback_data="sched:hist:0"),
-            ],
+    # ◀/▶ skip empty non-working days: their targets are the nearest shown day in
+    # each direction (None ⇒ nothing to show that way, so omit the arrow).
+    nav = []
+    if prev_day is not None:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀", callback_data=f"sched:day_view:{prev_day.isoformat()}"
+            )
         )
+    if next_day is not None:
+        nav.append(
+            InlineKeyboardButton(
+                text="▶", callback_data=f"sched:day_view:{next_day.isoformat()}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append(
+        [
+            InlineKeyboardButton(text=m.btn_week, callback_data="sched:week"),
+            InlineKeyboardButton(text=m.btn_history, callback_data="sched:hist:0"),
+        ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -683,20 +694,41 @@ class ScheduleHandlers:
     ) -> tuple[str, InlineKeyboardMarkup]:
         specialist = await self._load_settings(specialist_id)
         tz = specialist.timezone
-        if day is None:  # entry point lands on today in the specialist's timezone
-            day = today_in_tz(datetime.now(UTC), tz)
+        working = set(parse_working_days(specialist.working_days))
         async with self._session_factory() as session:
+            repo = SqlAlchemyAppointmentsRepo(session)
+            if day is None:  # entry point lands on the nearest shown day from today
+                day = await schedule_landing_day(
+                    repo,
+                    specialist_id=specialist_id,
+                    working_days=working,
+                    tz=tz,
+                    today=today_in_tz(datetime.now(UTC), tz),
+                )
             appts = await list_specialist_day(
-                SqlAlchemyAppointmentsRepo(session),
-                specialist_id=specialist_id,
-                day=day,
-                tz=tz,
+                repo, specialist_id=specialist_id, day=day, tz=tz
             )
             names = await client_name_map(
                 SqlAlchemyClientsRepo(session), specialist_id=specialist_id
             )
+            prev_day = await adjacent_shown_day(
+                repo,
+                specialist_id=specialist_id,
+                working_days=working,
+                tz=tz,
+                day=day,
+                forward=False,
+            )
+            next_day = await adjacent_shown_day(
+                repo,
+                specialist_id=specialist_id,
+                working_days=working,
+                tz=tz,
+                day=day,
+                forward=True,
+            )
         return _render_day(day, appts, self._m), _day_keyboard(
-            day, appts, names, tz, self._m
+            day, appts, names, tz, self._m, prev_day=prev_day, next_day=next_day
         )
 
     async def show_week(self, callback: CallbackQuery, specialist_id: int) -> None:

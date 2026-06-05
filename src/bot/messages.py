@@ -89,14 +89,27 @@ class SettingsMessages:
     btn_day_start: str
     btn_day_end: str
     btn_slot: str
+    btn_working_days: str
+    btn_back: str
     pick_timezone: str
+    pick_working_days: str
     ask_day_start: str
     ask_day_end: str
     ask_slot: str
+    no_working_days: str
     bad_time: str
     bad_slot: str
     saved: str
     not_found: str
+
+
+@dataclass(frozen=True, slots=True)
+class WindowsMessages:
+    button: str
+    title: str
+    day_header: str
+    empty_day: str
+    no_working_days: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +118,7 @@ class BotMessages:
     clients: ClientsMessages
     schedule: ScheduleMessages
     settings: SettingsMessages
+    windows: WindowsMessages
 
 
 def _require(data: dict[str, Any], path: str) -> Any:
@@ -200,14 +214,25 @@ def load_messages(path: Path) -> BotMessages:
             btn_day_start=_require(data, "settings.btn_day_start"),
             btn_day_end=_require(data, "settings.btn_day_end"),
             btn_slot=_require(data, "settings.btn_slot"),
+            btn_working_days=_require(data, "settings.btn_working_days"),
+            btn_back=_require(data, "settings.btn_back"),
             pick_timezone=_require(data, "settings.pick_timezone"),
+            pick_working_days=_require(data, "settings.pick_working_days"),
             ask_day_start=_require(data, "settings.ask_day_start"),
             ask_day_end=_require(data, "settings.ask_day_end"),
             ask_slot=_require(data, "settings.ask_slot"),
+            no_working_days=_require(data, "settings.no_working_days"),
             bad_time=_require(data, "settings.bad_time"),
             bad_slot=_require(data, "settings.bad_slot"),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
+        ),
+        windows=WindowsMessages(
+            button=_require(data, "windows.button"),
+            title=_require(data, "windows.title"),
+            day_header=_require(data, "windows.day_header"),
+            empty_day=_require(data, "windows.empty_day"),
+            no_working_days=_require(data, "windows.no_working_days"),
         ),
     )
 

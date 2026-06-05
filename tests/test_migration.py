@@ -44,6 +44,7 @@ def test_initial_migration_creates_specialists_table(
         "day_start",
         "day_end",
         "slot_minutes",
+        "working_days",
     }
     assert set(columns) == expected
 
@@ -157,4 +158,44 @@ def test_appointments_migration_creates_table_and_backfills_settings(
     assert "appointments" not in insp.get_table_names()
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "timezone" not in specialist_columns
+    engine.dispose()
+
+
+def test_working_days_migration_adds_column_and_backfills(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0004 and seed a specialist that predates working_days.
+    command.upgrade(cfg, "0003")
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "working_days" in specialist_columns
+    with engine.connect() as conn:
+        value = conn.execute(
+            text("SELECT working_days FROM specialists WHERE invite_token = 'tok'")
+        ).scalar_one()
+    assert value == "0,1,2,3,4"
+
+    command.downgrade(cfg, "0003")
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "working_days" not in specialist_columns
     engine.dispose()

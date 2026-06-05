@@ -14,13 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.clients import SpecialistMiddleware
 from src.bot.messages import BotMessages, SettingsMessages
-from src.domain.schedule import RUSSIAN_TIMEZONES
+from src.domain.schedule import (
+    RU_WEEKDAYS_SHORT,
+    RUSSIAN_TIMEZONES,
+    parse_working_days,
+)
 from src.domain.specialist import Specialist
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_working_day,
     update_setting,
 )
 
@@ -33,6 +38,8 @@ _CB_TZLIST = "settings:tzlist"
 _CB_DAY_START = "settings:day_start"
 _CB_DAY_END = "settings:day_end"
 _CB_SLOT = "settings:slot"
+_CB_WORKDAYS = "settings:workdays"
+_CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 
 # Maps the FSM step to the setting it edits and the prompt/error texts.
 _FIELD_BY_CALLBACK = {
@@ -64,6 +71,7 @@ def _menu_keyboard(m: SettingsMessages) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=m.btn_day_end, callback_data=_CB_DAY_END),
             ],
             [InlineKeyboardButton(text=m.btn_slot, callback_data=_CB_SLOT)],
+            [InlineKeyboardButton(text=m.btn_working_days, callback_data=_CB_WORKDAYS)],
         ]
     )
 
@@ -77,12 +85,37 @@ def _timezone_keyboard(m: SettingsMessages) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _working_days_keyboard(
+    working_days: str, m: SettingsMessages
+) -> InlineKeyboardMarkup:
+    working = set(parse_working_days(working_days))
+    toggles = [
+        InlineKeyboardButton(
+            text=f"{'✅' if i in working else '⬜'} {RU_WEEKDAYS_SHORT[i]}",
+            callback_data=f"{_CB_TOGGLE_DAY}{i}",
+        )
+        for i in range(len(RU_WEEKDAYS_SHORT))
+    ]
+    # Four toggles on the first row, three on the second, then Back.
+    rows = [toggles[:4], toggles[4:]]
+    rows.append([InlineKeyboardButton(text=m.btn_back, callback_data=_CB_MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _format_working_days(working_days: str, m: SettingsMessages) -> str:
+    days = parse_working_days(working_days)
+    if not days:
+        return m.no_working_days
+    return ", ".join(RU_WEEKDAYS_SHORT[d] for d in days)
+
+
 def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
     return m.title.format(
         timezone=_TZ_LABELS.get(specialist.timezone, specialist.timezone),
         day_start=specialist.day_start,
         day_end=specialist.day_end,
         slot=specialist.slot_minutes,
+        working_days=_format_working_days(specialist.working_days, m),
     )
 
 
@@ -151,6 +184,35 @@ class SettingsHandlers:
                 raw=value,
             )
         await self.open_menu(callback, state, specialist_id)
+
+    async def show_working_days(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        specialist = await self._load(specialist_id)
+        if specialist is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await _callback_message(callback).edit_text(
+            self._m.pick_working_days,
+            reply_markup=_working_days_keyboard(specialist.working_days, self._m),
+        )
+        await callback.answer()
+
+    async def toggle_day(self, callback: CallbackQuery, specialist_id: int) -> None:
+        weekday = int((callback.data or "").removeprefix(_CB_TOGGLE_DAY))
+        async with self._session_factory() as session:
+            updated = await toggle_working_day(
+                SqlAlchemySpecialistsRepo(session),
+                specialist_id=specialist_id,
+                weekday=weekday,
+            )
+        if updated is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await _callback_message(callback).edit_reply_markup(
+            reply_markup=_working_days_keyboard(updated.working_days, self._m)
+        )
+        await callback.answer()
 
     async def ask_value(self, callback: CallbackQuery, state: FSMContext) -> None:
         field = _FIELD_BY_CALLBACK[callback.data or ""]
@@ -234,4 +296,6 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_START)
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_END)
     router.callback_query.register(h.ask_value, F.data == _CB_SLOT)
+    router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
+    router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))
     return router

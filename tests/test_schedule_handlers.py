@@ -598,6 +598,53 @@ async def test_show_week_empty_and_populated(
     assert "sched:feed" in _callbacks(_markup(populated.message.edit_text))
 
 
+async def test_open_day_skips_empty_weekend_in_navigation(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)  # default working days Mon-Fri
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-18")  # Friday
+    await h.open_day(cb, _SP)
+    cbs = _callbacks(_markup(cb.message.edit_text))
+    assert "sched:day_view:2030-01-21" in cbs  # ▶ → Monday, empty weekend skipped
+    assert "sched:day_view:2030-01-17" in cbs  # ◀ → Thursday
+    assert "sched:day_view:2030-01-19" not in cbs  # empty Saturday is not a target
+
+
+async def test_open_day_nonworking_day_with_appt_is_navigable(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    # Saturday 2030-01-19, 14:00 local (+05) → 09:00 UTC.
+    await _seed_appt(
+        session_factory,
+        client_id=client_id,
+        starts_at=datetime(2030, 1, 19, 9, 0, tzinfo=UTC),
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-18")  # Friday
+    await h.open_day(cb, _SP)
+    cbs = _callbacks(_markup(cb.message.edit_text))
+    assert "sched:day_view:2030-01-19" in cbs  # ▶ → Saturday with the appointment
+
+
+async def test_open_day_hides_arrow_without_shown_neighbour(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            sp_id, {"working_days": ""}
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-18")  # no working days, no appts
+    await h.open_day(cb, _SP)
+    cbs = _callbacks(_markup(cb.message.edit_text))
+    assert not any(c and c.startswith("sched:day_view:") for c in cbs)  # arrows hidden
+    assert "sched:week" in cbs  # week/history row still present
+
+
 async def test_show_history_by_week(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

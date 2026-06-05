@@ -3,7 +3,17 @@ from datetime import UTC, date, datetime, timedelta
 import logging
 
 from src.domain.appointment import Appointment, AppointmentsRepo
-from src.domain.schedule import day_start_utc, today_in_tz, utc_to_wall, wall_to_utc
+from src.domain.schedule import (
+    day_start_utc,
+    generate_slots,
+    nearest_working_day,
+    next_working_days,
+    parse_working_days,
+    today_in_tz,
+    utc_to_wall,
+    wall_to_utc,
+)
+from src.domain.specialist import Specialist
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +62,47 @@ async def taken_slot_times(
         for appt in rows
         if appt.id != exclude_id
     }
+
+
+@dataclass(slots=True)
+class DayWindows:
+    day: date
+    free: list[str]  # ascending wall-clock HH:MM with no appointment
+
+
+async def list_free_windows(
+    repo: AppointmentsRepo,
+    *,
+    specialist: Specialist,
+    now: datetime,
+    days: int = 5,
+) -> list[DayWindows]:
+    """Free windows for the specialist's next `days` working days, from today.
+
+    A free window is a settings-grid slot (`generate_slots`) with no appointment
+    booked at that time. For today, slots whose wall-clock time has already passed
+    (<= now in the specialist's timezone) are dropped. Empty `working_days` yields
+    an empty list (the caller shows a "not configured" hint instead).
+    """
+    assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
+    tz = specialist.timezone
+    today = today_in_tz(now, tz)
+    working = set(parse_working_days(specialist.working_days))
+    slots = generate_slots(
+        specialist.day_start, specialist.day_end, specialist.slot_minutes
+    )
+    now_wall = f"{utc_to_wall(now, tz):%H:%M}"
+    result: list[DayWindows] = []
+    for day in next_working_days(today, working, days):
+        taken = await taken_slot_times(
+            repo, specialist_id=specialist.id, day=day, tz=tz
+        )
+        free = [slot for slot in slots if slot not in taken]
+        if day == today:
+            # Strict `>`: a slot exactly at `now` counts as already started.
+            free = [slot for slot in free if slot > now_wall]
+        result.append(DayWindows(day=day, free=free))
+    return result
 
 
 def group_by_day(appointments: list[Appointment], tz: str) -> list[DayGroup]:
@@ -155,6 +206,82 @@ async def list_specialist_day(
     start = day_start_utc(day, tz)
     end = day_start_utc(day + timedelta(days=1), tz)
     return await repo.list_for_specialist_between(specialist_id, start=start, end=end)
+
+
+async def _nearest_appt_day(
+    repo: AppointmentsRepo, *, specialist_id: int, tz: str, day: date, forward: bool
+) -> date | None:
+    """Calendar day (in `tz`) of the nearest appointment strictly past `day`."""
+    if forward:
+        rows = await repo.list_future_for_specialist(
+            specialist_id, since=day_start_utc(day + timedelta(days=1), tz)
+        )
+    else:
+        rows = await repo.list_past_for_specialist(
+            specialist_id, before=day_start_utc(day, tz), limit=1, offset=0
+        )
+    if not rows:
+        return None
+    return utc_to_wall(rows[0].starts_at, tz).date()
+
+
+async def adjacent_shown_day(  # noqa: PLR0913
+    repo: AppointmentsRepo,
+    *,
+    specialist_id: int,
+    working_days: set[int],
+    tz: str,
+    day: date,
+    forward: bool,
+) -> date | None:
+    """Nearest *shown* day strictly past `day` in one direction, or None.
+
+    A shown day is a working day or a day that has at least one appointment;
+    empty non-working days are skipped. Combines a bounded pure scan for the
+    nearest working day with a single query for the nearest day that has an
+    appointment, then picks the closer of the two.
+    """
+    start = day + timedelta(days=1) if forward else day - timedelta(days=1)
+    work_day = nearest_working_day(start, working_days, forward=forward)
+    appt_day = await _nearest_appt_day(
+        repo, specialist_id=specialist_id, tz=tz, day=day, forward=forward
+    )
+    candidates = [d for d in (work_day, appt_day) if d is not None]
+    if not candidates:
+        return None
+    return min(candidates) if forward else max(candidates)
+
+
+async def schedule_landing_day(
+    repo: AppointmentsRepo,
+    *,
+    specialist_id: int,
+    working_days: set[int],
+    tz: str,
+    today: date,
+) -> date:
+    """Day the schedule opens on: today when it is shown, else the next shown day.
+
+    Today is shown when it is a working day or already has appointments. When it
+    is an empty non-working day, land on the nearest forward shown day; if there
+    is none, stay on today (it will render the "no appointments" message).
+    """
+    if today.weekday() in working_days:
+        return today
+    todays = await list_specialist_day(
+        repo, specialist_id=specialist_id, day=today, tz=tz
+    )
+    if todays:
+        return today
+    forward = await adjacent_shown_day(
+        repo,
+        specialist_id=specialist_id,
+        working_days=working_days,
+        tz=tz,
+        day=today,
+        forward=True,
+    )
+    return forward or today
 
 
 async def list_specialist_week(

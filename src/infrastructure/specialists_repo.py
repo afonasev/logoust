@@ -11,6 +11,7 @@ from src.domain.specialist import (
     DEFAULT_DAY_START,
     DEFAULT_SLOT_MINUTES,
     DEFAULT_TIMEZONE,
+    DEFAULT_WORKING_DAYS,
     ChatIdConflictError,
     Specialist,
 )
@@ -42,6 +43,9 @@ class SpecialistORM(Base):
     slot_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=DEFAULT_SLOT_MINUTES
     )
+    working_days: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=DEFAULT_WORKING_DAYS
+    )
 
     def __repr__(self) -> str:
         return f"<SpecialistORM id={self.id} token={self.invite_token[:6]}…>"
@@ -59,6 +63,7 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         day_start=orm.day_start,
         day_end=orm.day_end,
         slot_minutes=orm.slot_minutes,
+        working_days=orm.working_days,
     )
 
 

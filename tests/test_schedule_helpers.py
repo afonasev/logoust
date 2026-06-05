@@ -4,9 +4,13 @@ from zoneinfo import ZoneInfo
 from src.domain.schedule import (
     day_start_utc as boundary,
     format_ru_date,
+    format_working_days,
     generate_slots,
     is_known_timezone,
+    nearest_working_day,
+    next_working_days,
     parse_hhmm,
+    parse_working_days,
     today_in_tz,
     utc_to_wall,
     wall_to_utc,
@@ -79,3 +83,61 @@ def test_day_start_utc_is_local_midnight():
 
 def test_format_ru_date_genitive_month_and_weekday():
     assert format_ru_date(date(2026, 5, 2)) == "2 мая, суббота"
+
+
+def test_parse_working_days_sorts_dedups_and_drops_invalid():
+    assert parse_working_days("4,0,1,1, 2 ") == [0, 1, 2, 4]
+    assert parse_working_days("7,-1,abc,3") == [3]  # out-of-range / non-digit dropped
+    assert parse_working_days("") == []
+
+
+def test_format_working_days_canonicalises():
+    assert format_working_days([4, 0, 2, 0]) == "0,2,4"
+    assert not format_working_days([])
+
+
+def test_parse_format_round_trip():
+    assert format_working_days(parse_working_days("0,1,2,3,4")) == "0,1,2,3,4"
+
+
+def test_next_working_days_skips_weekend():
+    # 2026-06-05 is Friday; Mon-Fri working days.
+    days = next_working_days(date(2026, 6, 5), {0, 1, 2, 3, 4}, 5)
+    assert days == [
+        date(2026, 6, 5),  # Fri
+        date(2026, 6, 8),  # Mon (Sat/Sun skipped)
+        date(2026, 6, 9),
+        date(2026, 6, 10),
+        date(2026, 6, 11),
+    ]
+
+
+def test_next_working_days_includes_today_when_working():
+    days = next_working_days(date(2026, 6, 4), {3}, 2)  # only Thursdays
+    assert days == [date(2026, 6, 4), date(2026, 6, 11)]
+
+
+def test_next_working_days_empty_set_returns_empty():
+    assert next_working_days(date(2026, 6, 4), set(), 5) == []
+
+
+def test_nearest_working_day_forward_skips_weekend():
+    # 2026-06-06 is Saturday; nearest working day forward (Mon-Fri) is Monday 06-08.
+    assert nearest_working_day(date(2026, 6, 6), {0, 1, 2, 3, 4}, forward=True) == date(
+        2026, 6, 8
+    )
+
+
+def test_nearest_working_day_backward_skips_weekend():
+    # From Saturday backward, nearest working day is Friday 06-05.
+    assert nearest_working_day(
+        date(2026, 6, 6), {0, 1, 2, 3, 4}, forward=False
+    ) == date(2026, 6, 5)
+
+
+def test_nearest_working_day_inclusive_when_start_is_working():
+    assert nearest_working_day(date(2026, 6, 5), {4}, forward=True) == date(2026, 6, 5)
+
+
+def test_nearest_working_day_empty_set_is_none():
+    assert nearest_working_day(date(2026, 6, 5), set(), forward=True) is None

@@ -85,12 +85,13 @@ class EditClient(StatesGroup):
 
 
 def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура специалиста: клиенты, расписание, настройки."""
+    """Постоянная клавиатура специалиста: клиенты, расписание, окна, настройки."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(text=messages.clients.button),
                 KeyboardButton(text=messages.schedule.button),
+                KeyboardButton(text=messages.windows.button),
             ],
             [KeyboardButton(text=messages.settings.button)],
         ],

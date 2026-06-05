@@ -85,6 +85,21 @@ def test_render_settings_shows_timezone_label():
     text = render_settings(specialist, m)
     assert "Екатеринбург" in text  # default tz label
     assert "09:00" in text
+    assert "Пн, Вт, Ср, Чт, Пт" in text  # noqa: RUF001 — default working days
+
+
+def test_render_settings_shows_no_working_days_hint():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+        working_days="",
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    assert m.no_working_days in render_settings(specialist, m)
 
 
 async def test_show_menu_renders_settings(
@@ -186,6 +201,30 @@ async def test_apply_day_end_invalid_reasks(
     await h.apply_day_end(msg, state, _SP)
     assert _texts(msg.answer)[0] == messages.settings.bad_time
     assert state.state == EditSetting.day_end
+
+
+async def test_show_working_days_renders_toggle_screen(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:workdays")
+    await h.show_working_days(cb, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.settings.pick_working_days
+
+
+async def test_toggle_day_persists_and_redraws(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:wd:0")  # toggle Monday off (default is Mon-Fri)
+    await h.toggle_day(cb, _SP)
+    cb.message.edit_reply_markup.assert_awaited()
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.working_days == "1,2,3,4"
 
 
 async def test_apply_slot_invalid_then_valid(

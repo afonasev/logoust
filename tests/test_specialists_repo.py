@@ -135,6 +135,16 @@ async def test_add_applies_schedule_defaults(session: AsyncSession):
     assert saved.day_start == "09:00"
     assert saved.day_end == "20:00"
     assert saved.slot_minutes == 60
+    assert saved.working_days == "0,1,2,3,4"
+
+
+async def test_update_settings_persists_working_days(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-wd"))
+    assert saved.id is not None
+    updated = await repo.update_settings(saved.id, {"working_days": "0,2,4"})
+    assert updated is not None
+    assert updated.working_days == "0,2,4"
 
 
 async def test_get_returns_specialist_with_settings(session: AsyncSession):

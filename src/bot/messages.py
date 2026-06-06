@@ -346,6 +346,8 @@ class WindowsMessages:
     day_header: str
     empty_day: str
     no_working_days: str
+    button_all: str
+    button_adjacent: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,6 +736,8 @@ def load_messages(path: Path) -> BotMessages:
             day_header=_require(data, "windows.day_header"),
             empty_day=_require(data, "windows.empty_day"),
             no_working_days=_require(data, "windows.no_working_days"),
+            button_all=_require(data, "windows.button_all"),
+            button_adjacent=_require(data, "windows.button_adjacent"),
         ),
         templates=TemplatesMessages(
             btn_open=_require(data, "templates.btn_open"),

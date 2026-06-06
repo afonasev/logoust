@@ -32,6 +32,23 @@ def _text(msg: AsyncMock) -> str:
     return msg.answer.await_args.args[0]
 
 
+def _fake_callback(data: str) -> AsyncMock:
+    callback = AsyncMock()
+    callback.data = data
+    callback.message = AsyncMock()
+    callback.message.edit_text = AsyncMock()
+    callback.answer = AsyncMock()
+    return callback
+
+
+def _edited_text(callback: AsyncMock) -> str:
+    return callback.message.edit_text.await_args.args[0]
+
+
+def _edited_keyboard(callback: AsyncMock):
+    return callback.message.edit_text.await_args.kwargs["reply_markup"]
+
+
 async def _seed_specialist(factory: async_sessionmaker[AsyncSession]) -> int:
     async with factory() as session:
         specialist = await create_invite(SqlAlchemySpecialistsRepo(session))
@@ -66,11 +83,24 @@ def test_render_windows_groups_days_and_marks_empty():
         DayWindows(day=date(2026, 6, 5), free=["09:00", "10:00"]),
         DayWindows(day=date(2026, 6, 8), free=[]),
     ]
-    text = render_windows(windows, m)
+    text, keyboard = render_windows(windows, m, adjacent=False)
     assert m.title in text
     assert "5 июня" in text
     assert "09:00, 10:00" in text
     assert m.empty_day in text  # the fully-booked day still appears
+    # Two mode buttons; the "all" button is marked active in the default mode.
+    buttons = keyboard.inline_keyboard[0]
+    assert [b.callback_data for b in buttons] == ["windows:all", "windows:adjacent"]
+    assert buttons[0].text.startswith("●")
+    assert not buttons[1].text.startswith("●")
+
+
+def test_render_windows_marks_adjacent_active():
+    m = load_messages(DEFAULT_MESSAGES_PATH).windows
+    _, keyboard = render_windows([], m, adjacent=True)
+    buttons = keyboard.inline_keyboard[0]
+    assert not buttons[0].text.startswith("●")
+    assert buttons[1].text.startswith("●")
 
 
 async def test_show_no_working_days_branch(
@@ -156,3 +186,72 @@ async def test_show_excludes_series_repeat_slot(
     day_header = messages.windows.day_header.format(date=format_ru_date(target))
     block = text.split(day_header, 1)[1].split("\n\n", 1)[0]
     assert "14:00" not in block
+
+
+async def test_show_includes_mode_keyboard_default_all(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    msg = _fake_message()
+    await _handlers(messages, session_factory).show(msg, sp_id)
+    keyboard = msg.answer.await_args.kwargs["reply_markup"]
+    buttons = keyboard.inline_keyboard[0]
+    assert buttons[0].text.startswith("●")  # the "all" button is active by default
+    assert not buttons[1].text.startswith("●")
+
+
+async def test_switch_to_adjacent_edits_message_and_marks_active(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    now = datetime.now(UTC)
+    today = today_in_tz(now, _TZ)
+    target = next_working_days(today, {0, 1, 2, 3, 4}, 5)[-1]
+    # One booked slot so its neighbours surface in adjacent mode.
+    async with session_factory() as session:
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=sp_id,
+            client_id=7,
+            day=target,
+            hhmm="11:00",
+            comment=None,
+            tz=_TZ,
+            now=now,
+        )
+    callback = _fake_callback("windows:adjacent")
+    await _handlers(messages, session_factory).switch(callback, sp_id)
+    keyboard = _edited_keyboard(callback)
+    assert keyboard.inline_keyboard[0][1].text.startswith("●")  # adjacent active
+    # Adjacent shows 10:00 and 12:00 (neighbours of 11:00) on the target day.
+    text = _edited_text(callback)
+    day_header = messages.windows.day_header.format(date=format_ru_date(target))
+    block = text.split(day_header, 1)[1].split("\n\n", 1)[0]
+    assert "10:00" in block
+    assert "12:00" in block
+    assert "09:00" not in block  # no taken neighbour
+    callback.answer.assert_awaited_once()
+
+
+async def test_switch_back_to_all_marks_all_active(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    callback = _fake_callback("windows:all")
+    await _handlers(messages, session_factory).switch(callback, sp_id)
+    keyboard = _edited_keyboard(callback)
+    assert keyboard.inline_keyboard[0][0].text.startswith("●")  # the "all" button
+
+
+async def test_switch_no_working_days_hint_without_keyboard(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sp_id = await _seed_specialist(session_factory)
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            sp_id, {"working_days": ""}
+        )
+    callback = _fake_callback("windows:adjacent")
+    await _handlers(messages, session_factory).switch(callback, sp_id)
+    assert _edited_text(callback) == messages.windows.no_working_days
+    assert _edited_keyboard(callback) is None

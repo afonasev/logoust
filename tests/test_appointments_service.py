@@ -406,6 +406,58 @@ async def test_free_windows_empty_working_days_returns_empty(session: AsyncSessi
     assert windows == []
 
 
+async def test_free_windows_adjacent_keeps_only_neighbours_of_taken(
+    session: AsyncSession,
+):
+    # Grid 09:00…14:00 hourly (day_end 15:00 so 14:00 is in the grid). Book 11:00
+    # and 14:00 on a clear future day (spec scenario).
+    await _create(session, day=date(2026, 6, 5), hhmm="11:00")
+    await _create(session, day=date(2026, 6, 5), hhmm="14:00")
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session),
+        specialist=_specialist(day_end="15:00"),
+        now=_NOW,
+        adjacent=True,
+    )
+    friday = next(w for w in windows if w.day == date(2026, 6, 5))
+    # 10:00, 12:00 neighbour 11:00; 13:00 neighbours 14:00; 09:00 has no taken
+    # neighbour (08:00 is outside the grid) so it is dropped.
+    assert friday.free == ["10:00", "12:00", "13:00"]
+
+
+async def test_free_windows_adjacent_empty_day_shows_no_windows(
+    session: AsyncSession,
+):
+    # A day with no appointments has no taken neighbours → no adjacent windows.
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session),
+        specialist=_specialist(),
+        now=_NOW,
+        adjacent=True,
+    )
+    friday = next(w for w in windows if w.day == date(2026, 6, 5))
+    assert friday.free == []
+
+
+async def test_free_windows_adjacent_past_anchor_today_yields_future_neighbour(
+    session: AsyncSession,
+):
+    # _NOW = 11:00 local today (2026-06-04). 09:00 is in the past but still anchors
+    # 10:00 — yet 10:00 is also past, so the real future neighbour is none here.
+    # Book 12:00 (future) so 13:00 surfaces, and 11:00 (past, == now) anchors 12:00.
+    await _create(session, day=date(2026, 6, 4), hhmm="11:00")
+    windows = await list_free_windows(
+        SqlAlchemyAppointmentsRepo(session),
+        specialist=_specialist(),
+        now=_NOW,
+        adjacent=True,
+    )
+    today = next(w for w in windows if w.day == date(2026, 6, 4))
+    # 11:00 is taken (and past); 12:00 neighbours it and is in the future → shown.
+    # 13:00 has no taken neighbour. Past slots <= 11:00 are dropped.
+    assert today.free == ["12:00"]
+
+
 _WD = {0, 1, 2, 3, 4}  # Mon-Fri
 
 

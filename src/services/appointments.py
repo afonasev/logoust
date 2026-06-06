@@ -92,20 +92,45 @@ class DayWindows:
     free: list[str]  # ascending wall-clock HH:MM with no appointment
 
 
-async def list_free_windows(
+def _free_slots(slots: list[str], taken: set[str], *, adjacent: bool) -> list[str]:
+    """Slots not in `taken`; in `adjacent` mode only those next to a taken slot.
+
+    Adjacency is purely positional on the uniform grid: a free slot qualifies when
+    its previous or next grid slot is taken. Day boundaries are not virtual
+    neighbours, so a day with no appointments yields no adjacent windows
+    (design.md, decision 1).
+    """
+    if not adjacent:
+        return [slot for slot in slots if slot not in taken]
+    return [
+        slot
+        for i, slot in enumerate(slots)
+        if slot not in taken
+        and (
+            (i and slots[i - 1] in taken)
+            or (i + 1 < len(slots) and slots[i + 1] in taken)
+        )
+    ]
+
+
+async def list_free_windows(  # noqa: PLR0913
     repo: AppointmentsRepo,
     *,
     specialist: Specialist,
     now: datetime,
     days: int = 5,
     series: SeriesContext | None = None,
+    adjacent: bool = False,
 ) -> list[DayWindows]:
     """Free windows for the specialist's next `days` working days, from today.
 
     A free window is a settings-grid slot (`generate_slots`) with no appointment
-    booked at that time. For today, slots whose wall-clock time has already passed
-    (<= now in the specialist's timezone) are dropped. Empty `working_days` yields
-    an empty list (the caller shows a "not configured" hint instead).
+    booked at that time. In `adjacent` mode only slots whose previous or next grid
+    slot is taken are kept (uplift schedule density). For today, slots whose
+    wall-clock time has already passed (<= now in the specialist's timezone) are
+    dropped — after the adjacency filter, so a taken slot in the past still anchors
+    a future neighbour. Empty `working_days` yields an empty list (the caller shows
+    a "not configured" hint instead).
     """
     assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
     tz = specialist.timezone
@@ -120,7 +145,7 @@ async def list_free_windows(
         taken = await taken_slot_times(
             repo, specialist_id=specialist.id, day=day, tz=tz, series=series
         )
-        free = [slot for slot in slots if slot not in taken]
+        free = _free_slots(slots, taken, adjacent=adjacent)
         if day == today:
             # Strict `>`: a slot exactly at `now` counts as already started.
             free = [slot for slot in free if slot > now_wall]

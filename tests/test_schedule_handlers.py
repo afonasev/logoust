@@ -2,11 +2,15 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.schedule import (
     Schedule,
     ScheduleHandlers,
+    _notify_callback,
+    _parse_notify,
+    _series_notify_callback,
     build_calendar,
     build_slots_keyboard,
     render_card,
@@ -14,7 +18,7 @@ from src.bot.handlers.schedule import (
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
 from src.domain.reminder import AppointmentReminder, ReminderStatus
-from src.domain.schedule import today_in_tz, wall_to_utc
+from src.domain.schedule import format_ru_date, today_in_tz, utc_to_wall, wall_to_utc
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
@@ -118,6 +122,32 @@ async def _seed_client(
             ),
         )
     assert client.id is not None
+    return client.id
+
+
+async def _seed_linked_client(
+    factory: async_sessionmaker[AsyncSession], *, chat_id: int, child: str = "Петя"
+) -> int:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        repo = SqlAlchemyClientsRepo(session)
+        client = await add_client(
+            repo,
+            NewClient(
+                specialist_id=_SP,
+                child_name=child,
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        await repo.link_telegram(
+            client.id,
+            telegram_chat_id=chat_id,
+            username=None,
+            linked_at=now,
+            updated_at=now,
+        )
     return client.id
 
 
@@ -925,3 +955,305 @@ async def test_card_no_mark_when_declined(
     cb = _fake_callback(f"sched:card:{appt.id}")
     await h.show_card(cb, _SP)
     assert messages.reminder.card_confirmed not in _texts(cb.message.edit_text)[0]
+
+
+# --- notify the client --------------------------------------------------------
+
+
+def _all_callbacks(mock: AsyncMock) -> list[str | None]:
+    # Flatten the inline-keyboard callbacks across every call of an answer mock.
+    out: list[str | None] = []
+    for call in mock.await_args_list:
+        markup = call.kwargs.get("reply_markup")
+        if markup is not None:
+            out.extend(_callbacks(markup))
+    return out
+
+
+def test_notify_callback_round_trip():
+    starts_at = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+    data = _notify_callback("r", 123456, starts_at)
+    assert data == "sched:ntf:r:123456:202606101200"
+    event, client_id, parsed = _parse_notify(data)
+    assert event == "r"
+    assert client_id == 123456
+    assert parsed == starts_at
+
+
+async def test_create_asks_to_notify_linked_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(
+        data={
+            "flow": "create",
+            "client_id": client_id,
+            "day": "2030-01-15",
+            "hhmm": "14:00",
+        }
+    )
+    await h.skip_comment(cb, state, _SP)
+    # The last message is the Yes/No notify prompt previewing the client text.
+    prompt = _markup(cb.message.answer)
+    cbs = _callbacks(prompt)
+    assert any(c and c.startswith(f"sched:ntf:c:{client_id}:") for c in cbs)
+    assert "sched:ntfno" in cbs
+    last_text = _texts(cb.message.answer)[-1]
+    wall = utc_to_wall(datetime(2030, 1, 15, 9, 0, tzinfo=UTC), _TZ)
+    preview = messages.schedule.notify_created.format(
+        date=format_ru_date(wall.date()), time=f"{wall:%H:%M}"
+    )
+    assert preview in last_text
+
+
+async def test_create_does_not_ask_for_unlinked_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)  # not linked to the bot
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(
+        data={
+            "flow": "create",
+            "client_id": client_id,
+            "day": "2030-01-15",
+            "hhmm": "14:00",
+        }
+    )
+    await h.skip_comment(cb, state, _SP)
+    assert not any(
+        c and c.startswith("sched:ntf") for c in _all_callbacks(cb.message.answer)
+    )
+
+
+async def test_reschedule_asks_to_notify_linked_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    state = _state(
+        data={"flow": "reschedule", "appointment_id": appt.id, "day": "2031-02-20"}
+    )
+    slot_cb = _fake_callback("sched:slot:1000")
+    await h.pick_slot(slot_cb, state, _SP)
+    cbs = _callbacks(_markup(slot_cb.message.answer))
+    assert any(c and c.startswith(f"sched:ntf:r:{client_id}:") for c in cbs)
+    assert "sched:ntfno" in cbs
+
+
+async def test_delete_asks_to_notify_linked_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    del_cb = _fake_callback(f"sched:delyes:{appt.id}~clients:card:{client_id}")
+    await h.do_delete(del_cb, _SP)
+    # "Deleted" is the edited message; the notify prompt is a separate answer.
+    assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
+    cbs = _callbacks(_markup(del_cb.message.answer))
+    # Cancellation notifies with event=x and the (now-deleted) appointment's time.
+    assert any(c and c.startswith(f"sched:ntf:x:{client_id}:") for c in cbs)
+
+
+async def test_delete_does_not_ask_for_unlinked_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)  # not linked
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    del_cb = _fake_callback(f"sched:delyes:{appt.id}~")
+    await h.do_delete(del_cb, _SP)
+    del_cb.message.answer.assert_not_awaited()
+
+
+async def test_delete_missing_appointment_does_not_ask(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    del_cb = _fake_callback("sched:delyes:999~")
+    await h.do_delete(del_cb, _SP)
+    del_cb.message.answer.assert_not_awaited()
+
+
+async def test_notify_sends_text_for_each_event(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)  # 14:00 local (+05)
+    wall = utc_to_wall(starts_at, _TZ)
+    cases = [
+        ("c", messages.schedule.notify_created),
+        ("r", messages.schedule.notify_rescheduled),
+        ("x", messages.schedule.notify_cancelled),
+    ]
+    for event, template in cases:
+        cb = _fake_callback(_notify_callback(event, client_id, starts_at))
+        await h.notify(cb, _SP)
+        cb.bot.send_message.assert_awaited_once()
+        assert cb.bot.send_message.await_args.args[0] == 555
+        expected = template.format(
+            date=format_ru_date(wall.date()), time=f"{wall:%H:%M}"
+        )
+        assert cb.bot.send_message.await_args.args[1] == expected
+        # The prompt is replaced with the "sent" outcome (keyboard dropped).
+        assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_sent
+
+
+async def test_notify_failed_on_forbidden(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
+    cb.bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await h.notify(cb, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
+
+
+async def test_notify_failed_on_bad_request(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
+    cb.bot.send_message.side_effect = TelegramBadRequest(
+        method=None,  # type: ignore[arg-type]
+        message="chat not found",
+    )
+    await h.notify(cb, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
+
+
+async def test_notify_not_linked_when_chat_missing(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)  # never linked
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
+    await h.notify(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
+
+
+async def test_notify_not_linked_for_foreign_client(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    # Client id the specialist does not own → get_for_specialist returns None.
+    cb = _fake_callback(_notify_callback("c", 4242, _FUTURE))
+    await h.notify(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
+
+
+async def test_notify_skip_declines(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfno")
+    await h.notify_skip(cb)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_skipped
+    cb.bot.send_message.assert_not_awaited()
+
+
+# --- notify the client: series (whole-rule) ----------------------------------
+
+
+async def test_regular_flow_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("каждую неделю")
+    state = _state(
+        data={
+            "flow": "create",
+            "client_id": client_id,
+            "day": "2030-01-15",  # a Tuesday
+            "hhmm": "14:00",
+            "regular": True,
+        }
+    )
+    await h.apply_comment(msg, state, _SP)
+    # The last message is the series notify prompt (event=c, weekly rule).
+    cbs = _callbacks(_markup(msg.answer))
+    assert any(c and c.startswith(f"sched:ntfs:c:{client_id}:") for c in cbs)
+    assert "sched:ntfno" in cbs
+
+
+async def test_notify_series_sends_text_for_each_event(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cases = [
+        (
+            "c",
+            messages.schedule.notify_series_created.format(
+                rule="каждый четверг в 14:00"
+            ),
+        ),
+        (
+            "m",
+            messages.schedule.notify_series_changed.format(
+                rule="каждый четверг в 14:00"
+            ),
+        ),
+        ("x", messages.schedule.notify_series_cancelled.format(time="14:00")),
+    ]
+    for event, expected in cases:
+        cb = _fake_callback(_series_notify_callback(event, client_id, 3, "14:00"))
+        await h.notify_series(cb, _SP)
+        cb.bot.send_message.assert_awaited_once()
+        assert cb.bot.send_message.await_args.args[0] == 555
+        assert cb.bot.send_message.await_args.args[1] == expected
+        assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_sent
+
+
+async def test_notify_series_not_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)  # never linked
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_series_notify_callback("c", client_id, 3, "14:00"))
+    await h.notify_series(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
+
+
+async def test_notify_series_failed_on_forbidden(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_series_notify_callback("x", client_id, 3, "14:00"))
+    cb.bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await h.notify_series(cb, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed

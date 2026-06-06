@@ -4,6 +4,7 @@ import logging
 from typing import cast
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -22,6 +23,7 @@ from src.bot.messages import (
     ScheduleMessages,
 )
 from src.domain.appointment import Appointment
+from src.domain.client import Client
 from src.domain.recurring import RecurringAppointment, RecurringException
 from src.domain.reminder import ReminderStatus
 from src.domain.schedule import (
@@ -94,6 +96,9 @@ _CB_NOOP = "sched:noop"
 _CB_CANCEL = "sched:cancel"
 _CB_FEED = "sched:feed"
 _CB_SKIP = "sched:skip"
+# "No" on the notify-the-client prompt (no colon after "ntfno" so it never matches
+# the "sched:ntf:" prefix of the send action).
+_CB_NOTIFY_NO = "sched:ntfno"
 
 
 class Schedule(StatesGroup):
@@ -527,6 +532,144 @@ def _last_int(callback_data: str | None) -> int:
     return int((callback_data or "").rsplit(":", 1)[1])
 
 
+# Notify-the-client callbacks. A one-off occurrence travels as
+# "sched:ntf:<event>:<client_id>:<stamp>" (event ∈ {c, r, x} = created /
+# rescheduled / cancelled; stamp = the appointment's UTC instant as YYYYMMDDHHMM —
+# the time travels in the callback so a cancellation can be announced after the row
+# is gone). A whole series travels as "sched:ntfs:<event>:<client_id>:<wd>:<hhmm>"
+# (event ∈ {c, m, x} = created / modified / cancelled; the message describes the
+# weekly rule, not a single date).
+_NOTIFY_STAMP_FMT = "%Y%m%d%H%M"
+
+
+def _notify_callback(event: str, client_id: int, starts_at: datetime) -> str:
+    return f"sched:ntf:{event}:{client_id}:{starts_at.strftime(_NOTIFY_STAMP_FMT)}"
+
+
+def _parse_notify(callback_data: str | None) -> tuple[str, int, datetime]:
+    _, _, event, raw_client, stamp = (callback_data or "").split(":")
+    starts_at = datetime.strptime(stamp, _NOTIFY_STAMP_FMT).replace(tzinfo=UTC)
+    return event, int(raw_client), starts_at
+
+
+def _series_notify_callback(event: str, client_id: int, weekday: int, hhmm: str) -> str:
+    return f"sched:ntfs:{event}:{client_id}:{weekday}:{hhmm.replace(':', '')}"
+
+
+def _parse_series_notify(callback_data: str | None) -> tuple[str, int, int, str]:
+    _, _, event, raw_client, raw_wd, raw_hhmm = (callback_data or "").split(":")
+    return event, int(raw_client), int(raw_wd), f"{raw_hhmm[:2]}:{raw_hhmm[2:]}"
+
+
+def _notify_text(event: str, starts_at: datetime, tz: str, m: ScheduleMessages) -> str:
+    wall = utc_to_wall(starts_at, tz)
+    template = {
+        "c": m.notify_created,
+        "r": m.notify_rescheduled,
+        "x": m.notify_cancelled,
+    }[event]
+    return template.format(date=format_ru_date(wall.date()), time=f"{wall:%H:%M}")
+
+
+def _series_notify_text(
+    event: str, weekday: int, hhmm: str, m: ScheduleMessages
+) -> str:
+    # "Каждый четверг" → "каждый четверг" so it reads inside a sentence.
+    every = RU_WEEKDAYS_EVERY[weekday]
+    rule = f"{every[0].lower()}{every[1:]} в {hhmm}"
+    if event == "c":
+        return m.notify_series_created.format(rule=rule)
+    if event == "m":
+        return m.notify_series_changed.format(rule=rule)
+    return m.notify_series_cancelled.format(time=hhmm)
+
+
+def _notify_cb_for(
+    event: str, client: Client | None, starts_at: datetime
+) -> str | None:
+    # The notify step is offered only for a client linked to the bot.
+    if client is None or client.telegram_chat_id is None:
+        return None
+    assert client.id is not None  # noqa: S101 — persisted clients always have an id
+    return _notify_callback(event, client.id, starts_at)
+
+
+def _series_notify_cb_for(
+    event: str, client: Client | None, weekday: int, hhmm: str
+) -> str | None:
+    if client is None or client.telegram_chat_id is None:
+        return None
+    assert client.id is not None  # noqa: S101 — persisted clients always have an id
+    return _series_notify_callback(event, client.id, weekday, hhmm)
+
+
+def _notify_ask_keyboard(notify_cb: str, m: ScheduleMessages) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=m.notify_yes, callback_data=notify_cb),
+                InlineKeyboardButton(text=m.notify_no, callback_data=_CB_NOTIFY_NO),
+            ]
+        ]
+    )
+
+
+async def _ask_notify(  # noqa: PLR0913, PLR0917
+    target: Message,
+    event: str,
+    client: Client | None,
+    starts_at: datetime,
+    tz: str,
+    m: ScheduleMessages,
+) -> None:
+    # Final step after a one-off create/reschedule/delete result: offer to notify
+    # the client, but only when they are linked (nothing to send to otherwise).
+    notify_cb = _notify_cb_for(event, client, starts_at)
+    if notify_cb is None:
+        return
+    preview = _notify_text(event, starts_at, tz, m)
+    await target.answer(
+        m.notify_ask.format(text=preview),
+        reply_markup=_notify_ask_keyboard(notify_cb, m),
+    )
+
+
+async def _ask_series_notify(  # noqa: PLR0913, PLR0917
+    target: Message,
+    event: str,
+    client: Client | None,
+    weekday: int,
+    hhmm: str,
+    m: ScheduleMessages,
+) -> None:
+    # Final step after a series create/edit/stop: the message describes the weekly
+    # rule ("каждый четверг в 14:00"), not a single date.
+    notify_cb = _series_notify_cb_for(event, client, weekday, hhmm)
+    if notify_cb is None:
+        return
+    preview = _series_notify_text(event, weekday, hhmm, m)
+    await target.answer(
+        m.notify_ask.format(text=preview),
+        reply_markup=_notify_ask_keyboard(notify_cb, m),
+    )
+
+
+async def _send_notify(
+    callback: CallbackQuery, chat_id: int, text: str, extra: dict[str, int]
+) -> bool:
+    # Shared delivery for one-off and series notify "Yes": send and report success.
+    # Failure (client blocked the bot / chat gone) is swallowed — the appointment
+    # operation stays applied; the caller shows the outcome.
+    assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+    try:
+        await callback.bot.send_message(chat_id, text)
+    except (TelegramForbiddenError, TelegramBadRequest):
+        logger.warning("appointment.notify_failed", extra=extra)
+        return False
+    logger.info("appointment.notified", extra=extra)
+    return True
+
+
 # --- handlers -----------------------------------------------------------------
 
 
@@ -555,6 +698,12 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 client_id, specialist_id
             )
         return client.child_name if client is not None else self._m.dash
+
+    async def _load_client(self, specialist_id: int, client_id: int) -> Client | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyClientsRepo(session).get_for_specialist(
+                client_id, specialist_id
+            )
 
     # --- picker entry & navigation -------------------------------------------
 
@@ -719,7 +868,8 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 tz=specialist.timezone,
                 now=datetime.now(UTC),
             )
-        child = await self._child_name(specialist_id, data["client_id"])
+        client = await self._load_client(specialist_id, data["client_id"])
+        child = client.child_name if client is not None else self._m.dash
         await state.clear()
         await target.answer(self._m.created)
         # Back from a freshly created appointment returns to the client card.
@@ -729,6 +879,9 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             child,
             specialist.timezone,
             f"clients:card:{data['client_id']}",
+        )
+        await _ask_notify(
+            target, "c", client, appt.starts_at, specialist.timezone, self._m
         )
 
     async def _finish_regular(
@@ -755,7 +908,8 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 start_date=day,  # the picked date is the first occurrence
             )
         assert series.id is not None  # noqa: S101 — saved series always have an id
-        child = await self._child_name(specialist_id, client_id)
+        client = await self._load_client(specialist_id, client_id)
+        child = client.child_name if client is not None else self._m.dash
         await state.clear()
         await target.answer(self._rm.created)
         await target.answer(
@@ -771,6 +925,9 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             reply_markup=_series_card_keyboard(
                 series.id, series.start_date, self._rm, f"clients:card:{client_id}"
             ),
+        )
+        await _ask_series_notify(
+            target, "c", client, series.weekday, series.time_hhmm, self._m
         )
 
     async def _do_reschedule(
@@ -792,11 +949,15 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         if moved is None:
             await target.answer(self._m.not_found)
             return
-        child = await self._child_name(specialist_id, moved.client_id)
+        client = await self._load_client(specialist_id, moved.client_id)
+        child = client.child_name if client is not None else self._m.dash
         await target.answer(self._m.rescheduled)
         # Back from a rescheduled appointment returns to its (new) day.
         await self._send_card(
             target, moved, child, specialist.timezone, f"sched:day_view:{data['day']}"
+        )
+        await _ask_notify(
+            target, "r", client, moved.starts_at, specialist.timezone, self._m
         )
 
     async def _send_card(
@@ -856,14 +1017,63 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         head, _, back = (callback.data or "").partition("~")
         appt_id = int(head.rsplit(":", 1)[1])
         async with self._session_factory() as session:
+            repo = SqlAlchemyAppointmentsRepo(session)
+            # Read the appointment before deleting it so the notify text (client +
+            # time) can still be built afterwards (see design.md, decision 2).
+            appt = await repo.get_for_specialist(appt_id, specialist_id)
             await delete_appointment(
-                SqlAlchemyAppointmentsRepo(session),
-                appointment_id=appt_id,
-                specialist_id=specialist_id,
+                repo, appointment_id=appt_id, specialist_id=specialist_id
             )
-        await _callback_message(callback).edit_text(
+        target = _callback_message(callback)
+        await target.edit_text(
             self._m.deleted, reply_markup=_deleted_keyboard(self._m, back or None)
         )
+        if appt is not None:
+            specialist = await self._load_settings(specialist_id)
+            client = await self._load_client(specialist_id, appt.client_id)
+            await _ask_notify(
+                target, "x", client, appt.starts_at, specialist.timezone, self._m
+            )
+        await callback.answer()
+
+    # --- notify the client ---------------------------------------------------
+
+    async def notify(self, callback: CallbackQuery, specialist_id: int) -> None:
+        # "Yes" on a one-off notify prompt (concrete date/time travels in the cb).
+        event, client_id, starts_at = _parse_notify(callback.data)
+        specialist = await self._load_settings(specialist_id)
+        message = _callback_message(callback)
+        # Re-check the link at send time: it may have been cleared since the prompt
+        # was shown (and get_for_specialist isolates by owner).
+        client = await self._load_client(specialist_id, client_id)
+        if client is None or client.telegram_chat_id is None:
+            await message.edit_text(self._m.notify_not_linked)
+            await callback.answer()
+            return
+        text = _notify_text(event, starts_at, specialist.timezone, self._m)
+        extra = {"specialist_id": specialist_id, "client_id": client_id}
+        sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
+        await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
+        await callback.answer()
+
+    async def notify_series(self, callback: CallbackQuery, specialist_id: int) -> None:
+        # "Yes" on a series notify prompt (the weekly rule travels in the cb).
+        event, client_id, weekday, hhmm = _parse_series_notify(callback.data)
+        message = _callback_message(callback)
+        client = await self._load_client(specialist_id, client_id)
+        if client is None or client.telegram_chat_id is None:
+            await message.edit_text(self._m.notify_not_linked)
+            await callback.answer()
+            return
+        text = _series_notify_text(event, weekday, hhmm, self._m)
+        extra = {"specialist_id": specialist_id, "client_id": client_id}
+        sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
+        await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
+        await callback.answer()
+
+    async def notify_skip(self, callback: CallbackQuery) -> None:
+        # "No" on the notify prompt: replace it with a short confirmation.
+        await _callback_message(callback).edit_text(self._m.notify_skipped)
         await callback.answer()
 
     async def cancel(
@@ -1257,6 +1467,12 @@ class RecurringHandlers:
             )
         return client.child_name if client is not None else self._sm.dash
 
+    async def _load_client(self, specialist_id: int, client_id: int) -> Client | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyClientsRepo(session).get_for_specialist(
+                client_id, specialist_id
+            )
+
     async def _load_series(
         self, series_id: int, specialist_id: int
     ) -> RecurringAppointment | None:
@@ -1447,6 +1663,11 @@ class RecurringHandlers:
             return
         await target.answer(self._m.created)
         await self._send_series_card(target, specialist_id, series, back)
+        # Editing changes the weekly rule → notify with the series ("modified") text.
+        client = await self._load_client(specialist_id, series.client_id)
+        await _ask_series_notify(
+            target, "m", client, series.weekday, series.time_hhmm, self._sm
+        )
 
     async def _do_move(
         self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
@@ -1473,6 +1694,13 @@ class RecurringHandlers:
             return
         await target.answer(
             self._m.moved, reply_markup=_deleted_keyboard(self._sm, card or None)
+        )
+        # Moving a single date → notify about that one occurrence (concrete date).
+        series = await self._load_series(data["series_id"], specialist_id)
+        assert series is not None  # noqa: S101 — move succeeded, so the series exists
+        client = await self._load_client(specialist_id, series.client_id)
+        await _ask_notify(
+            target, "r", client, new_starts_at, specialist.timezone, self._sm
         )
 
     # --- series card ---------------------------------------------------------
@@ -1577,8 +1805,14 @@ class RecurringHandlers:
         if stopped is None:
             await callback.answer(self._m.not_found, show_alert=True)
             return
-        await _callback_message(callback).edit_text(
+        target = _callback_message(callback)
+        await target.edit_text(
             self._m.stopped, reply_markup=_deleted_keyboard(self._sm, back or None)
+        )
+        # Stopping the whole series → notify with the series ("cancelled") text.
+        client = await self._load_client(specialist_id, stopped.client_id)
+        await _ask_series_notify(
+            target, "x", client, stopped.weekday, stopped.time_hhmm, self._sm
         )
         await callback.answer()
 
@@ -1612,9 +1846,17 @@ class RecurringHandlers:
         if skipped is None:
             await callback.answer(self._m.not_found, show_alert=True)
             return
-        await _callback_message(callback).edit_text(
+        target = _callback_message(callback)
+        await target.edit_text(
             self._m.skipped, reply_markup=_deleted_keyboard(self._sm, back or None)
         )
+        # Cancelling a single date → notify about that one occurrence (rule time).
+        specialist = await self._load_settings(specialist_id)
+        series = await self._load_series(series_id, specialist_id)
+        assert series is not None  # noqa: S101 — skip succeeded, so the series exists
+        client = await self._load_client(specialist_id, series.client_id)
+        starts_at = wall_to_utc(origin_date, series.time_hhmm, specialist.timezone)
+        await _ask_notify(target, "x", client, starts_at, specialist.timezone, self._sm)
         await callback.answer()
 
     async def cancel(self, callback: CallbackQuery, state: FSMContext) -> None:
@@ -1697,4 +1939,7 @@ def build_router(
     router.callback_query.register(h.show_card, F.data.startswith("sched:card:"))
     router.callback_query.register(h.confirm_delete, F.data.startswith("sched:del:"))
     router.callback_query.register(h.do_delete, F.data.startswith("sched:delyes:"))
+    router.callback_query.register(h.notify_skip, F.data == _CB_NOTIFY_NO)
+    router.callback_query.register(h.notify_series, F.data.startswith("sched:ntfs:"))
+    router.callback_query.register(h.notify, F.data.startswith("sched:ntf:"))
     return router

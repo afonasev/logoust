@@ -92,6 +92,19 @@ class ScheduleMessages:
     btn_history: str
     btn_today: str
     btn_week: str
+    notify_ask: str
+    notify_yes: str
+    notify_no: str
+    notify_created: str
+    notify_rescheduled: str
+    notify_cancelled: str
+    notify_series_created: str
+    notify_series_changed: str
+    notify_series_cancelled: str
+    notify_sent: str
+    notify_failed: str
+    notify_not_linked: str
+    notify_skipped: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +341,19 @@ def load_messages(path: Path) -> BotMessages:
             btn_history=_require(data, "schedule.btn_history"),
             btn_today=_require(data, "schedule.btn_today"),
             btn_week=_require(data, "schedule.btn_week"),
+            notify_ask=_require(data, "schedule.notify_ask"),
+            notify_yes=_require(data, "schedule.notify_yes"),
+            notify_no=_require(data, "schedule.notify_no"),
+            notify_created=_require(data, "schedule.notify_created"),
+            notify_rescheduled=_require(data, "schedule.notify_rescheduled"),
+            notify_cancelled=_require(data, "schedule.notify_cancelled"),
+            notify_series_created=_require(data, "schedule.notify_series_created"),
+            notify_series_changed=_require(data, "schedule.notify_series_changed"),
+            notify_series_cancelled=_require(data, "schedule.notify_series_cancelled"),
+            notify_sent=_require(data, "schedule.notify_sent"),
+            notify_failed=_require(data, "schedule.notify_failed"),
+            notify_not_linked=_require(data, "schedule.notify_not_linked"),
+            notify_skipped=_require(data, "schedule.notify_skipped"),
         ),
         recurring=RecurringMessages(
             button=_require(data, "recurring.button"),

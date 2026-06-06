@@ -68,6 +68,7 @@ max-nested-blocks = 3
     "S106",    # Same — keyword args carry test fixtures, not credentials
     "PLR2004", # Allow magic values in tests
     "PLC0415", # Allow local imports inside test functions (lazy setup)
+    "PLC2701", # Allow importing module-internal helpers under test
     "FBT",     # Allow boolean args in tests
 ]
 

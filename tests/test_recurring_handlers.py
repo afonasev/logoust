@@ -120,6 +120,32 @@ async def _seed_client(factory: async_sessionmaker[AsyncSession]) -> int:
     return client.id
 
 
+async def _seed_linked_client(
+    factory: async_sessionmaker[AsyncSession], *, chat_id: int
+) -> int:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        repo = SqlAlchemyClientsRepo(session)
+        client = await add_client(
+            repo,
+            NewClient(
+                specialist_id=_SP,
+                child_name="Петя",
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        await repo.link_telegram(
+            client.id,
+            telegram_chat_id=chat_id,
+            username=None,
+            linked_at=now,
+            updated_at=now,
+        )
+    return client.id
+
+
 async def _seed_series(  # noqa: PLR0913
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -550,6 +576,83 @@ async def test_cancel_clears_state(
     await h.cancel(cb, state)
     assert messages.recurring.cancelled in _texts(cb.message.edit_text)
     assert await state.get_data() == {}
+
+
+# --- notify the client (series + per-date) ----------------------------------
+
+
+async def test_edit_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
+    await h.pick_weekday(_fake_callback("recur:wd:3"), state, _SP)  # Thursday
+    await h.pick_slot(_fake_callback("recur:slot:1100"), state, _SP)
+    msg = _fake_message("новый")
+    await h.apply_comment(msg, state, _SP)
+    # Series edit → "modified" prompt describing the new weekly rule.
+    cbs = _callbacks(_markup(msg.answer))
+    assert any(c and c.startswith(f"sched:ntfs:m:{client_id}:") for c in cbs)
+    assert "sched:ntfno" in cbs
+
+
+async def test_stop_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    do = _fake_callback(f"recur:stop:{series_id}")
+    await h.do_stop(do, _SP)
+    assert messages.recurring.stopped in _texts(do.message.edit_text)
+    cbs = _callbacks(_markup(do.message.answer))
+    assert any(c and c.startswith(f"sched:ntfs:x:{client_id}:") for c in cbs)
+
+
+async def test_move_asks_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_move(_fake_callback(f"recur:move:{series_id}:2026-06-22"), state, _SP)
+    await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
+    do = _fake_callback("recur:slot:1600")
+    await h.pick_slot(do, state, _SP)
+    # Moving one date → single-occurrence "rescheduled" prompt (concrete date).
+    cbs = _callbacks(_markup(do.message.answer))
+    assert any(c and c.startswith(f"sched:ntf:r:{client_id}:") for c in cbs)
+    assert "sched:ntfno" in cbs
+
+
+async def test_skip_asks_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    do = _fake_callback(f"recur:skip:{series_id}:2026-06-22")
+    await h.do_skip(do, _SP)
+    assert messages.recurring.skipped in _texts(do.message.edit_text)
+    # Cancelling one date → single-occurrence "cancelled" prompt (concrete date).
+    cbs = _callbacks(_markup(do.message.answer))
+    assert any(c and c.startswith(f"sched:ntf:x:{client_id}:") for c in cbs)
 
 
 # --- rendering of virtual occurrences ---------------------------------------

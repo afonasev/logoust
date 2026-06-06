@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.settings import (
@@ -11,9 +12,14 @@ from src.bot.handlers.settings import (
     render_settings,
 )
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
+from src.domain.schedule import today_in_tz
 from src.domain.specialist import Specialist
+from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.appointments import create_appointment
+from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
 from src.services.message_templates import (
     resolve_template,
@@ -372,6 +378,178 @@ async def test_apply_slot_invalid_then_valid(
         updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
     assert updated is not None
     assert updated.slot_minutes == 45
+
+
+def test_render_settings_shows_digest_state():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    text = render_settings(specialist, m)
+    assert "🌅 Расписание на день" in text
+    assert "10:00" in text  # default digest time
+
+
+async def test_noop_header_just_answers(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:noop")
+    await h.noop(cb)
+    cb.answer.assert_awaited_once()
+
+
+async def test_toggle_digest_flips_flag(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest")
+    await h.toggle_digest(cb, _state(), _SP)
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.morning_notify_enabled is False
+
+
+async def test_ask_value_digest_time_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest_time")
+    state = _state()
+    await h.ask_value(cb, state)
+    assert state.state == EditSetting.digest_time
+    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_digest_time
+
+
+async def test_apply_digest_time_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("8:30")
+    state = _state(state=EditSetting.digest_time)
+    await h.apply_digest_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.morning_notify_time == "08:30"
+
+
+async def test_apply_digest_time_invalid_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("24:00")
+    state = _state(state=EditSetting.digest_time)
+    await h.apply_digest_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.bad_time
+    assert state.state == EditSetting.digest_time
+
+
+async def _welcome(factory: async_sessionmaker[AsyncSession], *, chat_id: int) -> None:
+    async with factory() as session:
+        await SqlAlchemySpecialistsRepo(session).mark_welcomed(
+            _SP,
+            telegram_chat_id=chat_id,
+            telegram_username=None,
+            welcomed_at=datetime.now(UTC),
+        )
+
+
+async def _seed_today_appointment(factory: async_sessionmaker[AsyncSession]) -> None:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        client = await add_client(
+            SqlAlchemyClientsRepo(session),
+            NewClient(
+                specialist_id=_SP,
+                child_name="Петя",
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=_SP,
+            client_id=client.id,
+            day=today_in_tz(now, "Asia/Yekaterinburg"),
+            hhmm="10:00",
+            comment=None,
+            tz="Asia/Yekaterinburg",
+            now=now,
+        )
+
+
+async def test_send_digest_now_sends_and_keeps_last_run_on(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    await _seed_today_appointment(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest_now")
+    await h.send_digest_now(cb, _SP)
+    cb.bot.send_message.assert_awaited_once()
+    assert cb.bot.send_message.await_args.args[0] == 999
+    # Manual send must not stamp the day — the real morning digest still fires.
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.morning_notify_last_run_on is None
+
+
+async def test_send_digest_now_delivery_failure_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    await _seed_today_appointment(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest_now")
+    cb.bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await h.send_digest_now(cb, _SP)
+    assert _texts(cb.answer)[0] == messages.settings.digest_now_failed
+
+
+async def test_send_digest_now_empty_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest_now")
+    await h.send_digest_now(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.answer)[0] == messages.settings.digest_now_empty
+
+
+async def test_send_digest_now_works_when_disabled(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    await _seed_today_appointment(session_factory)
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            _SP, {"morning_notify_enabled": False}
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:digest_now")
+    await h.send_digest_now(cb, _SP)
+    cb.bot.send_message.assert_awaited_once()
 
 
 # --- client message templates ------------------------------------------------

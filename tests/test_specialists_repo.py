@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -177,6 +177,53 @@ async def test_update_settings_persists_fields(session: AsyncSession):
 async def test_update_settings_returns_none_when_missing(session: AsyncSession):
     repo = SqlAlchemySpecialistsRepo(session)
     assert await repo.update_settings(404, {"slot_minutes": 30}) is None
+
+
+async def test_add_applies_digest_defaults(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-digest"))
+    assert saved.morning_notify_enabled is True
+    assert saved.morning_notify_time == "10:00"
+    assert saved.morning_notify_last_run_on is None
+
+
+async def test_list_digest_candidates_only_enabled_and_welcomed(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    # Welcomed + enabled → a candidate.
+    on = await repo.add(_make("token-on"))
+    assert on.id is not None
+    await repo.mark_welcomed(
+        on.id,
+        telegram_chat_id=11,
+        telegram_username=None,
+        welcomed_at=datetime.now(UTC),
+    )
+    # Welcomed but disabled → excluded.
+    off = await repo.add(_make("token-off"))
+    assert off.id is not None
+    await repo.mark_welcomed(
+        off.id,
+        telegram_chat_id=22,
+        telegram_username=None,
+        welcomed_at=datetime.now(UTC),
+    )
+    await repo.update_settings(off.id, {"morning_notify_enabled": False})
+    # Enabled but never welcomed (no chat to send to) → excluded.
+    await repo.add(_make("token-unwelcomed"))
+
+    candidates = await repo.list_digest_candidates()
+    assert [c.id for c in candidates] == [on.id]
+
+
+async def test_mark_digest_run_sets_last_run_on(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-mark"))
+    assert saved.id is not None
+    run_on = date(2026, 6, 15)
+    await repo.mark_digest_run(saved.id, run_on)
+    fetched = await repo.get(saved.id)
+    assert fetched is not None
+    assert fetched.morning_notify_last_run_on == run_on
 
 
 def test_orm_repr_includes_token_prefix():

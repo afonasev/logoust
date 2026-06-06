@@ -21,6 +21,7 @@ class SettingField(enum.Enum):
     DAY_END = "day_end"
     SLOT_MINUTES = "slot_minutes"
     REMINDER_TIME = "reminder_time"
+    DIGEST_TIME = "morning_notify_time"
     SUBSCRIPTION_PRESETS = "subscription_presets"
 
 
@@ -43,6 +44,7 @@ def _normalize(field: SettingField, raw: str) -> object | None:
         SettingField.DAY_START,
         SettingField.DAY_END,
         SettingField.REMINDER_TIME,
+        SettingField.DIGEST_TIME,
     }:
         return parse_hhmm(value)
     if field is SettingField.SUBSCRIPTION_PRESETS:
@@ -95,6 +97,27 @@ async def toggle_reminder(
     logger.info(
         "specialist.setting_updated",
         extra={"specialist_id": specialist_id, "field": "reminder_enabled"},
+    )
+    return updated
+
+
+async def toggle_digest(
+    repo: SpecialistsRepo, *, specialist_id: int
+) -> Specialist | None:
+    """Flip the morning-digest on/off flag and persist it.
+
+    Returns the updated specialist, or None if it does not exist.
+    """
+    specialist = await repo.get(specialist_id)
+    if specialist is None:
+        return None
+    updated = await repo.update_settings(
+        specialist_id,
+        {"morning_notify_enabled": not specialist.morning_notify_enabled},
+    )
+    logger.info(
+        "specialist.setting_updated",
+        extra={"specialist_id": specialist_id, "field": "morning_notify_enabled"},
     )
     return updated
 

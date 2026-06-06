@@ -22,6 +22,9 @@
 | `reminder_enabled`  | BOOLEAN     | нет | Включены ли авто-напоминания клиентам. Server-default `1` (opt-out). |
 | `reminder_time`     | VARCHAR(5)  | нет | Настенное `ЧЧ:ММ` ежедневного прохода напоминаний. Server-default `12:00`. |
 | `reminder_last_run_on` | DATE     | да  | Дата (в tz) последнего выполненного прохода напоминаний; антидубль/догон. `NULL` — ещё не выполнялся. |
+| `morning_notify_enabled` | BOOLEAN | нет | Включена ли утренняя сводка специалисту. Server-default `1` (opt-out). |
+| `morning_notify_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` ежедневной утренней сводки. Server-default `10:00`. |
+| `morning_notify_last_run_on` | DATE | да  | Дата (в tz) последнего «решения за день» по сводке; антидубль/догон. `NULL` — ещё не выполнялся. |
 | `subscription_presets` | VARCHAR(64) | нет | Варианты числа встреч (кнопки) при создании/продлении абонемента — список через запятую, канонизированный (по возрастанию, без повторов). Server-default `4,8,12`. |
 
 Индексы:
@@ -218,6 +221,7 @@
 - `0008_subscriptions.py` — добавляет в `specialists` колонку `subscription_default` (server-default `8`); создаёт таблицу `subscriptions` (FK на `clients` и `specialists`, индекс `ix_subscriptions_client_status`). Существующие специалисты → `subscription_default = 8`. Down-ревизия удаляет таблицу и колонку.
 - `0009_message_templates.py` — создаёт таблицу `message_templates` (FK на `specialists`, `UNIQUE(specialist_id, template_key)`). Данные не наполняются: отсутствие строки = дефолт из `messages.toml`. Down-ревизия удаляет таблицу.
 - `0010_subscription_presets.py` — заменяет в `specialists` колонку `subscription_default` (одно число) на `subscription_presets` (список вариантов через запятую, server-default `4,8,12`). Существующие специалисты получают стандартный список; старое значение не переносится. Down-ревизия возвращает `subscription_default` (server-default `8`).
+- `0011_morning_digest.py` — добавляет в `specialists` колонки `morning_notify_enabled` (server-default `1`), `morning_notify_time` (server-default `10:00`), `morning_notify_last_run_on` (nullable). Существующие специалисты → утренняя сводка включена на 10:00. Down-ревизия удаляет три колонки.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

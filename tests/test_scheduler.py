@@ -5,7 +5,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
-from src.bot.scheduler import run_reminder_pass
+from src.bot.scheduler import run_digest_pass, run_reminder_pass
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
@@ -119,3 +119,79 @@ async def test_delivery_failure_does_not_stop_pass(
     await run_reminder_pass(bot, session_factory, _messages(), _NOW)
     # Both clients were attempted despite the first one failing.
     assert bot.send_message.await_count == 2
+
+
+_TODAY = date(2026, 6, 15)
+
+
+async def _welcome_specialist(
+    factory: async_sessionmaker[AsyncSession], *, chat_id: int
+) -> None:
+    async with factory() as session:
+        await SqlAlchemySpecialistsRepo(session).mark_welcomed(
+            _SP, telegram_chat_id=chat_id, telegram_username=None, welcomed_at=_NOW
+        )
+
+
+async def _seed_today_appointment(
+    factory: async_sessionmaker[AsyncSession], client_id: int, hhmm: str
+) -> None:
+    async with factory() as session:
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=_SP,
+            client_id=client_id,
+            day=_TODAY,
+            hhmm=hhmm,
+            comment=None,
+            tz=_TZ,
+            now=_NOW,
+        )
+
+
+async def test_digest_pass_sends_to_due_specialist(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=777)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_today_appointment(session_factory, client_id, "14:00")
+    bot = AsyncMock()
+    await run_digest_pass(bot, session_factory, _messages(), _NOW)
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.args[0] == 777
+
+
+async def test_digest_pass_skips_non_due_specialist(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=777)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_today_appointment(session_factory, client_id, "14:00")
+    bot = AsyncMock()
+    # 04:00 UTC → 09:00 wall, before the 10:00 digest trigger.
+    await run_digest_pass(
+        bot, session_factory, _messages(), datetime(2026, 6, 15, 4, 0, tzinfo=UTC)
+    )
+    bot.send_message.assert_not_awaited()
+
+
+async def test_digest_pass_logs_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=777)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_today_appointment(session_factory, client_id, "14:00")
+    bot = AsyncMock()
+    bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    # The pass swallows the delivery error; the day is still marked done.
+    await run_digest_pass(bot, session_factory, _messages(), _NOW)
+    async with session_factory() as session:
+        specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert specialist is not None
+    assert specialist.morning_notify_last_run_on == _TODAY

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.dispatcher import build_dispatcher
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
-from src.bot.scheduler import run_reminder_pass
+from src.bot.scheduler import run_digest_pass, run_reminder_pass
 from src.config import settings
 from src.infrastructure.db import build_engine, build_session_factory
 from src.logging_setup import setup_logging
@@ -33,10 +33,17 @@ async def _scheduler_loop(
 ) -> None:
     while True:
         await _sleep_to_next_minute()
+        now = datetime.now(UTC)
+        # Each pass is independently guarded so a failure in one never skips the
+        # other and never kills the loop (and thus polling).
         try:
-            await run_reminder_pass(bot, session_factory, messages, datetime.now(UTC))
+            await run_reminder_pass(bot, session_factory, messages, now)
         except Exception:
             logger.exception("scheduler.pass_failed")
+        try:
+            await run_digest_pass(bot, session_factory, messages, now)
+        except Exception:
+            logger.exception("scheduler.digest_pass_failed")
 
 
 async def main() -> None:

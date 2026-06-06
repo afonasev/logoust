@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
 
+from src.domain.schedule import today_in_tz, utc_to_wall
+
 # Defaults for a freshly invited specialist; also the migration's server-defaults.
 DEFAULT_TIMEZONE = "Asia/Yekaterinburg"
 DEFAULT_DAY_START = "09:00"
@@ -13,6 +15,10 @@ DEFAULT_WORKING_DAYS = "0,1,2,3,4"
 # Appointment reminders are opt-out (on by default) and fire at noon wall-time.
 DEFAULT_REMINDER_ENABLED = True
 DEFAULT_REMINDER_TIME = "12:00"
+# The specialist's morning digest is opt-out (on by default) and fires at 10:00
+# wall-time in their timezone.
+DEFAULT_MORNING_NOTIFY_ENABLED = True
+DEFAULT_MORNING_NOTIFY_TIME = "10:00"
 # Варианты числа встреч (кнопки) при создании/продлении абонемента — список
 # через запятую, канонизированный (по возрастанию, без повторов).
 DEFAULT_SUBSCRIPTION_PRESETS = "4,8,12"
@@ -42,8 +48,30 @@ class Specialist:
     reminder_enabled: bool = DEFAULT_REMINDER_ENABLED
     reminder_time: str = DEFAULT_REMINDER_TIME
     reminder_last_run_on: date | None = None
+    # Daily morning digest to the specialist: on/off, wall-clock "HH:MM" trigger, and
+    # the last day (in tz) the pass ran — the anti-duplicate / catch-up guard.
+    morning_notify_enabled: bool = DEFAULT_MORNING_NOTIFY_ENABLED
+    morning_notify_time: str = DEFAULT_MORNING_NOTIFY_TIME
+    morning_notify_last_run_on: date | None = None
     # Дефолтное число встреч в абонементе, подставляемое в подсказку создания/продления.
     subscription_presets: str = DEFAULT_SUBSCRIPTION_PRESETS
+
+
+def is_digest_due(specialist: "Specialist", now: datetime) -> bool:
+    """Whether the morning digest pass should run for `specialist` at `now`.
+
+    True when the digest is enabled, the specialist's wall-clock time has reached
+    `morning_notify_time`, and the pass has not already run today (in their
+    timezone). The `>=` threshold gives a catch-up after downtime; the day-stamp
+    guard makes repeat ticks and restarts no-ops (see design.md, decision 2).
+    """
+    if not specialist.morning_notify_enabled:
+        return False
+    tz = specialist.timezone
+    if specialist.morning_notify_last_run_on == today_in_tz(now, tz):
+        return False
+    # Both sides are zero-padded "HH:MM", so a lexical compare is a time compare.
+    return f"{utc_to_wall(now, tz):%H:%M}" >= specialist.morning_notify_time
 
 
 class SpecialistsRepo(Protocol):
@@ -80,5 +108,13 @@ class SpecialistsRepo(Protocol):
     ) -> list[Specialist]: ...
 
     async def mark_reminder_run(  # pragma: no cover
+        self, specialist_id: int, run_on: date
+    ) -> None: ...
+
+    async def list_digest_candidates(  # pragma: no cover
+        self,
+    ) -> list[Specialist]: ...
+
+    async def mark_digest_run(  # pragma: no cover
         self, specialist_id: int, run_on: date
     ) -> None: ...

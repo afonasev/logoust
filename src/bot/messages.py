@@ -4,6 +4,7 @@ import tomllib
 from typing import Any
 
 from src.domain.reminder import ReminderStatus
+from src.services.digest import DigestMessages
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +172,14 @@ class SettingsMessages:
     btn_slot: str
     btn_working_days: str
     btn_reminder: str
+    btn_reminder_on: str
+    btn_reminder_off: str
     btn_reminder_time: str
+    btn_digest: str
+    btn_digest_on: str
+    btn_digest_off: str
+    btn_digest_time: str
+    btn_digest_now: str
     btn_subscription_presets: str
     state_on: str
     state_off: str
@@ -182,11 +190,14 @@ class SettingsMessages:
     ask_day_end: str
     ask_slot: str
     ask_reminder_time: str
+    ask_digest_time: str
     ask_subscription_presets: str
     no_working_days: str
     bad_time: str
     bad_slot: str
     bad_subscription_presets: str
+    digest_now_empty: str
+    digest_now_failed: str
     saved: str
     not_found: str
 
@@ -261,6 +272,7 @@ class BotMessages:
     recurring: RecurringMessages
     reminder: ReminderMessages
     settings: SettingsMessages
+    digest: DigestMessages
     subscriptions: SubscriptionsMessages
     windows: WindowsMessages
     templates: TemplatesMessages
@@ -423,7 +435,14 @@ def load_messages(path: Path) -> BotMessages:
             btn_slot=_require(data, "settings.btn_slot"),
             btn_working_days=_require(data, "settings.btn_working_days"),
             btn_reminder=_require(data, "settings.btn_reminder"),
+            btn_reminder_on=_require(data, "settings.btn_reminder_on"),
+            btn_reminder_off=_require(data, "settings.btn_reminder_off"),
             btn_reminder_time=_require(data, "settings.btn_reminder_time"),
+            btn_digest=_require(data, "settings.btn_digest"),
+            btn_digest_on=_require(data, "settings.btn_digest_on"),
+            btn_digest_off=_require(data, "settings.btn_digest_off"),
+            btn_digest_time=_require(data, "settings.btn_digest_time"),
+            btn_digest_now=_require(data, "settings.btn_digest_now"),
             btn_subscription_presets=_require(
                 data, "settings.btn_subscription_presets"
             ),
@@ -436,6 +455,7 @@ def load_messages(path: Path) -> BotMessages:
             ask_day_end=_require(data, "settings.ask_day_end"),
             ask_slot=_require(data, "settings.ask_slot"),
             ask_reminder_time=_require(data, "settings.ask_reminder_time"),
+            ask_digest_time=_require(data, "settings.ask_digest_time"),
             ask_subscription_presets=_require(
                 data, "settings.ask_subscription_presets"
             ),
@@ -445,8 +465,16 @@ def load_messages(path: Path) -> BotMessages:
             bad_subscription_presets=_require(
                 data, "settings.bad_subscription_presets"
             ),
+            digest_now_empty=_require(data, "settings.digest_now_empty"),
+            digest_now_failed=_require(data, "settings.digest_now_failed"),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
+        ),
+        digest=DigestMessages(
+            title=_require(data, "digest.title"),
+            line=_require(data, "digest.line"),
+            comment_suffix=_require(data, "digest.comment_suffix"),
+            dash=_require(data, "digest.dash"),
         ),
         subscriptions=SubscriptionsMessages(
             button=_require(data, "subscriptions.button"),

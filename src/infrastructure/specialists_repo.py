@@ -9,6 +9,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.domain.specialist import (
     DEFAULT_DAY_END,
     DEFAULT_DAY_START,
+    DEFAULT_MORNING_NOTIFY_ENABLED,
+    DEFAULT_MORNING_NOTIFY_TIME,
     DEFAULT_REMINDER_ENABLED,
     DEFAULT_REMINDER_TIME,
     DEFAULT_SLOT_MINUTES,
@@ -56,6 +58,13 @@ class SpecialistORM(Base):
         String(5), nullable=False, default=DEFAULT_REMINDER_TIME
     )
     reminder_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    morning_notify_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=DEFAULT_MORNING_NOTIFY_ENABLED
+    )
+    morning_notify_time: Mapped[str] = mapped_column(
+        String(5), nullable=False, default=DEFAULT_MORNING_NOTIFY_TIME
+    )
+    morning_notify_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     subscription_presets: Mapped[str] = mapped_column(
         String(64), nullable=False, default=DEFAULT_SUBSCRIPTION_PRESETS
     )
@@ -80,6 +89,9 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         reminder_enabled=bool(orm.reminder_enabled),
         reminder_time=orm.reminder_time,
         reminder_last_run_on=orm.reminder_last_run_on,
+        morning_notify_enabled=bool(orm.morning_notify_enabled),
+        morning_notify_time=orm.morning_notify_time,
+        morning_notify_last_run_on=orm.morning_notify_last_run_on,
         subscription_presets=orm.subscription_presets,
     )
 
@@ -142,6 +154,23 @@ class SqlAlchemySpecialistsRepo:
         if orm is None:  # pragma: no cover - pass only marks loaded candidates
             return
         orm.reminder_last_run_on = run_on
+        await self._session.commit()
+
+    async def list_digest_candidates(self) -> list[Specialist]:
+        # Only welcomed specialists can receive a digest, so skip those without a
+        # chat to send to — the digest pass then never has to guard a None chat_id.
+        stmt = select(SpecialistORM).where(
+            SpecialistORM.morning_notify_enabled.is_(True),
+            SpecialistORM.telegram_chat_id.is_not(None),
+        )
+        result = await self._session.execute(stmt)
+        return [to_domain(orm) for orm in result.scalars().all()]
+
+    async def mark_digest_run(self, specialist_id: int, run_on: date) -> None:
+        orm = await self._session.get(SpecialistORM, specialist_id)
+        if orm is None:  # pragma: no cover - pass only marks loaded candidates
+            return
+        orm.morning_notify_last_run_on = run_on
         await self._session.commit()
 
     async def mark_welcomed(

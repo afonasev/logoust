@@ -1,7 +1,9 @@
+from datetime import UTC, datetime
 import logging
 from typing import cast
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -27,8 +29,15 @@ from src.domain.schedule import (
     parse_working_days,
 )
 from src.domain.specialist import Specialist
+from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringExceptionsRepo,
+    SqlAlchemyRecurringRepo,
+)
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.digest import collect_today_digest
 from src.services.message_templates import (
     reset_template,
     resolve_template,
@@ -38,6 +47,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_digest,
     toggle_reminder,
     toggle_working_day,
     update_setting,
@@ -48,6 +58,9 @@ logger = logging.getLogger(__name__)
 _TZ_LABELS = dict(RUSSIAN_TIMEZONES)
 
 _CB_MENU = "settings:menu"
+# Inert header button (names a feature group); answered silently so the tap does
+# not leave a loading spinner.
+_CB_NOOP = "settings:noop"
 _CB_TZLIST = "settings:tzlist"
 _CB_DAY_START = "settings:day_start"
 _CB_DAY_END = "settings:day_end"
@@ -56,6 +69,9 @@ _CB_WORKDAYS = "settings:workdays"
 _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 _CB_REMINDER_TOGGLE = "settings:reminder"
 _CB_REMINDER_TIME = "settings:reminder_time"
+_CB_DIGEST_TOGGLE = "settings:digest"
+_CB_DIGEST_TIME = "settings:digest_time"
+_CB_DIGEST_NOW = "settings:digest_now"
 _CB_SUBSCRIPTION = "settings:subscription_presets"
 _CB_TEMPLATES = "settings:templates"
 _CB_TPL_EDIT = "tpl:edit:"  # + template_key
@@ -67,6 +83,7 @@ _FIELD_BY_CALLBACK = {
     _CB_DAY_END: SettingField.DAY_END,
     _CB_SLOT: SettingField.SLOT_MINUTES,
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
+    _CB_DIGEST_TIME: SettingField.DIGEST_TIME,
     _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_PRESETS,
 }
 
@@ -76,6 +93,7 @@ class EditSetting(StatesGroup):
     day_end = State()
     slot = State()
     reminder_time = State()
+    digest_time = State()
     subscription_presets = State()
 
 
@@ -140,6 +158,7 @@ _STATE_BY_FIELD = {
     SettingField.DAY_END: EditSetting.day_end,
     SettingField.SLOT_MINUTES: EditSetting.slot,
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
+    SettingField.DIGEST_TIME: EditSetting.digest_time,
     SettingField.SUBSCRIPTION_PRESETS: EditSetting.subscription_presets,
 }
 
@@ -147,7 +166,12 @@ _STATE_BY_FIELD = {
 def _menu_keyboard(
     specialist: Specialist, m: SettingsMessages, templates_btn: str
 ) -> InlineKeyboardMarkup:
-    state = m.state_on if specialist.reminder_enabled else m.state_off
+    reminder_toggle = (
+        m.btn_reminder_on if specialist.reminder_enabled else m.btn_reminder_off
+    )
+    digest_toggle = (
+        m.btn_digest_on if specialist.morning_notify_enabled else m.btn_digest_off
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=m.btn_timezone, callback_data=_CB_TZLIST)],
@@ -155,15 +179,32 @@ def _menu_keyboard(
                 InlineKeyboardButton(text=m.btn_day_start, callback_data=_CB_DAY_START),
                 InlineKeyboardButton(text=m.btn_day_end, callback_data=_CB_DAY_END),
             ],
-            [InlineKeyboardButton(text=m.btn_slot, callback_data=_CB_SLOT)],
-            [InlineKeyboardButton(text=m.btn_working_days, callback_data=_CB_WORKDAYS)],
+            [
+                InlineKeyboardButton(text=m.btn_slot, callback_data=_CB_SLOT),
+                InlineKeyboardButton(
+                    text=m.btn_working_days, callback_data=_CB_WORKDAYS
+                ),
+            ],
+            # Non-clickable header so the row below reads as one feature group.
+            [InlineKeyboardButton(text=m.btn_reminder, callback_data=_CB_NOOP)],
             [
                 InlineKeyboardButton(
-                    text=m.btn_reminder.format(state=state),
-                    callback_data=_CB_REMINDER_TOGGLE,
+                    text=reminder_toggle, callback_data=_CB_REMINDER_TOGGLE
                 ),
                 InlineKeyboardButton(
                     text=m.btn_reminder_time, callback_data=_CB_REMINDER_TIME
+                ),
+            ],
+            [InlineKeyboardButton(text=m.btn_digest, callback_data=_CB_NOOP)],
+            [
+                InlineKeyboardButton(
+                    text=digest_toggle, callback_data=_CB_DIGEST_TOGGLE
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_digest_time, callback_data=_CB_DIGEST_TIME
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_digest_now, callback_data=_CB_DIGEST_NOW
                 ),
             ],
             [
@@ -218,6 +259,8 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         working_days=_format_working_days(specialist.working_days, m),
         reminders=m.state_on if specialist.reminder_enabled else m.state_off,
         reminder_time=specialist.reminder_time,
+        digest=m.state_on if specialist.morning_notify_enabled else m.state_off,
+        digest_time=specialist.morning_notify_time,
         subscription_presets=specialist.subscription_presets,
     )
 
@@ -230,7 +273,7 @@ def _callback_message(callback: CallbackQuery) -> Message:
     return cast("Message", msg)
 
 
-class SettingsHandlers:
+class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings router
     def __init__(
         self,
         messages: BotMessages,
@@ -238,6 +281,7 @@ class SettingsHandlers:
     ) -> None:
         self._m = messages.settings
         self._tm = messages.templates
+        self._dm = messages.digest
         self._messages = messages
         self._session_factory = session_factory
 
@@ -281,6 +325,55 @@ class SettingsHandlers:
                 SqlAlchemySpecialistsRepo(session), specialist_id=specialist_id
             )
         await self.open_menu(callback, state, specialist_id)
+
+    async def toggle_digest(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        async with self._session_factory() as session:
+            await toggle_digest(
+                SqlAlchemySpecialistsRepo(session), specialist_id=specialist_id
+            )
+        await self.open_menu(callback, state, specialist_id)
+
+    async def send_digest_now(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        # Manual check: send today's digest immediately, bypassing the schedule and
+        # the enabled flag, and WITHOUT stamping the day — so the real morning
+        # digest still fires (design.md, decision 6).
+        specialist = await self._load(specialist_id)
+        if specialist is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        assert specialist.telegram_chat_id is not None  # noqa: S101 — welcomed in settings
+        async with self._session_factory() as session:
+            text = await collect_today_digest(
+                specialist,
+                datetime.now(UTC),
+                appointments_repo=SqlAlchemyAppointmentsRepo(session),
+                recurring_repo=SqlAlchemyRecurringRepo(session),
+                exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+                clients_repo=SqlAlchemyClientsRepo(session),
+                messages=self._dm,
+            )
+        if text is None:
+            await callback.answer(self._m.digest_now_empty, show_alert=True)
+            return
+        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        try:
+            await callback.bot.send_message(specialist.telegram_chat_id, text)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            logger.warning(
+                "specialist.digest_failed", extra={"specialist_id": specialist_id}
+            )
+            await callback.answer(self._m.digest_now_failed, show_alert=True)
+            return
+        await callback.answer()
+
+    @staticmethod
+    async def noop(callback: CallbackQuery) -> None:
+        # Inert header button: just dismiss the loading spinner.
+        await callback.answer()
 
     async def show_timezones(self, callback: CallbackQuery) -> None:
         await _callback_message(callback).edit_text(
@@ -343,6 +436,8 @@ class SettingsHandlers:
             return self._m.ask_day_end
         if field is SettingField.REMINDER_TIME:
             return self._m.ask_reminder_time
+        if field is SettingField.DIGEST_TIME:
+            return self._m.ask_digest_time
         if field is SettingField.SUBSCRIPTION_PRESETS:
             return self._m.ask_subscription_presets
         return self._m.ask_slot
@@ -393,6 +488,11 @@ class SettingsHandlers:
         await self.apply_value(
             message, state, specialist_id, SettingField.REMINDER_TIME
         )
+
+    async def apply_digest_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(message, state, specialist_id, SettingField.DIGEST_TIME)
 
     async def apply_day_end(
         self, message: Message, state: FSMContext, specialist_id: int
@@ -499,12 +599,14 @@ def build_router(
     router.message.register(h.apply_day_end, EditSetting.day_end)
     router.message.register(h.apply_slot, EditSetting.slot)
     router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
+    router.message.register(h.apply_digest_time, EditSetting.digest_time)
     router.message.register(
         h.apply_subscription_presets, EditSetting.subscription_presets
     )
     router.message.register(h.apply_template, EditTemplate.body)
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
+    router.callback_query.register(h.noop, F.data == _CB_NOOP)
     router.callback_query.register(h.show_templates, F.data == _CB_TEMPLATES)
     router.callback_query.register(h.edit_template, F.data.startswith(_CB_TPL_EDIT))
     router.callback_query.register(
@@ -516,8 +618,11 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_END)
     router.callback_query.register(h.ask_value, F.data == _CB_SLOT)
     router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
+    router.callback_query.register(h.ask_value, F.data == _CB_DIGEST_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_SUBSCRIPTION)
     router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
+    router.callback_query.register(h.toggle_digest, F.data == _CB_DIGEST_TOGGLE)
+    router.callback_query.register(h.send_digest_now, F.data == _CB_DIGEST_NOW)
     router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
     router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))
     return router

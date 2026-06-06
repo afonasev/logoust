@@ -24,6 +24,7 @@ from src.infrastructure.recurring_repo import (
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.digest import send_digest_if_due
 from src.services.message_templates import resolve_template
 from src.services.reminder import (
     ReminderMessages,
@@ -66,6 +67,39 @@ async def run_reminder_pass(
             )
         for item in to_send:
             await _deliver(bot, messages, item)
+
+
+async def run_digest_pass(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    messages: BotMessages,
+    now: datetime,
+) -> None:
+    """One morning-digest pass over all enabled specialists at `now`."""
+    async with session_factory() as session:
+        candidates = await SqlAlchemySpecialistsRepo(session).list_digest_candidates()
+    for specialist in candidates:
+        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        async with session_factory() as session:
+            try:
+                await send_digest_if_due(
+                    specialist,
+                    now,
+                    appointments_repo=SqlAlchemyAppointmentsRepo(session),
+                    specialists_repo=SqlAlchemySpecialistsRepo(session),
+                    recurring_repo=SqlAlchemyRecurringRepo(session),
+                    exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+                    clients_repo=SqlAlchemyClientsRepo(session),
+                    messages=messages.digest,
+                    send=bot.send_message,
+                )
+            except (TelegramForbiddenError, TelegramBadRequest):
+                # Specialist blocked the bot / chat gone: the day is already stamped
+                # done inside the service, so we never retry-loop within the day.
+                logger.warning(
+                    "specialist.digest_failed",
+                    extra={"specialist_id": specialist.id},
+                )
 
 
 async def _deliver(bot: Bot, messages: BotMessages, item: ReminderToSend) -> None:

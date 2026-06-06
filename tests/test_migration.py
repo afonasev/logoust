@@ -49,6 +49,10 @@ def test_initial_migration_creates_specialists_table(
         "reminder_enabled",
         "reminder_time",
         "reminder_last_run_on",
+        # Added by 0011 (morning digest settings).
+        "morning_notify_enabled",
+        "morning_notify_time",
+        "morning_notify_last_run_on",
         # Added by 0008, replaced by 0010 (subscription_default → subscription_presets).
         "subscription_presets",
     }
@@ -465,6 +469,56 @@ def test_subscription_presets_migration_replaces_default(
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "subscription_presets" not in specialist_columns
     assert "subscription_default" in specialist_columns
+    engine.dispose()
+
+
+def test_morning_digest_migration_adds_columns_and_backfills(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0011 and seed a specialist that predates the digest settings.
+    command.upgrade(cfg, "0010")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert {
+        "morning_notify_enabled",
+        "morning_notify_time",
+        "morning_notify_last_run_on",
+    } <= specialist_columns
+
+    # The pre-existing specialist backfills to enabled at 10:00 (opt-out default).
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT morning_notify_enabled, morning_notify_time, "
+                "morning_notify_last_run_on "
+                "FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).one()
+    assert row == (1, "10:00", None)
+
+    command.downgrade(cfg, "0010")
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "morning_notify_enabled" not in specialist_columns
     engine.dispose()
 
 

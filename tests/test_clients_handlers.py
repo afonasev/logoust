@@ -14,11 +14,17 @@ from src.bot.handlers.clients import (
 )
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
+from src.domain.audit import AuditEvent
 from src.domain.client import Client, ClientStatus
 from src.domain.reminder import AppointmentReminder, ReminderStatus
+from src.domain.scheduled_message import (
+    ScheduledClientMessage,
+    ScheduledMessageStatus,
+)
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
+from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import (
     NewClient,
@@ -576,6 +582,109 @@ async def test_show_card_not_found(
     await h.show_card(cb, _SPECIALIST_ID)
     cb.answer.assert_awaited_once_with(messages.clients.not_found, show_alert=True)
     cb.message.edit_text.assert_not_awaited()
+
+
+# --- deferred notifications block --------------------------------------------
+
+
+async def _enqueue_deferred(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    client_id: int,
+    specialist_id: int = _SPECIALIST_ID,
+    text: str = "Вы записаны на 16 июня в 14:00.",
+) -> int:
+    async with session_factory() as session:
+        inserted, _ = await SqlAlchemyScheduledMessagesRepo(
+            session
+        ).enqueue_superseding(
+            ScheduledClientMessage(
+                id=None,
+                specialist_id=specialist_id,
+                client_id=client_id,
+                chat_id=555,
+                text=text,
+                target_key=f"appt:{client_id}",
+                event=AuditEvent.NOTIFY_CREATED,
+                due_at=datetime(2030, 1, 15, 15, 0, tzinfo=UTC),
+                status=ScheduledMessageStatus.QUEUED,
+                created_at=datetime.now(UTC),
+                sent_at=None,
+            )
+        )
+    assert inserted.id is not None
+    return inserted.id
+
+
+async def test_card_shows_deferred_block(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Петя")
+    assert client.id is not None
+    message_id = await _enqueue_deferred(session_factory, client_id=client.id)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    text = _first_text(cb.message.edit_text)
+    assert messages.clients.dnotify_title in text
+    cbs = [
+        b.callback_data
+        for row in _markup(cb.message.edit_text).inline_keyboard
+        for b in row
+    ]
+    assert f"clients:dnotify:cancel:{client.id}:{message_id}" in cbs
+
+
+async def test_card_hides_deferred_block_when_empty(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Петя")
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    assert messages.clients.dnotify_title not in _first_text(cb.message.edit_text)
+
+
+async def test_cancel_deferred_notify_removes_row(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Петя")
+    assert client.id is not None
+    message_id = await _enqueue_deferred(session_factory, client_id=client.id)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:dnotify:cancel:{client.id}:{message_id}")
+    await h.cancel_deferred_notify(cb, _SPECIALIST_ID)
+    # The card re-renders without the block, and the row is gone from the queue.
+    assert messages.clients.dnotify_title not in _first_text(cb.message.edit_text)
+    async with session_factory() as session:
+        remaining = await SqlAlchemyScheduledMessagesRepo(
+            session
+        ).list_queued_for_client(_SPECIALIST_ID, client.id)
+    assert remaining == []
+
+
+async def test_cancel_deferred_notify_foreign_noop(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    # A second specialist who does not own the row.
+    async with session_factory() as session:
+        other = await create_invite(SqlAlchemySpecialistsRepo(session))
+    assert other.id is not None
+    client = await _seed_client(session_factory, child_name="Петя")
+    assert client.id is not None
+    message_id = await _enqueue_deferred(session_factory, client_id=client.id)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:dnotify:cancel:{client.id}:{message_id}")
+    await h.cancel_deferred_notify(cb, other.id)
+    async with session_factory() as session:
+        remaining = await SqlAlchemyScheduledMessagesRepo(
+            session
+        ).list_queued_for_client(_SPECIALIST_ID, client.id)
+    assert len(remaining) == 1
 
 
 # --- invite to bot ------------------------------------------------------------

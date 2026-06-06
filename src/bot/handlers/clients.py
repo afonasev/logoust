@@ -30,6 +30,7 @@ from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
 from src.domain.reminder import ReminderStatus
 from src.domain.schedule import format_ru_short, utc_to_wall
+from src.domain.scheduled_message import ScheduledClientMessage
 from src.domain.subscription import Subscription
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
@@ -40,6 +41,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
+from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import list_client_future, nearest_future_by_client
@@ -58,6 +60,7 @@ from src.services.clients import (
 from src.services.message_templates import resolve_template
 from src.services.recurring import SeriesContext, load_series_context, settle
 from src.services.reminder import statuses_for_appointments
+from src.services.scheduled_messages import cancel_deferred, list_queued_for_client
 from src.services.subscriptions import get_active
 
 logger = logging.getLogger(__name__)
@@ -332,6 +335,53 @@ def _invite_button(client: Client, cm: ClientsMessages) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=label, callback_data=f"clients:invite:{client.id}")
 
 
+# A queued deferred notification's text is collapsed to one short line on the card.
+_DNOTIFY_TEXT_MAX = 40
+
+
+def _short(text: str) -> str:
+    flat = text.replace("\n", " ").strip()
+    return (
+        flat if len(flat) <= _DNOTIFY_TEXT_MAX else f"{flat[: _DNOTIFY_TEXT_MAX - 1]}…"
+    )
+
+
+def _deferred_when(message: ScheduledClientMessage, tz: str) -> str:
+    wall = utc_to_wall(message.due_at, tz)
+    return f"{format_ru_short(wall.date())} {wall:%H:%M}"
+
+
+def _deferred_block(
+    deferred: list[ScheduledClientMessage], tz: str, cm: ClientsMessages
+) -> str:
+    """Rendered '📨 Отложенные уведомления' block, or '' when the queue is empty."""
+    if not deferred:
+        return ""
+    lines = [
+        cm.dnotify_line.format(when=_deferred_when(m, tz), text=_short(m.text))
+        for m in deferred
+    ]
+    return "\n".join([cm.dnotify_title, *lines])
+
+
+def _deferred_buttons(
+    deferred: list[ScheduledClientMessage],
+    tz: str,
+    cm: ClientsMessages,
+    client_id: int,
+) -> list[list[InlineKeyboardButton]]:
+    # The client id rides along so cancelling can re-render this card.
+    return [
+        [
+            InlineKeyboardButton(
+                text=cm.dnotify_cancel.format(when=_deferred_when(m, tz)),
+                callback_data=f"clients:dnotify:cancel:{client_id}:{m.id}",
+            )
+        ]
+        for m in deferred
+    ]
+
+
 def _card_keyboard(  # noqa: PLR0913
     client: Client,
     appts: list[Appointment],
@@ -344,6 +394,7 @@ def _card_keyboard(  # noqa: PLR0913
     statuses: dict[tuple[int, datetime], ReminderStatus],
     back: str,
     subscription: Subscription | None = None,
+    deferred_rows: list[list[InlineKeyboardButton]] | None = None,
 ) -> InlineKeyboardMarkup:
     if client.status is ClientStatus.ARCHIVED:
         status_btn = InlineKeyboardButton(
@@ -379,6 +430,9 @@ def _card_keyboard(  # noqa: PLR0913
                 [_invite_button(client, cm)],
             )
         )
+    # Each queued deferred notification gets a cancel button under the card.
+    if deferred_rows:
+        rows.extend(deferred_rows)
     rows.extend(
         [
             [
@@ -725,16 +779,26 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 if client.status is ClientStatus.ACTIVE
                 else None
             )
+            deferred = await list_queued_for_client(
+                SqlAlchemyScheduledMessagesRepo(session),
+                specialist_id=specialist_id,
+                client_id=client.id,
+            )
         sm = self._messages.schedule
+        tz = specialist.timezone
         # Future appointments are buttons below; no header needed. Note only when
         # there are none. Back defaults to the active list / archive by status.
         text = render_card(client, self._m)
         if not appts:
             text = f"{text}\n\n{sm.client_future_empty}"
+        # Queued deferred notifications get their own block + a cancel button each.
+        block = _deferred_block(deferred, tz, self._m)
+        if block:
+            text = f"{text}\n\n{block}"
         keyboard = _card_keyboard(
             client,
             appts,
-            specialist.timezone,
+            tz,
             m=sm,
             cm=self._m,
             rm=self._messages.recurring,
@@ -742,6 +806,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             statuses=statuses,
             back=back or _back_target(client.status),
             subscription=subscription,
+            deferred_rows=_deferred_buttons(deferred, tz, self._m, client.id),
         )
         return text, keyboard
 
@@ -830,6 +895,20 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 audit=SqlAlchemyAuditRepo(session),
             )
         await self._open_card(callback, specialist_id, client_id)
+
+    async def cancel_deferred_notify(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        # "clients:dnotify:cancel:<client_id>:<message_id>" — owner-scoped cancel, then
+        # re-render the card so the row disappears from the block.
+        _, _, _, raw_client, raw_message = (callback.data or "").split(":")
+        async with self._session_factory() as session:
+            await cancel_deferred(
+                SqlAlchemyScheduledMessagesRepo(session),
+                message_id=int(raw_message),
+                specialist_id=specialist_id,
+            )
+        await self._open_card(callback, specialist_id, int(raw_client))
 
     # --- add wizard -----------------------------------------------------------
 
@@ -1008,4 +1087,7 @@ def build_router(
     )
     router.callback_query.register(h.archive, F.data.startswith("clients:archive:"))
     router.callback_query.register(h.restore, F.data.startswith("clients:restore:"))
+    router.callback_query.register(
+        h.cancel_deferred_notify, F.data.startswith("clients:dnotify:cancel:")
+    )
     return router

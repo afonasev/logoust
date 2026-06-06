@@ -10,9 +10,6 @@ from src.bot.handlers.schedule import (
     Schedule,
     ScheduleHandlers,
     _build_navigator,
-    _notify_callback,
-    _parse_notify,
-    _series_notify_callback,
     build_calendar,
     build_slots_keyboard,
     render_card,
@@ -27,6 +24,9 @@ from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
+from src.infrastructure.scheduled_messages_repo import (
+    SqlAlchemyScheduledMessagesRepo,
+)
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -491,7 +491,11 @@ async def test_reschedule_via_slot_moves_and_shows_card(
     cb = _fake_callback(f"sched:resch:{appt.id}")
     state = _state()
     await h.start_reschedule(cb, state, _SP)
-    assert state.store == {"flow": "reschedule", "appointment_id": appt.id}
+    assert state.store == {
+        "flow": "reschedule",
+        "appointment_id": appt.id,
+        "back": "",
+    }
 
     state.store["day"] = "2031-02-20"
     slot_cb = _fake_callback("sched:slot:1000")
@@ -505,6 +509,28 @@ async def test_reschedule_via_slot_moves_and_shows_card(
     assert moved is not None
     assert moved.starts_at.year == 2031
     assert moved.comment == "не трогать"
+
+
+async def test_reschedule_returns_to_origin_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # Opened from the client card → the moved card's Back returns there, not the day.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    origin = f"clients:card:{client_id}"
+    state = _state()
+    await h.start_reschedule(
+        _fake_callback(f"sched:resch:{appt.id}~{origin}"), state, _SP
+    )
+    assert state.store["back"] == origin
+    state.store["day"] = "2031-02-20"
+    slot_cb = _fake_callback("sched:slot:1000")
+    await h.pick_slot(slot_cb, state, _SP)
+    # The freshest screen is the moved appointment card; its Back is the origin.
+    keyboard = _markup(slot_cb.message.answer)
+    assert keyboard.inline_keyboard[-1][0].callback_data == origin
 
 
 async def test_reschedule_missing_reports_not_found(
@@ -590,7 +616,7 @@ async def test_confirm_then_do_delete(
     )
 
     del_cb = _fake_callback(f"sched:delyes:{appt.id}~{back}")
-    await h.do_delete(del_cb, _SP)
+    await h.do_delete(del_cb, _state(), _SP)
     # The stale card becomes the standalone "deleted" result (buttons dropped)...
     assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
     # ...and the origin (client card) re-opens as a fresh message — no dead-end.
@@ -966,7 +992,7 @@ async def test_card_no_mark_when_declined(
     assert messages.reminder.card_confirmed not in _texts(cb.message.edit_text)[0]
 
 
-# --- notify the client --------------------------------------------------------
+# --- notify the client: choose the send moment --------------------------------
 
 
 def _all_callbacks(mock: AsyncMock) -> list[str | None]:
@@ -979,14 +1005,32 @@ def _all_callbacks(mock: AsyncMock) -> list[str | None]:
     return out
 
 
-def test_notify_callback_round_trip():
-    starts_at = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
-    data = _notify_callback("r", 123456, starts_at)
-    assert data == "sched:ntf:r:123456:202606101200"
-    event, client_id, parsed = _parse_notify(data)
-    assert event == "r"
-    assert client_id == 123456
-    assert parsed == starts_at
+def _notify_data(
+    *,
+    client_id: int,
+    chat_id: int = 555,
+    event: str = "c",
+    text: str = "Вы записаны.",
+    target_key: str = "appt:1",
+) -> dict[str, Any]:
+    return {
+        "notify": {
+            "event": event,
+            "client_id": client_id,
+            "chat_id": chat_id,
+            "text": text,
+            "target_key": target_key,
+            # The client card needs no missing entity to re-render after the flow.
+            "card": f"clients:card:{client_id}",
+        }
+    }
+
+
+async def _queued(factory: async_sessionmaker[AsyncSession], client_id: int) -> list:
+    async with factory() as session:
+        return await SqlAlchemyScheduledMessagesRepo(session).list_queued_for_client(
+            _SP, client_id
+        )
 
 
 async def test_create_asks_to_notify_linked_client(
@@ -1005,17 +1049,20 @@ async def test_create_asks_to_notify_linked_client(
         }
     )
     await h.skip_comment(cb, state, _SP)
-    # The last message is the Yes/No notify prompt previewing the client text.
-    prompt = _markup(cb.message.answer)
-    cbs = _callbacks(prompt)
-    assert any(c and c.startswith(f"sched:ntf:c:{client_id}:") for c in cbs)
+    # The last message is the Yes/No notify prompt; "Yes" reveals the moment choice.
+    cbs = _callbacks(_markup(cb.message.answer))
+    assert "sched:ntfwhen" in cbs
     assert "sched:ntfno" in cbs
-    last_text = _texts(cb.message.answer)[-1]
+    # The notify context is snapshotted in FSM for the moment sub-step.
+    notify = state.store["notify"]
+    assert notify["client_id"] == client_id
+    assert notify["target_key"].startswith("appt:")
     wall = utc_to_wall(datetime(2030, 1, 15, 9, 0, tzinfo=UTC), _TZ)
     preview = messages.schedule.notify_created.format(
         date=format_ru_date(wall.date()), time=f"{wall:%H:%M}"
     )
-    assert preview in last_text
+    assert preview in _texts(cb.message.answer)[-1]
+    assert preview == notify["text"]
 
 
 async def test_create_does_not_ask_for_unlinked_client(
@@ -1034,9 +1081,11 @@ async def test_create_does_not_ask_for_unlinked_client(
         }
     )
     await h.skip_comment(cb, state, _SP)
+    # No notify prompt; the card is opened directly as the final screen.
     assert not any(
         c and c.startswith("sched:ntf") for c in _all_callbacks(cb.message.answer)
     )
+    assert "notify" not in state.store
 
 
 async def test_reschedule_asks_to_notify_linked_client(
@@ -1052,8 +1101,9 @@ async def test_reschedule_asks_to_notify_linked_client(
     slot_cb = _fake_callback("sched:slot:1000")
     await h.pick_slot(slot_cb, state, _SP)
     cbs = _callbacks(_markup(slot_cb.message.answer))
-    assert any(c and c.startswith(f"sched:ntf:r:{client_id}:") for c in cbs)
-    assert "sched:ntfno" in cbs
+    assert "sched:ntfwhen" in cbs
+    assert state.store["notify"]["event"] == "r"
+    assert state.store["notify"]["target_key"] == f"appt:{appt.id}"
 
 
 async def test_delete_asks_to_notify_linked_client(
@@ -1063,13 +1113,15 @@ async def test_delete_asks_to_notify_linked_client(
     client_id = await _seed_linked_client(session_factory, chat_id=555)
     appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
     h = _handlers(messages, session_factory)
+    state = _state()
     del_cb = _fake_callback(f"sched:delyes:{appt.id}~clients:card:{client_id}")
-    await h.do_delete(del_cb, _SP)
+    await h.do_delete(del_cb, state, _SP)
     # "Deleted" is the edited message; the notify prompt is a separate answer.
     assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
     cbs = _callbacks(_markup(del_cb.message.answer))
-    # Cancellation notifies with event=x and the (now-deleted) appointment's time.
-    assert any(c and c.startswith(f"sched:ntf:x:{client_id}:") for c in cbs)
+    assert "sched:ntfwhen" in cbs
+    # The target is the appointment id, captured before the row was deleted.
+    assert state.store["notify"]["target_key"] == f"appt:{appt.id}"
 
 
 async def test_delete_does_not_ask_for_unlinked_client(
@@ -1079,10 +1131,9 @@ async def test_delete_does_not_ask_for_unlinked_client(
     client_id = await _seed_client(session_factory)  # not linked
     appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
     h = _handlers(messages, session_factory)
-    del_cb = _fake_callback(f"sched:delyes:{appt.id}~")
-    await h.do_delete(del_cb, _SP)
-    # Only the auto-return menu is sent — no separate notify prompt for an
-    # unlinked client.
+    del_cb = _fake_callback(f"sched:delyes:{appt.id}~clients:card:{client_id}")
+    await h.do_delete(del_cb, _state(), _SP)
+    # Only the card auto-returns — no separate notify prompt for an unlinked client.
     del_cb.message.answer.assert_awaited_once()
 
 
@@ -1091,102 +1142,251 @@ async def test_delete_missing_appointment_does_not_ask(
 ):
     await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
-    del_cb = _fake_callback("sched:delyes:999~")
-    await h.do_delete(del_cb, _SP)
-    # Idempotent delete of a gone appointment still auto-returns, but never asks
-    # to notify (no appointment to describe).
+    del_cb = _fake_callback("sched:delyes:999~sched:feed")
+    await h.do_delete(del_cb, _state(), _SP)
+    # Idempotent delete of a gone appointment still auto-returns, but never asks.
     del_cb.message.answer.assert_awaited_once()
 
 
-async def test_notify_sends_text_for_each_event(
+async def test_ask_when_shows_moment_choice(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_linked_client(session_factory, chat_id=555)
     h = _handlers(messages, session_factory)
-    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)  # 14:00 local (+05)
-    wall = utc_to_wall(starts_at, _TZ)
-    cases = [
-        ("c", messages.schedule.notify_created),
-        ("r", messages.schedule.notify_rescheduled),
-        ("x", messages.schedule.notify_cancelled),
-    ]
-    for event, template in cases:
-        cb = _fake_callback(_notify_callback(event, client_id, starts_at))
-        await h.notify(cb, _SP)
-        cb.bot.send_message.assert_awaited_once()
-        assert cb.bot.send_message.await_args.args[0] == 555
-        expected = template.format(
-            date=format_ru_date(wall.date()), time=f"{wall:%H:%M}"
+    cb = _fake_callback("sched:ntfwhen")
+    state = _state(data=_notify_data(client_id=client_id))
+    await h.ask_when(cb, state, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_when_ask
+    cbs = _callbacks(_markup(cb.message.edit_text))
+    assert {"sched:ntfnow", "sched:ntfpreset", "sched:ntfcustom"} <= set(cbs)
+    # The preset button carries the specialist's deferred_notify_time (default 20:00).
+    assert any("20:00" in t for t in _button_texts(_markup(cb.message.edit_text)))
+
+
+async def test_ask_when_stale_without_context(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfwhen")
+    await h.ask_when(cb, _state(), _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_session_stale
+
+
+async def test_notify_now_sends_for_each_event(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    for event in ("c", "r", "x"):
+        cb = _fake_callback("sched:ntfnow")
+        state = _state(
+            data=_notify_data(
+                client_id=client_id, event=event, text="Текст уведомления."
+            )
         )
-        assert cb.bot.send_message.await_args.args[1] == expected
-        # The prompt is replaced with the "sent" outcome (keyboard dropped).
+        await h.notify_now(cb, state, _SP)
+        cb.bot.send_message.assert_awaited_once()
+        assert cb.bot.send_message.await_args.args == (555, "Текст уведомления.")
         assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_sent
+        # The card re-opens as the freshest screen, and FSM is cleared.
+        cb.message.answer.assert_awaited_once()
+        assert "notify" not in state.store
 
 
-async def test_notify_failed_on_forbidden(
+async def test_notify_now_failed_on_forbidden(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_linked_client(session_factory, chat_id=555)
     h = _handlers(messages, session_factory)
-    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
+    cb = _fake_callback("sched:ntfnow")
     cb.bot.send_message.side_effect = TelegramForbiddenError(
         method=None,  # type: ignore[arg-type]
         message="blocked",
     )
-    await h.notify(cb, _SP)
+    await h.notify_now(cb, _state(data=_notify_data(client_id=client_id)), _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
 
 
-async def test_notify_failed_on_bad_request(
+async def test_notify_now_bad_request(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_linked_client(session_factory, chat_id=555)
     h = _handlers(messages, session_factory)
-    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
+    cb = _fake_callback("sched:ntfnow")
     cb.bot.send_message.side_effect = TelegramBadRequest(
         method=None,  # type: ignore[arg-type]
         message="chat not found",
     )
-    await h.notify(cb, _SP)
+    await h.notify_now(cb, _state(data=_notify_data(client_id=client_id)), _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
 
 
-async def test_notify_not_linked_when_chat_missing(
+async def test_notify_now_not_linked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)  # never linked
     h = _handlers(messages, session_factory)
-    cb = _fake_callback(_notify_callback("c", client_id, _FUTURE))
-    await h.notify(cb, _SP)
+    cb = _fake_callback("sched:ntfnow")
+    await h.notify_now(cb, _state(data=_notify_data(client_id=client_id)), _SP)
     cb.bot.send_message.assert_not_awaited()
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
 
 
-async def test_notify_not_linked_for_foreign_client(
+async def test_notify_now_stale(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
-    # Client id the specialist does not own → get_for_specialist returns None.
-    cb = _fake_callback(_notify_callback("c", 4242, _FUTURE))
-    await h.notify(cb, _SP)
+    cb = _fake_callback("sched:ntfnow")
+    await h.notify_now(cb, _state(), _SP)
     cb.bot.send_message.assert_not_awaited()
-    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_session_stale
 
 
-async def test_notify_skip_declines(
+async def test_notify_now_records_audit(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfnow")
+    await h.notify_now(
+        cb, _state(data=_notify_data(client_id=client_id, event="m")), _SP
+    )
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.NOTIFY_RESCHEDULED, DeliveryStatus.SENT)
+    ]
+
+
+async def test_notify_preset_queues(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfpreset")
+    state = _state(
+        data=_notify_data(client_id=client_id, text="Вы записаны.", target_key="appt:7")
+    )
+    await h.notify_preset(cb, state, _SP)
+    # Nothing is sent now; a queued row is created and the choice is confirmed.
+    cb.bot.send_message.assert_not_awaited()
+    rows = await _queued(session_factory, client_id)
+    assert len(rows) == 1
+    assert rows[0].text == "Вы записаны."
+    assert rows[0].target_key == "appt:7"
+    assert rows[0].event is AuditEvent.NOTIFY_CREATED
+    assert (
+        messages.schedule.notify_deferred_queued.split("{")[0]
+        in (_texts(cb.message.edit_text)[0])
+    )
+    assert "notify" not in state.store
+
+
+async def test_notify_preset_supersede_announced(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    for _ in range(2):
+        cb = _fake_callback("sched:ntfpreset")
+        await h.notify_preset(
+            cb, _state(data=_notify_data(client_id=client_id, target_key="appt:7")), _SP
+        )
+        last = cb
+    rows = await _queued(session_factory, client_id)
+    assert len(rows) == 1  # the first row was superseded
+    head = messages.schedule.notify_deferred_superseded.split("{")[0]
+    assert head in _texts(last.message.edit_text)[0]
+
+
+async def test_notify_preset_stale(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfpreset")
+    await h.notify_preset(cb, _state(), _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_session_stale
+
+
+async def test_notify_custom_prompts_then_queues(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    state = _state(data=_notify_data(client_id=client_id, target_key="appt:9"))
+    ask_cb = _fake_callback("sched:ntfcustom")
+    await h.notify_custom(ask_cb, state)
+    assert state.state is Schedule.notify_custom_time
+    assert (
+        _texts(ask_cb.message.edit_text)[0] == messages.schedule.notify_custom_time_ask
+    )
+    msg = _fake_message("20:00")
+    await h.apply_notify_custom_time(msg, state, _SP)
+    rows = await _queued(session_factory, client_id)
+    assert len(rows) == 1
+    assert rows[0].target_key == "appt:9"
+
+
+async def test_notify_custom_invalid_time(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    state = _state(
+        data=_notify_data(client_id=client_id), state=Schedule.notify_custom_time
+    )
+    msg = _fake_message("четверть восьмого")
+    await h.apply_notify_custom_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.schedule.bad_time
+    assert await _queued(session_factory, client_id) == []
+
+
+async def test_notify_custom_stale(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfcustom")
+    await h.notify_custom(cb, _state())
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_session_stale
+
+
+async def test_notify_skip_declines_and_returns_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfno")
+    state = _state(data=_notify_data(client_id=client_id))
+    await h.notify_skip(cb, state, _SP)
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_skipped
+    cb.bot.send_message.assert_not_awaited()
+    # The entity card is re-opened as the freshest screen.
+    cb.message.answer.assert_awaited_once()
+    assert "notify" not in state.store
+
+
+async def test_notify_skip_without_context(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("sched:ntfno")
-    await h.notify_skip(cb)
+    await h.notify_skip(cb, _state(), _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_skipped
-    cb.bot.send_message.assert_not_awaited()
+    cb.message.answer.assert_not_awaited()
 
 
 # --- notify the client: series (whole-rule) ----------------------------------
@@ -1209,67 +1409,14 @@ async def test_regular_flow_asks_series_notify_for_linked(
         }
     )
     await h.apply_comment(msg, state, _SP)
-    # The last message is the series notify prompt (event=c, weekly rule).
+    # The notify prompt offers the moment choice; context is a whole-series target.
     cbs = _callbacks(_markup(msg.answer))
-    assert any(c and c.startswith(f"sched:ntfs:c:{client_id}:") for c in cbs)
-    assert "sched:ntfno" in cbs
-
-
-async def test_notify_series_sends_text_for_each_event(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    cases = [
-        (
-            "c",
-            messages.schedule.notify_series_created.format(
-                rule="каждый четверг в 14:00"
-            ),
-        ),
-        (
-            "m",
-            messages.schedule.notify_series_changed.format(
-                rule="каждый четверг в 14:00"
-            ),
-        ),
-        ("x", messages.schedule.notify_series_cancelled.format(time="14:00")),
-    ]
-    for event, expected in cases:
-        cb = _fake_callback(_series_notify_callback(event, client_id, 3, "14:00"))
-        await h.notify_series(cb, _SP)
-        cb.bot.send_message.assert_awaited_once()
-        assert cb.bot.send_message.await_args.args[0] == 555
-        assert cb.bot.send_message.await_args.args[1] == expected
-        assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_sent
-
-
-async def test_notify_series_not_linked(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)  # never linked
-    h = _handlers(messages, session_factory)
-    cb = _fake_callback(_series_notify_callback("c", client_id, 3, "14:00"))
-    await h.notify_series(cb, _SP)
-    cb.bot.send_message.assert_not_awaited()
-    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_not_linked
-
-
-async def test_notify_series_failed_on_forbidden(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    cb = _fake_callback(_series_notify_callback("x", client_id, 3, "14:00"))
-    cb.bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
-        message="blocked",
-    )
-    await h.notify_series(cb, _SP)
-    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
+    assert "sched:ntfwhen" in cbs
+    notify = state.store["notify"]
+    assert notify["event"] == "c"
+    assert notify["target_key"].startswith("series:")
+    rule = messages.schedule.notify_series_created.format(rule="каждый вторник в 14:00")
+    assert rule == notify["text"]
 
 
 async def _audit_messages(
@@ -1280,49 +1427,6 @@ async def _audit_messages(
             _SP, limit=50, offset=0
         )
     return [(r.event, r.status) for r in rows if r.kind is AuditKind.MESSAGE]
-
-
-async def test_notify_records_audit_message(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    cb = _fake_callback(_notify_callback("r", client_id, _FUTURE))
-    await h.notify(cb, _SP)
-    assert await _audit_messages(session_factory) == [
-        (AuditEvent.NOTIFY_RESCHEDULED, DeliveryStatus.SENT)
-    ]
-
-
-async def test_notify_series_records_audit_message(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    # The reported gap: rescheduling a *regular* record (event "m") must be audited.
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    cb = _fake_callback(_series_notify_callback("m", client_id, 3, "14:00"))
-    await h.notify_series(cb, _SP)
-    assert await _audit_messages(session_factory) == [
-        (AuditEvent.NOTIFY_RESCHEDULED, DeliveryStatus.SENT)
-    ]
-
-
-async def test_notify_series_failure_records_failed_audit(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    cb = _fake_callback(_series_notify_callback("x", client_id, 3, "14:00"))
-    cb.bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
-        message="blocked",
-    )
-    await h.notify_series(cb, _SP)
-    rows = await _audit_messages(session_factory)
-    assert rows == [(AuditEvent.NOTIFY_CANCELLED, DeliveryStatus.FAILED)]
 
 
 # --- auto-return after irreversible actions -----------------------------------
@@ -1337,7 +1441,7 @@ async def test_delete_from_day_returns_to_same_day(
     h = _handlers(messages, session_factory)
     day = utc_to_wall(_FUTURE, _TZ).date()
     del_cb = _fake_callback(f"sched:delyes:{appt.id}~sched:day_view:{day.isoformat()}")
-    await h.do_delete(del_cb, _SP)
+    await h.do_delete(del_cb, _state(), _SP)
     assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
     # The same day re-opens as the freshest screen (no dead-end "Back").
     assert format_ru_date(day) in _texts(del_cb.message.answer)[0]
@@ -1351,3 +1455,37 @@ async def test_nav_client_history_renders_history(
     h = _handlers(messages, session_factory)
     text, _ = await h.nav_client_history(_SP, f"sched:chist:{client_id}:0")
     assert text == messages.schedule.client_history_empty
+
+
+async def test_nav_appt_card_defaults_back_to_day(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    # No "~inner" → back defaults to the appointment's own day.
+    _, keyboard = await h.nav_appt_card(_SP, f"sched:card:{appt.id}")
+    day = utc_to_wall(_FUTURE, _TZ).date()
+    assert keyboard.inline_keyboard[-1][0].callback_data == (
+        f"sched:day_view:{day.isoformat()}"
+    )
+
+
+async def test_nav_appt_card_marks_confirmed(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=_FUTURE,
+        status=ReminderStatus.CONFIRMED,
+    )
+    h = _handlers(messages, session_factory)
+    text, _ = await h.nav_appt_card(
+        _SP, f"sched:card:{appt.id}~clients:card:{client_id}"
+    )
+    assert messages.reminder.card_confirmed in text

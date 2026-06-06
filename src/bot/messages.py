@@ -50,6 +50,9 @@ class ClientsMessages:
     invite_forward: str
     linked: str
     link_unknown: str
+    dnotify_title: str
+    dnotify_line: str
+    dnotify_cancel: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,15 @@ class ScheduleMessages:
     notify_failed: str
     notify_not_linked: str
     notify_skipped: str
+    notify_when_ask: str
+    notify_when_now: str
+    notify_when_preset: str
+    notify_when_custom: str
+    notify_custom_time_ask: str
+    notify_deferred_queued: str
+    notify_deferred_superseded: str
+    notify_session_stale: str
+    notify_deferred_failed: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +193,7 @@ class SettingsMessages:
     btn_digest_time: str
     btn_digest_now: str
     btn_subscription_presets: str
+    btn_deferred_time: str
     state_on: str
     state_off: str
     btn_back: str
@@ -192,6 +205,7 @@ class SettingsMessages:
     ask_reminder_time: str
     ask_digest_time: str
     ask_subscription_presets: str
+    ask_deferred_time: str
     no_working_days: str
     bad_time: str
     bad_slot: str
@@ -351,6 +365,9 @@ def load_messages(path: Path) -> BotMessages:
             invite_forward=_require(data, "clients.invite_forward").strip(),
             linked=_require(data, "clients.linked"),
             link_unknown=_require(data, "clients.link_unknown"),
+            dnotify_title=_require(data, "clients.dnotify_title"),
+            dnotify_line=_require(data, "clients.dnotify_line"),
+            dnotify_cancel=_require(data, "clients.dnotify_cancel"),
         ),
         schedule=ScheduleMessages(
             button=_require(data, "schedule.button"),
@@ -405,6 +422,17 @@ def load_messages(path: Path) -> BotMessages:
             notify_failed=_require(data, "schedule.notify_failed"),
             notify_not_linked=_require(data, "schedule.notify_not_linked"),
             notify_skipped=_require(data, "schedule.notify_skipped"),
+            notify_when_ask=_require(data, "schedule.notify_when_ask"),
+            notify_when_now=_require(data, "schedule.notify_when_now"),
+            notify_when_preset=_require(data, "schedule.notify_when_preset"),
+            notify_when_custom=_require(data, "schedule.notify_when_custom"),
+            notify_custom_time_ask=_require(data, "schedule.notify_custom_time_ask"),
+            notify_deferred_queued=_require(data, "schedule.notify_deferred_queued"),
+            notify_deferred_superseded=_require(
+                data, "schedule.notify_deferred_superseded"
+            ),
+            notify_session_stale=_require(data, "schedule.notify_session_stale"),
+            notify_deferred_failed=_require(data, "schedule.notify_deferred_failed"),
         ),
         recurring=RecurringMessages(
             button=_require(data, "recurring.button"),
@@ -464,6 +492,7 @@ def load_messages(path: Path) -> BotMessages:
             btn_subscription_presets=_require(
                 data, "settings.btn_subscription_presets"
             ),
+            btn_deferred_time=_require(data, "settings.btn_deferred_time"),
             state_on=_require(data, "settings.state_on"),
             state_off=_require(data, "settings.state_off"),
             btn_back=_require(data, "settings.btn_back"),
@@ -477,6 +506,7 @@ def load_messages(path: Path) -> BotMessages:
             ask_subscription_presets=_require(
                 data, "settings.ask_subscription_presets"
             ),
+            ask_deferred_time=_require(data, "settings.ask_deferred_time"),
             no_working_days=_require(data, "settings.no_working_days"),
             bad_time=_require(data, "settings.bad_time"),
             bad_slot=_require(data, "settings.bad_slot"),

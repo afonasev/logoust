@@ -237,6 +237,20 @@ def today_in_tz(now: datetime, tz: str) -> date:
     return now.astimezone(ZoneInfo(tz)).date()
 
 
+def next_occurrence_utc(hhmm: str, now: datetime, tz: str) -> datetime:
+    """Nearest future UTC instant of wall time `hhmm` in `tz`.
+
+    Today in `tz` if that time has not passed yet, otherwise tomorrow. Building the
+    next day from the wall date (not by adding 24h to the UTC instant) keeps the
+    result on the intended wall clock across DST shifts.
+    """
+    today = today_in_tz(now, tz)
+    candidate = wall_to_utc(today, hhmm, tz)
+    if candidate <= now:
+        candidate = wall_to_utc(today + timedelta(days=1), hhmm, tz)
+    return candidate
+
+
 def day_start_utc(day: date, tz: str) -> datetime:
     """UTC instant of midnight at the start of `day` in `tz`.
 

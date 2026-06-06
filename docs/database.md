@@ -26,6 +26,7 @@
 | `morning_notify_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` ежедневной утренней сводки. Server-default `10:00`. |
 | `morning_notify_last_run_on` | DATE | да  | Дата (в tz) последнего «решения за день» по сводке; антидубль/догон. `NULL` — ещё не выполнялся. |
 | `subscription_presets` | VARCHAR(64) | нет | Варианты числа встреч (кнопки) при создании/продлении абонемента — список через запятую, канонизированный (по возрастанию, без повторов). Server-default `4,8,12`. |
+| `deferred_notify_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` кнопки-пресета при откладывании уведомления клиенту. Server-default `20:00`. |
 
 Индексы:
 
@@ -235,6 +236,36 @@
 - `text`/`status`/`error` несут только `message`-строки; у `action` они `NULL` — действие журналируется как факт, без текста.
 - Запись `action` идёт той же сессией, что и операция (создание/архив клиента, создание/перенос/удаление записи); запись `message` — после факта доставки в слое `bot/` (текст и статус известны только там). Сбой доставки не препятствует записи строки — «не доставлено» само по себе ценно.
 
+### `scheduled_client_messages`
+
+Очередь отложенных уведомлений клиенту: снимок одобренного текста + момент доставки. Фоновый проход (`run_outbox_pass`) отправляет каждую строку, у которой наступил `due_at` и статус `queued`. Принадлежит специалисту (изоляция + кому слать о сбое).
+
+| Колонка         | Тип         | NULL | Замечание                                                          |
+| --------------- | ----------- | ---- | ------------------------------------------------------------------ |
+| `id`            | INTEGER     | нет  | PK, autoincrement. Используется в `callback_data` отмены.          |
+| `specialist_id` | INTEGER     | нет  | FK → `specialists.id`. Владелец.                                   |
+| `client_id`     | INTEGER     | нет  | FK → `clients.id`. Получатель.                                     |
+| `chat_id`       | BIGINT      | нет  | Снимок `telegram_chat_id` клиента на момент постановки.            |
+| `text`          | TEXT        | нет  | Снимок одобренного текста (как в предпросмотре); не пере-рендерится. |
+| `target_key`    | VARCHAR(64) | нет  | Устойчивый ключ цели для вытеснения: `appt:<id>` / `series:<id>` / `series:<id>:<origin_date>`. |
+| `event`         | VARCHAR(32) | нет  | Slug `AuditEvent`, под которым доставка пишется в `audit_log`.     |
+| `due_at`        | DATETIME    | нет  | Момент отправки в **aware UTC** (ближайшее наступление настенного `ЧЧ:ММ`). |
+| `status`        | VARCHAR(16) | нет  | `queued` \| `sent` \| `failed` \| `cancelled` (enum строкой).      |
+| `created_at`    | DATETIME    | нет  | Момент постановки в очередь (aware UTC).                           |
+| `sent_at`       | DATETIME    | да   | Момент попытки доставки (отправлено/сбой); `NULL` пока в очереди.  |
+
+Индексы:
+
+- `ix_scheduled_status_due` — `(status, due_at)`. Проход доставки: `queued`-строки с `due_at <= now` по возрастанию.
+- `ix_scheduled_specialist_client_status` — `(specialist_id, client_id, status)`. Блок отложенных на карточке клиента.
+- `ix_scheduled_specialist_target_status` — `(specialist_id, target_key, status)`. Поиск прежней `queued`-строки той же цели при вытеснении.
+
+Решения по схеме:
+
+- Снимок текста (а не ссылка на событие): доставляется ровно одобренный текст; устаревание решается **вытеснением** по `target_key`, а не пере-рендером (записи на момент отправки может уже не быть).
+- `target_key` — устойчивый идентификатор цели, не зависящий от времени: перенос записи не плодит второе уведомление; разные цели сосуществуют. При постановке прежняя `queued`-строка той же `(specialist_id, target_key)` переводится в `cancelled` в одной транзакции.
+- Антидубль и догон после простоя — переход `queued → sent/failed`: повторный тик их не подхватывает, а любая просроченная `queued`-строка отправляется на ближайшем проходе.
+
 ## Миграции
 
 - Каталог: `alembic/versions/`.
@@ -250,6 +281,7 @@
 - `0010_subscription_presets.py` — заменяет в `specialists` колонку `subscription_default` (одно число) на `subscription_presets` (список вариантов через запятую, server-default `4,8,12`). Существующие специалисты получают стандартный список; старое значение не переносится. Down-ревизия возвращает `subscription_default` (server-default `8`).
 - `0011_morning_digest.py` — добавляет в `specialists` колонки `morning_notify_enabled` (server-default `1`), `morning_notify_time` (server-default `10:00`), `morning_notify_last_run_on` (nullable). Существующие специалисты → утренняя сводка включена на 10:00. Down-ревизия удаляет три колонки.
 - `0012_audit_log.py` — создаёт таблицу `audit_log` (FK на `specialists` и `clients`, индекс `ix_audit_specialist_created`). Только структура, бэкфилла нет (истории событий не было). Down-ревизия удаляет индекс и таблицу.
+- `0013_deferred_client_notify.py` — добавляет в `specialists` колонку `deferred_notify_time` (server-default `20:00`); создаёт таблицу `scheduled_client_messages` (FK на `specialists` и `clients`, три индекса). Существующие специалисты → пресет 20:00. Down-ревизия удаляет таблицу и колонку.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

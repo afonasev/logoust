@@ -1,7 +1,7 @@
 import calendar as _calendar
 from datetime import UTC, date, datetime, timedelta
 import logging
-from typing import cast
+from typing import Any, cast
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -37,11 +37,17 @@ from src.domain.schedule import (
     format_ru_date,
     format_ru_short,
     generate_slots,
+    next_occurrence_utc,
     parse_hhmm,
     parse_working_days,
     today_in_tz,
     utc_to_wall,
     wall_to_utc,
+)
+from src.domain.scheduled_message import (
+    appointment_target_key,
+    series_date_target_key,
+    series_target_key,
 )
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
@@ -53,6 +59,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
+from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import (
     AppointmentsPage,
@@ -83,6 +90,7 @@ from src.services.recurring import (
     stop_series,
 )
 from src.services.reminder import status_for_occurrence, statuses_for_appointments
+from src.services.scheduled_messages import enqueue_deferred
 from src.services.specialists import get_settings
 
 logger = logging.getLogger(__name__)
@@ -110,6 +118,7 @@ _CB_NOTIFY_NO = "sched:ntfno"
 class Schedule(StatesGroup):
     custom_time = State()
     comment = State()
+    notify_custom_time = State()
 
 
 async def _series_context(
@@ -270,7 +279,8 @@ def _card_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=m.btn_reschedule, callback_data=f"sched:resch:{appt.id}"
+                    text=m.btn_reschedule,
+                    callback_data=f"sched:resch:{appt.id}~{back}",
                 ),
                 InlineKeyboardButton(
                     text=m.btn_delete, callback_data=f"sched:del:{appt.id}~{back}"
@@ -527,6 +537,21 @@ async def _post_action(  # noqa: PLR0913
     )
 
 
+async def _open_card(
+    navigator: Navigator | None,
+    target: Message,
+    *,
+    specialist_id: int,
+    card_back: str,
+) -> None:
+    # Re-open the entity card as the freshest screen — done only once the whole
+    # notify scenario has finished (or immediately when no notify step applies), so
+    # the card never flashes mid-flow (see the post-action ordering decision).
+    assert navigator is not None  # noqa: S101 — wired in build_router before any update
+    text, keyboard = await navigator.render(specialist_id, card_back)
+    await target.answer(text, reply_markup=keyboard)
+
+
 def _cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -547,33 +572,17 @@ def _last_int(callback_data: str | None) -> int:
     return int((callback_data or "").rsplit(":", 1)[1])
 
 
-# Notify-the-client callbacks. A one-off occurrence travels as
-# "sched:ntf:<event>:<client_id>:<stamp>" (event ∈ {c, r, x} = created /
-# rescheduled / cancelled; stamp = the appointment's UTC instant as YYYYMMDDHHMM —
-# the time travels in the callback so a cancellation can be announced after the row
-# is gone). A whole series travels as "sched:ntfs:<event>:<client_id>:<wd>:<hhmm>"
-# (event ∈ {c, m, x} = created / modified / cancelled; the message describes the
-# weekly rule, not a single date).
-_NOTIFY_STAMP_FMT = "%Y%m%d%H%M"
-
-
-def _notify_callback(event: str, client_id: int, starts_at: datetime) -> str:
-    return f"sched:ntf:{event}:{client_id}:{starts_at.strftime(_NOTIFY_STAMP_FMT)}"
-
-
-def _parse_notify(callback_data: str | None) -> tuple[str, int, datetime]:
-    _, _, event, raw_client, stamp = (callback_data or "").split(":")
-    starts_at = datetime.strptime(stamp, _NOTIFY_STAMP_FMT).replace(tzinfo=UTC)
-    return event, int(raw_client), starts_at
-
-
-def _series_notify_callback(event: str, client_id: int, weekday: int, hhmm: str) -> str:
-    return f"sched:ntfs:{event}:{client_id}:{weekday}:{hhmm.replace(':', '')}"
-
-
-def _parse_series_notify(callback_data: str | None) -> tuple[str, int, int, str]:
-    _, _, event, raw_client, raw_wd, raw_hhmm = (callback_data or "").split(":")
-    return event, int(raw_client), int(raw_wd), f"{raw_hhmm[:2]}:{raw_hhmm[2:]}"
+# Notify-the-client moment sub-step callbacks (shown after "Yes"). The notify
+# context (event, client, snapshot text, chat_id, target_key) is stashed in FSM
+# data when the preview is shown — not in callback_data — so a rich target
+# (series + date + key) never risks the 64-byte limit (see design.md, decision 8).
+_CB_NOTIFY_WHEN = "sched:ntfwhen"  # "Yes" → reveal the moment choice
+_CB_NOTIFY_NOW = "sched:ntfnow"  # send immediately (the old behaviour)
+_CB_NOTIFY_PRESET = "sched:ntfpreset"  # defer to deferred_notify_time
+_CB_NOTIFY_CUSTOM = "sched:ntfcustom"  # defer to a typed time
+# FSM-data key holding the pending notification context between the preview and the
+# moment choice.
+_NOTIFY_DATA_KEY = "notify"
 
 
 # A one-off notify event maps to a template_key that is also the ScheduleMessages
@@ -630,86 +639,147 @@ def _series_notify_text(template: str, weekday: int, hhmm: str) -> str:
     return template.format(rule=rule, time=hhmm)
 
 
-def _notify_cb_for(
-    event: str, client: Client | None, starts_at: datetime
-) -> str | None:
-    # The notify step is offered only for a client linked to the bot.
-    if client is None or client.telegram_chat_id is None:
-        return None
-    assert client.id is not None  # noqa: S101 — persisted clients always have an id
-    return _notify_callback(event, client.id, starts_at)
-
-
-def _series_notify_cb_for(
-    event: str, client: Client | None, weekday: int, hhmm: str
-) -> str | None:
-    if client is None or client.telegram_chat_id is None:
-        return None
-    assert client.id is not None  # noqa: S101 — persisted clients always have an id
-    return _series_notify_callback(event, client.id, weekday, hhmm)
-
-
-def _notify_ask_keyboard(notify_cb: str, m: ScheduleMessages) -> InlineKeyboardMarkup:
+def _notify_ask_keyboard(m: ScheduleMessages) -> InlineKeyboardMarkup:
+    # "Yes" reveals the moment choice (context read from FSM); "No" declines.
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=m.notify_yes, callback_data=notify_cb),
+                InlineKeyboardButton(text=m.notify_yes, callback_data=_CB_NOTIFY_WHEN),
                 InlineKeyboardButton(text=m.notify_no, callback_data=_CB_NOTIFY_NO),
             ]
         ]
     )
 
 
+def _notify_when_keyboard(
+    preset_hhmm: str, m: ScheduleMessages
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=m.notify_when_now, callback_data=_CB_NOTIFY_NOW
+                ),
+                InlineKeyboardButton(
+                    text=m.notify_when_preset.format(time=preset_hhmm),
+                    callback_data=_CB_NOTIFY_PRESET,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=m.notify_when_custom, callback_data=_CB_NOTIFY_CUSTOM
+                )
+            ],
+        ]
+    )
+
+
+def _format_send_when(due_at: datetime, tz: str) -> str:
+    """`6 июня в 20:00` — the deferred send moment in the specialist's timezone."""
+    wall = utc_to_wall(due_at, tz)
+    return f"{format_ru_short(wall.date())} в {wall:%H:%M}"
+
+
+async def _store_notify(  # noqa: PLR0913
+    state: FSMContext,
+    *,
+    event: str,
+    client: Client,
+    text: str,
+    target_key: str,
+    card_back: str,
+) -> None:
+    # Snapshot everything the moment sub-step needs. The preview text IS the snapshot
+    # delivered later — no re-render at send time (see design.md, decision 2).
+    # `card_back` is the navigator token of the entity card to re-open once the whole
+    # notify scenario finishes (so the card is the last, freshest screen — no jump).
+    assert client.id is not None  # noqa: S101 — persisted clients always have an id
+    assert client.telegram_chat_id is not None  # noqa: S101 — linked, checked by caller
+    await state.update_data(
+        **{
+            _NOTIFY_DATA_KEY: {
+                "event": event,
+                "client_id": client.id,
+                "chat_id": client.telegram_chat_id,
+                "text": text,
+                "target_key": target_key,
+                "card": card_back,
+            }
+        }
+    )
+
+
 async def _ask_notify(  # noqa: PLR0913, PLR0917
     target: Message,
+    state: FSMContext,
     event: str,
     client: Client | None,
     starts_at: datetime,
+    target_key: str,
+    card_back: str,
     tz: str,
     specialist_id: int,
     session_factory: async_sessionmaker[AsyncSession],
     m: ScheduleMessages,
-) -> None:
-    # Final step after a one-off create/reschedule/delete result: offer to notify
-    # the client, but only when they are linked (nothing to send to otherwise).
-    notify_cb = _notify_cb_for(event, client, starts_at)
-    if notify_cb is None:
-        return
+) -> bool:
+    # Final step after a one-off create/reschedule/delete (or a single series date):
+    # offer to notify, but only for a linked client (nothing to send to otherwise).
+    # Returns whether the prompt was shown; if not, the caller opens the card itself.
+    if client is None or client.telegram_chat_id is None:
+        return False
     key = _NOTIFY_KEYS[event]
     template = await _resolve_notify(
         session_factory, specialist_id, key, getattr(m, key)
     )
     preview = _notify_text(template, starts_at, tz)
-    await target.answer(
-        m.notify_ask.format(text=preview),
-        reply_markup=_notify_ask_keyboard(notify_cb, m),
+    await _store_notify(
+        state,
+        event=event,
+        client=client,
+        text=preview,
+        target_key=target_key,
+        card_back=card_back,
     )
+    await target.answer(
+        m.notify_ask.format(text=preview), reply_markup=_notify_ask_keyboard(m)
+    )
+    return True
 
 
 async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     target: Message,
+    state: FSMContext,
     event: str,
     client: Client | None,
     weekday: int,
     hhmm: str,
+    target_key: str,
+    card_back: str,
     specialist_id: int,
     session_factory: async_sessionmaker[AsyncSession],
     m: ScheduleMessages,
-) -> None:
+) -> bool:
     # Final step after a series create/edit/stop: the message describes the weekly
     # rule ("каждый четверг в 14:00"), not a single date.
-    notify_cb = _series_notify_cb_for(event, client, weekday, hhmm)
-    if notify_cb is None:
-        return
+    if client is None or client.telegram_chat_id is None:
+        return False
     key = _series_notify_key(event)
     template = await _resolve_notify(
         session_factory, specialist_id, key, getattr(m, key)
     )
     preview = _series_notify_text(template, weekday, hhmm)
-    await target.answer(
-        m.notify_ask.format(text=preview),
-        reply_markup=_notify_ask_keyboard(notify_cb, m),
+    await _store_notify(
+        state,
+        event=event,
+        client=client,
+        text=preview,
+        target_key=target_key,
+        card_back=card_back,
     )
+    await target.answer(
+        m.notify_ask.format(text=preview), reply_markup=_notify_ask_keyboard(m)
+    )
+    return True
 
 
 async def _send_notify(  # noqa: PLR0913
@@ -814,6 +884,38 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             specialist_id, int(raw_client), int(raw_page)
         )
 
+    async def nav_appt_card(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        # "sched:card:<id>[~<inner-back>]" → the appointment card. Used to re-open the
+        # card as the last screen after a create/reschedule notify scenario finishes.
+        head, _, inner = back.partition("~")
+        appt_id = int(head.rsplit(":", 1)[1])
+        specialist = await self._load_settings(specialist_id)
+        tz = specialist.timezone
+        async with self._session_factory() as session:
+            appt = await SqlAlchemyAppointmentsRepo(session).get_for_specialist(
+                appt_id, specialist_id
+            )
+        # Navigation only targets a card we just created/moved, so it still exists.
+        assert appt is not None  # noqa: S101
+        if not inner:  # default: the appointment's own day
+            inner = (
+                f"sched:day_view:{utc_to_wall(appt.starts_at, tz).date().isoformat()}"
+            )
+        child = await self._child_name(specialist_id, appt.client_id)
+        async with self._session_factory() as session:
+            status = await status_for_occurrence(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                client_id=appt.client_id,
+                starts_at=appt.starts_at,
+            )
+        text = render_card(appt, child, tz, self._m)
+        if status is ReminderStatus.CONFIRMED:
+            text = f"{text}\n{self._rem.card_confirmed}"
+        return text, _card_keyboard(appt, self._m, inner)
+
     # --- picker entry & navigation -------------------------------------------
 
     async def start_create(
@@ -826,9 +928,12 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
     async def start_reschedule(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
+        # "sched:resch:<id>[~<origin-back>]" — keep the origin so the result returns
+        # to wherever the card was opened from (client card / day), not the day feed.
+        head, _, back = (callback.data or "").partition("~")
         await state.clear()
         await state.update_data(
-            flow="reschedule", appointment_id=_last_int(callback.data)
+            flow="reschedule", appointment_id=int(head.rsplit(":", 1)[1]), back=back
         )
         await self._show_calendar(callback, specialist_id)
 
@@ -979,27 +1084,32 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 audit=SqlAlchemyAuditRepo(session),
             )
         client = await self._load_client(specialist_id, data["client_id"])
-        child = client.child_name if client is not None else self._m.dash
         await state.clear()
         await target.answer(self._m.created)
-        # Back from a freshly created appointment returns to the client card.
-        await self._send_card(
+        assert appt.id is not None  # noqa: S101 — created appointments have an id
+        # Defer the appointment card to the end of the notify scenario (back to the
+        # client card the creation started from).
+        card_back = f"sched:card:{appt.id}~clients:card:{data['client_id']}"
+        shown = await _ask_notify(
             target,
-            appt,
-            child,
-            specialist.timezone,
-            f"clients:card:{data['client_id']}",
-        )
-        await _ask_notify(
-            target,
+            state,
             "c",
             client,
             appt.starts_at,
+            appointment_target_key(appt.id),
+            card_back,
             specialist.timezone,
             specialist_id,
             self._session_factory,
             self._m,
         )
+        if not shown:
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back=card_back,
+            )
 
     async def _finish_regular(
         self,
@@ -1026,33 +1136,33 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             )
         assert series.id is not None  # noqa: S101 — saved series always have an id
         client = await self._load_client(specialist_id, client_id)
-        child = client.child_name if client is not None else self._m.dash
         await state.clear()
         await target.answer(self._rm.created)
-        await target.answer(
-            render_series_card(
-                series,
-                child,
-                series.start_date,
-                None,
-                specialist.timezone,
-                self._rm,
-                self._m.dash,
-            ),
-            reply_markup=_series_card_keyboard(
-                series.id, series.start_date, self._rm, f"clients:card:{client_id}"
-            ),
+        # Defer the series card to the end of the notify scenario.
+        card_back = (
+            f"recur:card:{series.id}:{series.start_date.isoformat()}"
+            f"~clients:card:{client_id}"
         )
-        await _ask_series_notify(
+        shown = await _ask_series_notify(
             target,
+            state,
             "c",
             client,
             series.weekday,
             series.time_hhmm,
+            series_target_key(series.id),
+            card_back,
             specialist_id,
             self._session_factory,
             self._m,
         )
+        if not shown:
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back=card_back,
+            )
 
     async def _do_reschedule(
         self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
@@ -1075,30 +1185,32 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             await target.answer(self._m.not_found)
             return
         client = await self._load_client(specialist_id, moved.client_id)
-        child = client.child_name if client is not None else self._m.dash
         await target.answer(self._m.rescheduled)
-        # Back from a rescheduled appointment returns to its (new) day.
-        await self._send_card(
-            target, moved, child, specialist.timezone, f"sched:day_view:{data['day']}"
-        )
-        await _ask_notify(
+        assert moved.id is not None  # noqa: S101 — rescheduled appointments have an id
+        # Defer the appointment card to the end of the notify scenario; its Back
+        # returns to the origin we came from (client card / day), else the new day.
+        origin = data.get("back") or f"sched:day_view:{data['day']}"
+        card_back = f"sched:card:{moved.id}~{origin}"
+        shown = await _ask_notify(
             target,
+            state,
             "r",
             client,
             moved.starts_at,
+            appointment_target_key(moved.id),
+            card_back,
             specialist.timezone,
             specialist_id,
             self._session_factory,
             self._m,
         )
-
-    async def _send_card(
-        self, target: Message, appt: Appointment, child: str, tz: str, back: str
-    ) -> None:
-        await target.answer(
-            render_card(appt, child, tz, self._m),
-            reply_markup=_card_keyboard(appt, self._m, back),
-        )
+        if not shown:
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back=card_back,
+            )
 
     # --- card, delete --------------------------------------------------------
 
@@ -1145,7 +1257,9 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         )
         await callback.answer()
 
-    async def do_delete(self, callback: CallbackQuery, specialist_id: int) -> None:
+    async def do_delete(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         head, _, back = (callback.data or "").partition("~")
         appt_id = int(head.rsplit(":", 1)[1])
         async with self._session_factory() as session:
@@ -1161,89 +1275,200 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 client_id=appt.client_id if appt is not None else None,
             )
         target = _callback_message(callback)
-        await _post_action(
-            self._navigator,
-            target,
-            result_text=self._m.deleted,
-            back=back,
-            specialist_id=specialist_id,
-            edit=True,
-        )
-        if appt is not None:
+        # Turn the stale card into the "deleted" result; the entity card (day/client)
+        # is re-opened only after the notify scenario, so nothing flashes mid-flow.
+        await target.edit_text(self._m.deleted)
+        shown = False
+        if appt is not None and appt.id is not None:
             specialist = await self._load_settings(specialist_id)
             client = await self._load_client(specialist_id, appt.client_id)
-            await _ask_notify(
+            shown = await _ask_notify(
                 target,
+                state,
                 "x",
                 client,
                 appt.starts_at,
+                appointment_target_key(appt.id),
+                back,
                 specialist.timezone,
                 specialist_id,
                 self._session_factory,
                 self._m,
             )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=back
+            )
         await callback.answer()
 
-    # --- notify the client ---------------------------------------------------
+    # --- notify the client: choose the send moment ---------------------------
 
-    async def notify(self, callback: CallbackQuery, specialist_id: int) -> None:
-        # "Yes" on a one-off notify prompt (concrete date/time travels in the cb).
-        event, client_id, starts_at = _parse_notify(callback.data)
+    async def ask_when(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # "Yes" on the notify prompt: reveal the Now / preset / custom-time choice.
+        data = await state.get_data()
+        if _NOTIFY_DATA_KEY not in data:
+            await self._notify_stale(callback)
+            return
         specialist = await self._load_settings(specialist_id)
+        await _callback_message(callback).edit_text(
+            self._m.notify_when_ask,
+            reply_markup=_notify_when_keyboard(
+                specialist.deferred_notify_time, self._m
+            ),
+        )
+        await callback.answer()
+
+    async def notify_now(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # "Сейчас": the original immediate path. Re-check the link at send time.
+        notify = (await state.get_data()).get(_NOTIFY_DATA_KEY)
+        if notify is None:
+            await self._notify_stale(callback)
+            return
         message = _callback_message(callback)
-        # Re-check the link at send time: it may have been cleared since the prompt
-        # was shown (and get_for_specialist isolates by owner).
-        client = await self._load_client(specialist_id, client_id)
+        client = await self._load_client(specialist_id, notify["client_id"])
         if client is None or client.telegram_chat_id is None:
+            await state.clear()
             await message.edit_text(self._m.notify_not_linked)
+            await _open_card(
+                self._navigator,
+                message,
+                specialist_id=specialist_id,
+                card_back=notify["card"],
+            )
             await callback.answer()
             return
-        key = _NOTIFY_KEYS[event]
-        template = await _resolve_notify(
-            self._session_factory, specialist_id, key, getattr(self._m, key)
-        )
-        text = _notify_text(template, starts_at, specialist.timezone)
-        extra = {"specialist_id": specialist_id, "client_id": client_id}
+        extra = {"specialist_id": specialist_id, "client_id": notify["client_id"]}
         sent = await _send_notify(
             callback,
             client.telegram_chat_id,
-            text,
+            notify["text"],
             extra,
-            event=event,
+            event=notify["event"],
             session_factory=self._session_factory,
         )
+        await state.clear()
         await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
+        await _open_card(
+            self._navigator,
+            message,
+            specialist_id=specialist_id,
+            card_back=notify["card"],
+        )
         await callback.answer()
 
-    async def notify_series(self, callback: CallbackQuery, specialist_id: int) -> None:
-        # "Yes" on a series notify prompt (the weekly rule travels in the cb).
-        event, client_id, weekday, hhmm = _parse_series_notify(callback.data)
-        message = _callback_message(callback)
-        client = await self._load_client(specialist_id, client_id)
-        if client is None or client.telegram_chat_id is None:
-            await message.edit_text(self._m.notify_not_linked)
-            await callback.answer()
+    async def notify_preset(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # "в HH:MM": queue for the preset deferred time (nearest occurrence).
+        notify = (await state.get_data()).get(_NOTIFY_DATA_KEY)
+        if notify is None:
+            await self._notify_stale(callback)
             return
-        key = _series_notify_key(event)
-        template = await _resolve_notify(
-            self._session_factory, specialist_id, key, getattr(self._m, key)
+        specialist = await self._load_settings(specialist_id)
+        await self._enqueue_and_report(
+            _callback_message(callback),
+            state,
+            specialist,
+            notify,
+            specialist.deferred_notify_time,
+            edit=True,
         )
-        text = _series_notify_text(template, weekday, hhmm)
-        extra = {"specialist_id": specialist_id, "client_id": client_id}
-        sent = await _send_notify(
-            callback,
-            client.telegram_chat_id,
-            text,
-            extra,
-            event=event,
-            session_factory=self._session_factory,
-        )
-        await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
         await callback.answer()
 
-    async def notify_skip(self, callback: CallbackQuery) -> None:
-        # "No" on the notify prompt: replace it with a short confirmation.
-        await _callback_message(callback).edit_text(self._m.notify_skipped)
+    async def notify_custom(self, callback: CallbackQuery, state: FSMContext) -> None:
+        # "Своё время": ask for a typed HH:MM, then queue at its nearest occurrence.
+        if _NOTIFY_DATA_KEY not in await state.get_data():
+            await self._notify_stale(callback)
+            return
+        await state.set_state(Schedule.notify_custom_time)
+        await _callback_message(callback).edit_text(self._m.notify_custom_time_ask)
+        await callback.answer()
+
+    async def apply_notify_custom_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        hhmm = parse_hhmm(message.text or "")
+        if hhmm is None:
+            # Invalid: stay in the state and re-ask (no row queued).
+            await message.answer(self._m.bad_time)
+            return
+        notify = (await state.get_data()).get(_NOTIFY_DATA_KEY)
+        if notify is None:  # pragma: no cover - the FSM state always carries notify
+            await state.clear()
+            await message.answer(self._m.notify_session_stale)
+            return
+        specialist = await self._load_settings(specialist_id)
+        await self._enqueue_and_report(
+            message, state, specialist, notify, hhmm, edit=False
+        )
+
+    async def _enqueue_and_report(  # noqa: PLR0913
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist: Specialist,
+        notify: dict[str, Any],
+        hhmm: str,
+        *,
+        edit: bool,
+    ) -> None:
+        assert specialist.id is not None  # noqa: S101 — middleware guarantees existence
+        tz = specialist.timezone
+        now = datetime.now(UTC)
+        due_at = next_occurrence_utc(hhmm, now, tz)
+        async with self._session_factory() as session:
+            result = await enqueue_deferred(
+                SqlAlchemyScheduledMessagesRepo(session),
+                specialist_id=specialist.id,
+                client_id=notify["client_id"],
+                chat_id=notify["chat_id"],
+                text=notify["text"],
+                target_key=notify["target_key"],
+                event=_NOTIFY_AUDIT_EVENTS[notify["event"]],
+                due_at=due_at,
+                now=now,
+            )
+        text = self._m.notify_deferred_queued.format(when=_format_send_when(due_at, tz))
+        if result.superseded_due_at is not None:
+            replaced = _format_send_when(result.superseded_due_at, tz)
+            text = f"{text} {self._m.notify_deferred_superseded.format(when=replaced)}"
+        await state.clear()
+        if edit:
+            await target.edit_text(text)
+        else:
+            await target.answer(text)
+        await _open_card(
+            self._navigator,
+            target,
+            specialist_id=specialist.id,
+            card_back=notify["card"],
+        )
+
+    async def _notify_stale(self, callback: CallbackQuery) -> None:
+        # FSM context lost (another operation cleared it): decline softly, send nothing.
+        await _callback_message(callback).edit_text(self._m.notify_session_stale)
+        await callback.answer()
+
+    async def notify_skip(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # "No" on the notify prompt: replace it with a short confirmation, then return
+        # to the entity card as the freshest screen.
+        notify = (await state.get_data()).get(_NOTIFY_DATA_KEY)
+        await state.clear()
+        message = _callback_message(callback)
+        await message.edit_text(self._m.notify_skipped)
+        if notify is not None:
+            await _open_card(
+                self._navigator,
+                message,
+                specialist_id=specialist_id,
+                card_back=notify["card"],
+            )
         await callback.answer()
 
     async def cancel(
@@ -1851,19 +2076,33 @@ class RecurringHandlers:
             await target.answer(self._m.not_found)
             return
         await target.answer(self._m.created)
-        await self._send_series_card(target, specialist_id, series, back)
-        # Editing changes the weekly rule → notify with the series ("modified") text.
+        # Editing changes the weekly rule → notify with the series ("modified") text;
+        # defer the series card to the end of the notify scenario.
+        assert series.id is not None  # noqa: S101 — edited series have an id
         client = await self._load_client(specialist_id, series.client_id)
-        await _ask_series_notify(
+        card_back = _with_back(
+            f"recur:card:{series.id}:{series.start_date.isoformat()}", back
+        )
+        shown = await _ask_series_notify(
             target,
+            state,
             "m",
             client,
             series.weekday,
             series.time_hhmm,
+            series_target_key(series.id),
+            card_back,
             specialist_id,
             self._session_factory,
             self._sm,
         )
+        if not shown:
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back=card_back,
+            )
 
     async def _do_move(
         self,
@@ -1894,28 +2133,32 @@ class RecurringHandlers:
         if moved is None:
             await target.answer(self._m.not_found)
             return
-        await _post_action(
-            self._navigator,
-            target,
-            result_text=self._m.moved,
-            back=card,
-            specialist_id=specialist_id,
-            edit=edit,
-        )
+        # Show the result now; the series card is re-opened after the notify scenario.
+        if edit:
+            await target.edit_text(self._m.moved)
+        else:
+            await target.answer(self._m.moved)
         # Moving a single date → notify about that one occurrence (concrete date).
         series = await self._load_series(data["series_id"], specialist_id)
         assert series is not None  # noqa: S101 — move succeeded, so the series exists
         client = await self._load_client(specialist_id, series.client_id)
-        await _ask_notify(
+        shown = await _ask_notify(
             target,
+            state,
             "r",
             client,
             new_starts_at,
+            series_date_target_key(data["series_id"], origin_date),
+            card,
             specialist.timezone,
             specialist_id,
             self._session_factory,
             self._sm,
         )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=card
+            )
 
     # --- series card ---------------------------------------------------------
 
@@ -1983,32 +2226,6 @@ class RecurringHandlers:
         await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
-    async def _send_series_card(
-        self,
-        target: Message,
-        specialist_id: int,
-        series: RecurringAppointment,
-        back: str,
-    ) -> None:
-        assert series.id is not None  # noqa: S101 — saved series always have an id
-        specialist = await self._load_settings(specialist_id)
-        child = await self._child_name(specialist_id, series.client_id)
-        # A freshly created/edited series has no exception on its first occurrence.
-        await target.answer(
-            render_series_card(
-                series,
-                child,
-                series.start_date,
-                None,
-                specialist.timezone,
-                self._m,
-                self._sm.dash,
-            ),
-            reply_markup=_series_card_keyboard(
-                series.id, series.start_date, self._m, back
-            ),
-        )
-
     # --- stop ----------------------------------------------------------------
 
     async def confirm_stop(self, callback: CallbackQuery, specialist_id: int) -> None:
@@ -2026,7 +2243,9 @@ class RecurringHandlers:
         )
         await callback.answer()
 
-    async def do_stop(self, callback: CallbackQuery, specialist_id: int) -> None:
+    async def do_stop(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         head, back = _split_back(callback.data)
         series_id = _last_int(head)
         async with self._session_factory() as session:
@@ -2040,26 +2259,27 @@ class RecurringHandlers:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         target = _callback_message(callback)
-        await _post_action(
-            self._navigator,
-            target,
-            result_text=self._m.stopped,
-            back=back,
-            specialist_id=specialist_id,
-            edit=True,
-        )
-        # Stopping the whole series → notify with the series ("cancelled") text.
+        await target.edit_text(self._m.stopped)
+        # Stopping the whole series → notify with the series ("cancelled") text; the
+        # back screen (day/client) is re-opened after the notify scenario.
         client = await self._load_client(specialist_id, stopped.client_id)
-        await _ask_series_notify(
+        shown = await _ask_series_notify(
             target,
+            state,
             "x",
             client,
             stopped.weekday,
             stopped.time_hhmm,
+            series_target_key(series_id),
+            back,
             specialist_id,
             self._session_factory,
             self._sm,
         )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=back
+            )
         await callback.answer()
 
     # --- skip ----------------------------------------------------------------
@@ -2077,7 +2297,9 @@ class RecurringHandlers:
         )
         await callback.answer()
 
-    async def do_skip(self, callback: CallbackQuery, specialist_id: int) -> None:
+    async def do_skip(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         head, back = _split_back(callback.data)
         series_id, origin_date = _parse_series_date(head)
         async with self._session_factory() as session:
@@ -2093,30 +2315,31 @@ class RecurringHandlers:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         target = _callback_message(callback)
-        await _post_action(
-            self._navigator,
-            target,
-            result_text=self._m.skipped,
-            back=back,
-            specialist_id=specialist_id,
-            edit=True,
-        )
-        # Cancelling a single date → notify about that one occurrence (rule time).
+        await target.edit_text(self._m.skipped)
+        # Cancelling a single date → notify about that one occurrence (rule time); the
+        # back screen is re-opened after the notify scenario.
         specialist = await self._load_settings(specialist_id)
         series = await self._load_series(series_id, specialist_id)
         assert series is not None  # noqa: S101 — skip succeeded, so the series exists
         client = await self._load_client(specialist_id, series.client_id)
         starts_at = wall_to_utc(origin_date, series.time_hhmm, specialist.timezone)
-        await _ask_notify(
+        shown = await _ask_notify(
             target,
+            state,
             "x",
             client,
             starts_at,
+            series_date_target_key(series_id, origin_date),
+            back,
             specialist.timezone,
             specialist_id,
             self._session_factory,
             self._sm,
         )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=back
+            )
         await callback.answer()
 
     async def cancel(
@@ -2159,6 +2382,7 @@ def _build_navigator(
             _CB_FEED: h.nav_day,
             "sched:day_view:": h.nav_day,
             "sched:chist:": h.nav_client_history,
+            "sched:card:": h.nav_appt_card,
             "recur:card:": r.nav_series_card,
             "clients:card:": ch.nav_card,
             "clients:active:": ch.nav_active,
@@ -2207,6 +2431,7 @@ def build_router(
     router.message.register(h.show_feed, F.text == messages.schedule.button)
     router.message.register(h.apply_custom_time, Schedule.custom_time)
     router.message.register(h.apply_comment, Schedule.comment)
+    router.message.register(h.apply_notify_custom_time, Schedule.notify_custom_time)
 
     router.callback_query.register(h.start_create, F.data.startswith("sched:new:"))
     router.callback_query.register(
@@ -2231,6 +2456,8 @@ def build_router(
     router.callback_query.register(h.confirm_delete, F.data.startswith("sched:del:"))
     router.callback_query.register(h.do_delete, F.data.startswith("sched:delyes:"))
     router.callback_query.register(h.notify_skip, F.data == _CB_NOTIFY_NO)
-    router.callback_query.register(h.notify_series, F.data.startswith("sched:ntfs:"))
-    router.callback_query.register(h.notify, F.data.startswith("sched:ntf:"))
+    router.callback_query.register(h.ask_when, F.data == _CB_NOTIFY_WHEN)
+    router.callback_query.register(h.notify_now, F.data == _CB_NOTIFY_NOW)
+    router.callback_query.register(h.notify_preset, F.data == _CB_NOTIFY_PRESET)
+    router.callback_query.register(h.notify_custom, F.data == _CB_NOTIFY_CUSTOM)
     return router

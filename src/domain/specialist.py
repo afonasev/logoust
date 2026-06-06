@@ -22,6 +22,9 @@ DEFAULT_MORNING_NOTIFY_TIME = "10:00"
 # Варианты числа встреч (кнопки) при создании/продлении абонемента — список
 # через запятую, канонизированный (по возрастанию, без повторов).
 DEFAULT_SUBSCRIPTION_PRESETS = "4,8,12"
+# Время кнопки-пресета при откладывании уведомления клиенту (настенное "HH:MM" в
+# таймзоне специалиста); также server-default миграции.
+DEFAULT_DEFERRED_NOTIFY_TIME = "20:00"
 
 
 class ChatIdConflictError(Exception):
@@ -55,6 +58,8 @@ class Specialist:
     morning_notify_last_run_on: date | None = None
     # Дефолтное число встреч в абонементе, подставляемое в подсказку создания/продления.
     subscription_presets: str = DEFAULT_SUBSCRIPTION_PRESETS
+    # Настенное "HH:MM" кнопки-пресета при откладывании уведомления клиенту.
+    deferred_notify_time: str = DEFAULT_DEFERRED_NOTIFY_TIME
 
 
 def is_digest_due(specialist: "Specialist", now: datetime) -> bool:

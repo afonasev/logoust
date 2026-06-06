@@ -28,6 +28,7 @@ from src.infrastructure.db import (
 import src.infrastructure.message_templates_repo  # noqa: F401
 import src.infrastructure.recurring_repo  # noqa: F401
 import src.infrastructure.reminders_repo  # noqa: F401
+import src.infrastructure.scheduled_messages_repo  # noqa: F401
 import src.infrastructure.specialists_repo  # noqa: F401
 import src.infrastructure.subscriptions_repo  # noqa: F401
 

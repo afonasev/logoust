@@ -55,6 +55,8 @@ def test_initial_migration_creates_specialists_table(
         "morning_notify_last_run_on",
         # Added by 0008, replaced by 0010 (subscription_default → subscription_presets).
         "subscription_presets",
+        # Added by 0013 (deferred client notify preset time).
+        "deferred_notify_time",
     }
     assert set(columns) == expected
 
@@ -556,6 +558,68 @@ def test_audit_log_migration_creates_table_and_index(
     command.downgrade(cfg, "0011")
     insp = inspect(engine)
     assert "audit_log" not in insp.get_table_names()
+    engine.dispose()
+
+
+def test_deferred_client_notify_migration_adds_table_and_column(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0013 and seed a specialist that predates the preset-time column.
+    command.upgrade(cfg, "0012")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    assert "scheduled_client_messages" in insp.get_table_names()
+    columns = {c["name"] for c in insp.get_columns("scheduled_client_messages")}
+    assert columns == {
+        "id",
+        "specialist_id",
+        "client_id",
+        "chat_id",
+        "text",
+        "target_key",
+        "event",
+        "due_at",
+        "status",
+        "created_at",
+        "sent_at",
+    }
+    index_names = {i["name"] for i in insp.get_indexes("scheduled_client_messages")}
+    assert "ix_scheduled_status_due" in index_names
+    assert "ix_scheduled_specialist_client_status" in index_names
+    assert "ix_scheduled_specialist_target_status" in index_names
+
+    # The pre-existing specialist backfills to the 20:00 preset default.
+    with engine.connect() as conn:
+        value = conn.execute(
+            text(
+                "SELECT deferred_notify_time FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).scalar_one()
+    assert value == "20:00"
+
+    command.downgrade(cfg, "0012")
+    insp = inspect(engine)
+    assert "scheduled_client_messages" not in insp.get_table_names()
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "deferred_notify_time" not in specialist_columns
     engine.dispose()
 
 

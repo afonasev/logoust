@@ -366,7 +366,7 @@ async def test_stop_flow_confirms_and_deactivates(
     assert f"recur:stop:{series_id}" in _callbacks(_markup(confirm.message.edit_text))
 
     do = _fake_callback(f"recur:stop:{series_id}")
-    await h.do_stop(do, _SP)
+    await h.do_stop(do, _state(), _SP)
     assert messages.recurring.stopped in _texts(do.message.edit_text)
     series = await _load_series(session_factory, series_id)
     assert series is not None
@@ -384,7 +384,7 @@ async def test_stop_foreign_series_blocked(
     h = _recur(messages, session_factory)
     await h.confirm_stop(_fake_callback(f"recur:stopask:{series_id}"), 999)
     do = _fake_callback(f"recur:stop:{series_id}")
-    await h.do_stop(do, 999)
+    await h.do_stop(do, _state(), 999)
     series = await _load_series(session_factory, series_id)
     assert series is not None
     assert series.active is True
@@ -473,7 +473,7 @@ async def test_skip_flow_creates_exception(
     h = _recur(messages, session_factory)
     await h.confirm_skip(_fake_callback(f"recur:skipask:{series_id}:2026-06-22"), _SP)
     do = _fake_callback(f"recur:skip:{series_id}:2026-06-22")
-    await h.do_skip(do, _SP)
+    await h.do_skip(do, _state(), _SP)
     assert messages.recurring.skipped in _texts(do.message.edit_text)
     async with session_factory() as session:
         exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
@@ -493,7 +493,7 @@ async def test_skip_foreign_series_blocked(
     )
     h = _recur(messages, session_factory)
     await h.confirm_skip(_fake_callback(f"recur:skipask:{series_id}:2026-06-22"), 999)
-    await h.do_skip(_fake_callback(f"recur:skip:{series_id}:2026-06-22"), 999)
+    await h.do_skip(_fake_callback(f"recur:skip:{series_id}:2026-06-22"), _state(), 999)
     async with session_factory() as session:
         exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
             series_id
@@ -603,10 +603,12 @@ async def test_edit_asks_series_notify_for_linked(
     await h.pick_slot(_fake_callback("recur:slot:1100"), state, _SP)
     msg = _fake_message("новый")
     await h.apply_comment(msg, state, _SP)
-    # Series edit → "modified" prompt describing the new weekly rule.
+    # Series edit → "modified" prompt; context is a whole-series target.
     cbs = _callbacks(_markup(msg.answer))
-    assert any(c and c.startswith(f"sched:ntfs:m:{client_id}:") for c in cbs)
+    assert "sched:ntfwhen" in cbs
     assert "sched:ntfno" in cbs
+    assert state.store["notify"]["event"] == "m"
+    assert state.store["notify"]["target_key"] == f"series:{series_id}"
 
 
 async def test_stop_asks_series_notify_for_linked(
@@ -619,10 +621,12 @@ async def test_stop_asks_series_notify_for_linked(
     )
     h = _recur(messages, session_factory)
     do = _fake_callback(f"recur:stop:{series_id}")
-    await h.do_stop(do, _SP)
+    state = _state()
+    await h.do_stop(do, state, _SP)
     assert messages.recurring.stopped in _texts(do.message.edit_text)
-    cbs = _callbacks(_markup(do.message.answer))
-    assert any(c and c.startswith(f"sched:ntfs:x:{client_id}:") for c in cbs)
+    assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
+    assert state.store["notify"]["event"] == "x"
+    assert state.store["notify"]["target_key"] == f"series:{series_id}"
 
 
 async def test_move_asks_notify_for_linked(
@@ -639,10 +643,30 @@ async def test_move_asks_notify_for_linked(
     await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
     do = _fake_callback("recur:slot:1600")
     await h.pick_slot(do, state, _SP)
-    # Moving one date → single-occurrence "rescheduled" prompt (concrete date).
-    cbs = _callbacks(_markup(do.message.answer))
-    assert any(c and c.startswith(f"sched:ntf:r:{client_id}:") for c in cbs)
-    assert "sched:ntfno" in cbs
+    # Moving one date → single-occurrence "rescheduled" prompt (a series date target).
+    assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
+    assert state.store["notify"]["event"] == "r"
+    assert state.store["notify"]["target_key"] == f"series:{series_id}:2026-06-22"
+
+
+async def test_move_via_typed_time_answers_result(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_move(_fake_callback(f"recur:move:{series_id}:2026-06-22"), state, _SP)
+    await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
+    await h.ask_custom_time(_fake_callback("recur:other"), state)
+    msg = _fake_message("16:00")
+    # A typed time arrives on the user's message → result is a fresh answer (edit=False).
+    await h.apply_custom_time(msg, state, _SP)
+    assert messages.recurring.moved in _texts(msg.answer)
+    assert "sched:ntfwhen" in _callbacks(_markup(msg.answer))
 
 
 async def test_skip_asks_notify_for_linked(
@@ -655,11 +679,13 @@ async def test_skip_asks_notify_for_linked(
     )
     h = _recur(messages, session_factory)
     do = _fake_callback(f"recur:skip:{series_id}:2026-06-22")
-    await h.do_skip(do, _SP)
+    state = _state()
+    await h.do_skip(do, state, _SP)
     assert messages.recurring.skipped in _texts(do.message.edit_text)
-    # Cancelling one date → single-occurrence "cancelled" prompt (concrete date).
-    cbs = _callbacks(_markup(do.message.answer))
-    assert any(c and c.startswith(f"sched:ntf:x:{client_id}:") for c in cbs)
+    # Cancelling one date → single-occurrence "cancelled" prompt (a series date target).
+    assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
+    assert state.store["notify"]["event"] == "x"
+    assert state.store["notify"]["target_key"] == f"series:{series_id}:2026-06-22"
 
 
 # --- rendering of virtual occurrences ---------------------------------------

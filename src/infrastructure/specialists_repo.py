@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.domain.specialist import (
     DEFAULT_DAY_END,
     DEFAULT_DAY_START,
+    DEFAULT_DEFERRED_NOTIFY_TIME,
     DEFAULT_MORNING_NOTIFY_ENABLED,
     DEFAULT_MORNING_NOTIFY_TIME,
     DEFAULT_REMINDER_ENABLED,
@@ -68,6 +69,9 @@ class SpecialistORM(Base):
     subscription_presets: Mapped[str] = mapped_column(
         String(64), nullable=False, default=DEFAULT_SUBSCRIPTION_PRESETS
     )
+    deferred_notify_time: Mapped[str] = mapped_column(
+        String(5), nullable=False, default=DEFAULT_DEFERRED_NOTIFY_TIME
+    )
 
     def __repr__(self) -> str:
         return f"<SpecialistORM id={self.id} token={self.invite_token[:6]}…>"
@@ -93,6 +97,7 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         morning_notify_time=orm.morning_notify_time,
         morning_notify_last_run_on=orm.morning_notify_last_run_on,
         subscription_presets=orm.subscription_presets,
+        deferred_notify_time=orm.deferred_notify_time,
     )
 
 

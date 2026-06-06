@@ -332,6 +332,57 @@ async def test_ask_value_subscription_presets_prompt(
     assert _texts(cb.message.edit_text)[0] == messages.settings.ask_subscription_presets
 
 
+def test_render_settings_shows_deferred_notify_time():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    assert "📨 Отложенная отправка: 20:00" in render_settings(specialist, m)
+
+
+async def test_ask_value_deferred_time_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:deferred_time")
+    state = _state()
+    await h.ask_value(cb, state)
+    assert state.state == EditSetting.deferred_time
+    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_deferred_time
+
+
+async def test_apply_deferred_time_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("21:30")
+    state = _state(state=EditSetting.deferred_time)
+    await h.apply_deferred_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.deferred_notify_time == "21:30"
+
+
+async def test_apply_deferred_time_invalid_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("25:00")
+    state = _state(state=EditSetting.deferred_time)
+    await h.apply_deferred_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.bad_time
+    assert state.state == EditSetting.deferred_time
+
+
 async def test_apply_subscription_presets_valid(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

@@ -23,6 +23,7 @@ class SettingField(enum.Enum):
     REMINDER_TIME = "reminder_time"
     DIGEST_TIME = "morning_notify_time"
     SUBSCRIPTION_PRESETS = "subscription_presets"
+    DEFERRED_NOTIFY_TIME = "deferred_notify_time"
 
 
 class SettingsUpdateResult(enum.Enum):
@@ -45,6 +46,7 @@ def _normalize(field: SettingField, raw: str) -> object | None:
         SettingField.DAY_END,
         SettingField.REMINDER_TIME,
         SettingField.DIGEST_TIME,
+        SettingField.DEFERRED_NOTIFY_TIME,
     }:
         return parse_hhmm(value)
     if field is SettingField.SUBSCRIPTION_PRESETS:

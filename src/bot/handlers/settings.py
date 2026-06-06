@@ -73,6 +73,7 @@ _CB_DIGEST_TOGGLE = "settings:digest"
 _CB_DIGEST_TIME = "settings:digest_time"
 _CB_DIGEST_NOW = "settings:digest_now"
 _CB_SUBSCRIPTION = "settings:subscription_presets"
+_CB_DEFERRED_TIME = "settings:deferred_time"
 _CB_TEMPLATES = "settings:templates"
 _CB_TPL_EDIT = "tpl:edit:"  # + template_key
 _CB_TPL_RESET = "tpl:reset:"  # + template_key
@@ -85,6 +86,7 @@ _FIELD_BY_CALLBACK = {
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
     _CB_DIGEST_TIME: SettingField.DIGEST_TIME,
     _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_PRESETS,
+    _CB_DEFERRED_TIME: SettingField.DEFERRED_NOTIFY_TIME,
 }
 
 
@@ -95,6 +97,7 @@ class EditSetting(StatesGroup):
     reminder_time = State()
     digest_time = State()
     subscription_presets = State()
+    deferred_time = State()
 
 
 class EditTemplate(StatesGroup):
@@ -160,6 +163,7 @@ _STATE_BY_FIELD = {
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
     SettingField.DIGEST_TIME: EditSetting.digest_time,
     SettingField.SUBSCRIPTION_PRESETS: EditSetting.subscription_presets,
+    SettingField.DEFERRED_NOTIFY_TIME: EditSetting.deferred_time,
 }
 
 
@@ -212,6 +216,11 @@ def _menu_keyboard(
                     text=m.btn_subscription_presets, callback_data=_CB_SUBSCRIPTION
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_deferred_time, callback_data=_CB_DEFERRED_TIME
+                )
+            ],
             [InlineKeyboardButton(text=templates_btn, callback_data=_CB_TEMPLATES)],
         ]
     )
@@ -261,6 +270,7 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         reminder_time=specialist.reminder_time,
         digest=m.state_on if specialist.morning_notify_enabled else m.state_off,
         digest_time=specialist.morning_notify_time,
+        deferred_notify_time=specialist.deferred_notify_time,
         subscription_presets=specialist.subscription_presets,
     )
 
@@ -430,17 +440,15 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         await callback.answer()
 
     def _prompt(self, field: SettingField) -> str:
-        if field is SettingField.DAY_START:
-            return self._m.ask_day_start
-        if field is SettingField.DAY_END:
-            return self._m.ask_day_end
-        if field is SettingField.REMINDER_TIME:
-            return self._m.ask_reminder_time
-        if field is SettingField.DIGEST_TIME:
-            return self._m.ask_digest_time
-        if field is SettingField.SUBSCRIPTION_PRESETS:
-            return self._m.ask_subscription_presets
-        return self._m.ask_slot
+        prompts = {
+            SettingField.DAY_START: self._m.ask_day_start,
+            SettingField.DAY_END: self._m.ask_day_end,
+            SettingField.REMINDER_TIME: self._m.ask_reminder_time,
+            SettingField.DIGEST_TIME: self._m.ask_digest_time,
+            SettingField.SUBSCRIPTION_PRESETS: self._m.ask_subscription_presets,
+            SettingField.DEFERRED_NOTIFY_TIME: self._m.ask_deferred_time,
+        }
+        return prompts.get(field, self._m.ask_slot)
 
     def _error(self, field: SettingField) -> str:
         if field is SettingField.SLOT_MINUTES:
@@ -509,6 +517,13 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
     ) -> None:
         await self.apply_value(
             message, state, specialist_id, SettingField.SUBSCRIPTION_PRESETS
+        )
+
+    async def apply_deferred_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(
+            message, state, specialist_id, SettingField.DEFERRED_NOTIFY_TIME
         )
 
     # --- client message templates --------------------------------------------
@@ -603,6 +618,7 @@ def build_router(
     router.message.register(
         h.apply_subscription_presets, EditSetting.subscription_presets
     )
+    router.message.register(h.apply_deferred_time, EditSetting.deferred_time)
     router.message.register(h.apply_template, EditTemplate.body)
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
@@ -620,6 +636,7 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_DIGEST_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_SUBSCRIPTION)
+    router.callback_query.register(h.ask_value, F.data == _CB_DEFERRED_TIME)
     router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
     router.callback_query.register(h.toggle_digest, F.data == _CB_DIGEST_TOGGLE)
     router.callback_query.register(h.send_digest_now, F.data == _CB_DIGEST_NOW)

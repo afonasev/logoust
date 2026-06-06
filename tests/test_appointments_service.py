@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.appointment import Appointment
+from src.domain.recurring import RecurringAppointment, RecurringException
 from src.domain.schedule import utc_to_wall, wall_to_utc
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
@@ -23,6 +24,7 @@ from src.services.appointments import (
     schedule_landing_day,
     taken_slot_times,
 )
+from src.services.recurring import SeriesContext
 
 _TZ = "Asia/Yekaterinburg"  # UTC+5
 _NOW = datetime(2026, 6, 4, 6, 0, tzinfo=UTC)  # 11:00 local, today = 2026-06-04
@@ -500,3 +502,115 @@ async def test_landing_falls_back_to_today_when_nothing(session: AsyncSession):
         today=date(2026, 6, 4),
     )
     assert landing == date(2026, 6, 4)
+
+
+# --- series-aware navigation ------------------------------------------------
+
+
+def _series(
+    weekday: int, start_date: date, *, series_id: int = 1, time_hhmm: str = "14:00"
+) -> RecurringAppointment:
+    return RecurringAppointment(
+        id=series_id,
+        specialist_id=_SPECIALIST,
+        client_id=_CLIENT,
+        weekday=weekday,
+        time_hhmm=time_hhmm,
+        comment="регулярная",
+        active=True,
+        start_date=start_date,
+        materialized_through=start_date,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _ctx(
+    series: list[RecurringAppointment],
+    *,
+    exceptions: list[RecurringException] | None = None,
+    today: date = date(2026, 6, 4),
+) -> SeriesContext:
+    grouped: dict[int, list[RecurringException]] = {}
+    for exc in exceptions or []:
+        grouped.setdefault(exc.series_id, []).append(exc)
+    return SeriesContext(series=series, exceptions=grouped, today=today)
+
+
+async def test_adjacent_shown_day_forward_reaches_moved_occurrence(
+    session: AsyncSession,
+):
+    # Tuesday series; the 2026-06-09 repeat is moved to Sunday 2026-06-07 (no real
+    # row). From Saturday, "next" must land on that Sunday, not skip to Monday.
+    series = _series(weekday=1, start_date=date(2026, 6, 2))  # Tue
+    moved = RecurringException(
+        id=1,
+        series_id=1,
+        original_date=date(2026, 6, 9),
+        new_starts_at=wall_to_utc(date(2026, 6, 7), "10:00", _TZ),  # Sun
+        created_at=_NOW,
+    )
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 6),  # Saturday
+        forward=True,
+        series=_ctx([series], exceptions=[moved]),
+    )
+    assert nxt == date(2026, 6, 7)  # Sunday with the moved repeat, not Monday
+
+
+async def test_adjacent_shown_day_forward_reaches_plain_nonworking_repeat(
+    session: AsyncSession,
+):
+    # A plain (non-moved) Sunday series whose weekday is outside working days.
+    series = _series(weekday=6, start_date=date(2026, 6, 7))  # Sunday
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 6),  # Saturday
+        forward=True,
+        series=_ctx([series]),
+    )
+    assert nxt == date(2026, 6, 7)  # the Sunday repeat, not Monday
+
+
+async def test_adjacent_shown_day_empty_series_still_skips_weekend(
+    session: AsyncSession,
+):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 5),  # Friday
+        forward=True,
+        series=_ctx([]),
+    )
+    assert nxt == date(2026, 6, 8)  # Monday; empty weekend still skipped
+
+
+async def test_adjacent_shown_day_none_when_only_series_is_backward(
+    session: AsyncSession,
+):
+    # Only a future series repeat exists, no working days, no real rows. Backward
+    # must not surface a virtual occurrence (the past lives in real rows only).
+    series = _series(weekday=6, start_date=date(2026, 6, 7))  # Sunday, future
+    repo = SqlAlchemyAppointmentsRepo(session)
+    prev = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=set(),
+        tz=_TZ,
+        day=date(2026, 6, 10),
+        forward=False,
+        series=_ctx([series]),
+    )
+    assert prev is None

@@ -18,6 +18,7 @@ from src.bot.handlers.clients import SpecialistMiddleware
 from src.bot.messages import (
     BotMessages,
     RecurringMessages,
+    ReminderMessages,
     ScheduleMessages,
 )
 from src.domain.appointment import Appointment
@@ -327,9 +328,9 @@ def _appt_row(  # noqa: PLR0913
     *,
     m: ScheduleMessages,
     rm: RecurringMessages,
+    rem: ReminderMessages,
     back: str,
-    confirmed: set[tuple[int, datetime]],
-    confirmed_mark: str,
+    statuses: dict[tuple[int, datetime], ReminderStatus],
 ) -> list[InlineKeyboardButton]:
     # A virtual occurrence (id is None) routes to the series card by
     # series_id/origin_date; a real row routes to its appointment card.
@@ -337,11 +338,9 @@ def _appt_row(  # noqa: PLR0913
     time = f"{utc_to_wall(appt.starts_at, tz):%H:%M}"
     # Only a plain occurrence is marked 🔁; a moved one looks like a one-off.
     mark = f"{rm.mark} " if appt.recurring_mark else ""
-    # ✅ leads the row when the client confirmed this occurrence.
-    confirm = (
-        f"{confirmed_mark} " if (appt.client_id, appt.starts_at) in confirmed else ""
-    )
-    label = f"{confirm}{mark}{time} · {child}{_comment_part(appt.comment, m)}"
+    # ✅/❌ lead the row when the client confirmed/declined this occurrence.
+    status = rem.status_mark(statuses.get((appt.client_id, appt.starts_at)))
+    label = f"{status}{mark}{time} · {child}{_comment_part(appt.comment, m)}"
     if appt.id is None:
         assert appt.series_id is not None  # noqa: S101 — virtual rows carry a series
         assert appt.origin_date is not None  # noqa: S101
@@ -366,10 +365,10 @@ def _day_keyboard(  # noqa: PLR0913
     *,
     m: ScheduleMessages,
     rm: RecurringMessages,
+    rem: ReminderMessages,
     prev_day: date | None,
     next_day: date | None,
-    confirmed: set[tuple[int, datetime]],
-    confirmed_mark: str,
+    statuses: dict[tuple[int, datetime], ReminderStatus],
 ) -> InlineKeyboardMarkup:
     back = f"sched:day_view:{day.isoformat()}"
     rows = [
@@ -379,9 +378,9 @@ def _day_keyboard(  # noqa: PLR0913
             tz,
             m=m,
             rm=rm,
+            rem=rem,
             back=back,
-            confirmed=confirmed,
-            confirmed_mark=confirmed_mark,
+            statuses=statuses,
         )
         for appt in appts
     ]
@@ -929,6 +928,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 tz=tz,
                 day=day,
                 forward=False,
+                series=series,
             )
             next_day = await adjacent_shown_day(
                 repo,
@@ -937,10 +937,8 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 tz=tz,
                 day=day,
                 forward=True,
+                series=series,
             )
-        confirmed = {
-            key for key, st in statuses.items() if st is ReminderStatus.CONFIRMED
-        }
         return _render_day(day, appts, self._m), _day_keyboard(
             day,
             appts,
@@ -948,10 +946,10 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             tz,
             m=self._m,
             rm=self._rm,
+            rem=self._rem,
             prev_day=prev_day,
             next_day=next_day,
-            confirmed=confirmed,
-            confirmed_mark=self._rem.confirmed_mark,
+            statuses=statuses,
         )
 
     async def show_week(self, callback: CallbackQuery, specialist_id: int) -> None:

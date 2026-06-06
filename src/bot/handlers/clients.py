@@ -23,10 +23,12 @@ from src.bot.messages import (
     BotMessages,
     ClientsMessages,
     RecurringMessages,
+    ReminderMessages,
     ScheduleMessages,
 )
 from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
+from src.domain.reminder import ReminderStatus
 from src.domain.schedule import format_ru_short, utc_to_wall
 from src.domain.subscription import Subscription
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
@@ -35,6 +37,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
 )
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import list_client_future, nearest_future_by_client
@@ -51,6 +54,7 @@ from src.services.clients import (
     restore_client,
 )
 from src.services.recurring import SeriesContext, load_series_context, settle
+from src.services.reminder import statuses_for_appointments
 from src.services.subscriptions import get_active
 
 logger = logging.getLogger(__name__)
@@ -118,13 +122,14 @@ def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
     )
 
 
-def _appt_label(
+def _appt_label(  # noqa: PLR0913
     appt: Appointment,
     tz: str,
     sm: ScheduleMessages,
     *,
     recur_mark: str,
     with_comment: bool = True,
+    status_prefix: str = "",
 ) -> str:
     wall = utc_to_wall(appt.starts_at, tz)
     comment = (
@@ -133,8 +138,11 @@ def _appt_label(
         else ""
     )
     # A plain recurring occurrence shows 🔁; everything else (one-off, moved) 📅.
+    # `status_prefix` (✅/❌) leads when the client answered the reminder.
     prefix = recur_mark if appt.recurring_mark else "📅"
-    return f"{prefix} {format_ru_short(wall.date())} {wall:%H:%M}{comment}"
+    return (
+        f"{status_prefix}{prefix} {format_ru_short(wall.date())} {wall:%H:%M}{comment}"
+    )
 
 
 def _client_row(  # noqa: PLR0913
@@ -145,6 +153,8 @@ def _client_row(  # noqa: PLR0913
     *,
     page: int,
     recur_mark: str,
+    rem: ReminderMessages,
+    statuses: dict[tuple[int, datetime], ReminderStatus],
 ) -> list[InlineKeyboardButton]:
     # Two columns: the client (→ card) and its nearest appointment (→ that
     # appointment's card, to reschedule), or a "create appointment" button if none.
@@ -160,22 +170,42 @@ def _client_row(  # noqa: PLR0913
             text=sm.btn_add, callback_data=f"sched:new:{client.id}"
         )
     else:
+        status_prefix = rem.status_mark(statuses.get((appt.client_id, appt.starts_at)))
         second = InlineKeyboardButton(
-            text=_appt_label(appt, tz, sm, recur_mark=recur_mark, with_comment=False),
+            text=_appt_label(
+                appt,
+                tz,
+                sm,
+                recur_mark=recur_mark,
+                with_comment=False,
+                status_prefix=status_prefix,
+            ),
             callback_data=_appt_callback(appt, back),
         )
     return [client_btn, second]
 
 
-def _active_keyboard(
+def _active_keyboard(  # noqa: PLR0913
     page: ClientsPage,
     nearest: dict[int, Appointment],
     tz: str,
     sm: ScheduleMessages,
     recur_mark: str,
+    *,
+    rem: ReminderMessages,
+    statuses: dict[tuple[int, datetime], ReminderStatus],
 ) -> InlineKeyboardMarkup:
     rows = [
-        _client_row(c, nearest, tz, sm, page=page.page, recur_mark=recur_mark)
+        _client_row(
+            c,
+            nearest,
+            tz,
+            sm,
+            page=page.page,
+            recur_mark=recur_mark,
+            rem=rem,
+            statuses=statuses,
+        )
         for c in page.clients
     ]
     nav = []
@@ -252,14 +282,21 @@ def _appt_callback(appt: Appointment, back: str) -> str:
 
 
 def _future_button(
-    appt: Appointment, tz: str, m: ScheduleMessages, recur_mark: str
+    appt: Appointment,
+    tz: str,
+    m: ScheduleMessages,
+    recur_mark: str,
+    *,
+    status_prefix: str = "",
 ) -> list[InlineKeyboardButton]:
     # Tapping a future appointment opens its card (reschedule / cancel there);
     # back from there returns to this client's card.
     back = f"clients:card:{appt.client_id}"
     return [
         InlineKeyboardButton(
-            text=_appt_label(appt, tz, m, recur_mark=recur_mark),
+            text=_appt_label(
+                appt, tz, m, recur_mark=recur_mark, status_prefix=status_prefix
+            ),
             callback_data=_appt_callback(appt, back),
         )
     ]
@@ -299,6 +336,8 @@ def _card_keyboard(  # noqa: PLR0913
     m: ScheduleMessages,
     cm: ClientsMessages,
     rm: RecurringMessages,
+    rem: ReminderMessages,
+    statuses: dict[tuple[int, datetime], ReminderStatus],
     back: str,
     subscription: Subscription | None = None,
 ) -> InlineKeyboardMarkup:
@@ -311,7 +350,18 @@ def _card_keyboard(  # noqa: PLR0913
         status_btn = InlineKeyboardButton(
             text=_BTN_ARCHIVE, callback_data=f"clients:archiveask:{client.id}"
         )
-    rows = [_future_button(appt, tz, m, rm.mark) for appt in appts]
+    rows = [
+        _future_button(
+            appt,
+            tz,
+            m,
+            rm.mark,
+            status_prefix=rem.status_mark(
+                statuses.get((appt.client_id, appt.starts_at))
+            ),
+        )
+        for appt in appts
+    ]
     rows.append(
         [InlineKeyboardButton(text=m.btn_add, callback_data=f"sched:new:{client.id}")]
     )
@@ -540,6 +590,11 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 now=datetime.now(UTC),
                 series=series,
             )
+            statuses = await statuses_for_appointments(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                appointments=list(nearest.values()),
+            )
         if page_num == 0 and not page.clients:
             text = self._m.empty_active
         else:
@@ -550,6 +605,8 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             specialist.timezone,
             self._messages.schedule,
             self._messages.recurring.mark,
+            rem=self._messages.reminder,
+            statuses=statuses,
         )
         return text, keyboard
 
@@ -643,6 +700,11 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 now=datetime.now(UTC),
                 series=series,
             )
+            statuses = await statuses_for_appointments(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                appointments=appts,
+            )
             # Active subscription drives the card button (create vs open); only
             # relevant for active clients, where the button is shown.
             subscription = (
@@ -667,6 +729,8 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             m=sm,
             cm=self._m,
             rm=self._messages.recurring,
+            rem=self._messages.reminder,
+            statuses=statuses,
             back=back or _back_target(client.status),
             subscription=subscription,
         )

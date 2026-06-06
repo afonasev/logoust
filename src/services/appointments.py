@@ -16,6 +16,7 @@ from src.domain.schedule import (
 from src.domain.specialist import Specialist
 from src.services.recurring import (
     SeriesContext,
+    nearest_series_landing_day,
     next_occurrence,
     occurrences_landing_in,
     series_taken_times,
@@ -278,20 +279,27 @@ async def adjacent_shown_day(  # noqa: PLR0913
     tz: str,
     day: date,
     forward: bool,
+    series: SeriesContext | None = None,
 ) -> date | None:
     """Nearest *shown* day strictly past `day` in one direction, or None.
 
-    A shown day is a working day or a day that has at least one appointment;
-    empty non-working days are skipped. Combines a bounded pure scan for the
-    nearest working day with a single query for the nearest day that has an
-    appointment, then picks the closer of the two.
+    A shown day is a working day, a day that has at least one appointment, or —
+    when `series` is given — a day a future repeat of an active series lands on
+    (skips/moves applied); empty non-working days are skipped. Combines a bounded
+    pure scan for the nearest working day, a single query for the nearest day with
+    a real appointment, and the nearest series landing day, then picks the closest.
     """
     start = day + timedelta(days=1) if forward else day - timedelta(days=1)
     work_day = nearest_working_day(start, working_days, forward=forward)
     appt_day = await _nearest_appt_day(
         repo, specialist_id=specialist_id, tz=tz, day=day, forward=forward
     )
-    candidates = [d for d in (work_day, appt_day) if d is not None]
+    series_day = (
+        nearest_series_landing_day(series, day, tz, forward=forward)
+        if series is not None
+        else None
+    )
+    candidates = [d for d in (work_day, appt_day, series_day) if d is not None]
     if not candidates:
         return None
     return min(candidates) if forward else max(candidates)
@@ -326,6 +334,7 @@ async def schedule_landing_day(  # noqa: PLR0913
         tz=tz,
         day=today,
         forward=True,
+        series=series,
     )
     return forward or today
 

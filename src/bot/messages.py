@@ -3,6 +3,8 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
+from src.domain.reminder import ReminderStatus
+
 
 @dataclass(frozen=True, slots=True)
 class StartMessages:
@@ -130,7 +132,20 @@ class ReminderMessages:
     specialist_declined: str
     btn_open_appt: str
     confirmed_mark: str
+    declined_mark: str
     card_confirmed: str
+
+    def status_mark(self, status: ReminderStatus | None) -> str:
+        """Leading label prefix for an occurrence's reminder status.
+
+        Returns the mark plus a trailing space so it concatenates directly before
+        a label; an empty string when there is no confirmed/declined response.
+        """
+        if status is ReminderStatus.CONFIRMED:
+            return f"{self.confirmed_mark} "
+        if status is ReminderStatus.DECLINED:
+            return f"{self.declined_mark} "
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +364,7 @@ def load_messages(path: Path) -> BotMessages:
             specialist_declined=_require(data, "reminder.specialist_declined"),
             btn_open_appt=_require(data, "reminder.btn_open_appt"),
             confirmed_mark=_require(data, "reminder.confirmed_mark"),
+            declined_mark=_require(data, "reminder.declined_mark"),
             card_confirmed=_require(data, "reminder.card_confirmed"),
         ),
         settings=SettingsMessages(

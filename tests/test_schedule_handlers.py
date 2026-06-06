@@ -849,6 +849,26 @@ async def test_day_view_marks_confirmed_appointment(
     assert any(label.startswith(messages.reminder.confirmed_mark) for label in labels)
 
 
+async def test_day_view_marks_declined_appointment(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, child="Аня")
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)
+    await _seed_appt(session_factory, client_id=client_id, starts_at=starts_at)
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client_id,
+        starts_at=starts_at,
+        status=ReminderStatus.DECLINED,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day_view:2030-01-15")
+    await h.open_day(cb, _SP)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert any(label.startswith(messages.reminder.declined_mark) for label in labels)
+
+
 async def test_day_view_no_mark_for_pending(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

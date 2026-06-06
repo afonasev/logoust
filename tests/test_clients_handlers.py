@@ -15,8 +15,10 @@ from src.bot.handlers.clients import (
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus
+from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import (
     NewClient,
@@ -288,6 +290,98 @@ async def test_active_list_shows_nearest_appointment(
     assert any("14:00" in label for label in labels)
     assert not any("осмотр" in label for label in labels)
     assert any(c and c.startswith("sched:card:1~") for c in cbs)  # appt card
+
+
+async def _seed_reminder_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    client_id: int,
+    starts_at: datetime,
+    status: ReminderStatus,
+) -> None:
+    moment = datetime.now(UTC)
+    async with session_factory() as session:
+        repo = SqlAlchemyRemindersRepo(session)
+        reminder = AppointmentReminder(
+            id=None,
+            specialist_id=_SPECIALIST_ID,
+            client_id=client_id,
+            starts_at=starts_at,
+            series_id=None,
+            origin_date=None,
+            status=ReminderStatus.PENDING,
+            sent_at=moment,
+            responded_at=None,
+        )
+        await repo.insert_pending(reminder)
+        assert reminder.id is not None
+        await repo.set_status(reminder.id, status, moment)
+
+
+async def test_active_list_marks_confirmed_nearest(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Аня")
+    assert client.id is not None
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        await SqlAlchemyAppointmentsRepo(session).add(
+            Appointment(
+                id=None,
+                specialist_id=_SPECIALIST_ID,
+                client_id=client.id,
+                starts_at=starts_at,
+                comment=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client.id,
+        starts_at=starts_at,
+        status=ReminderStatus.CONFIRMED,
+    )
+    h = _handlers(messages, session_factory)
+    msg = _fake_message()
+    await h.show_menu(msg, _state(), _SPECIALIST_ID)
+    labels = _button_texts(_markup(msg.answer))
+    assert any(messages.reminder.confirmed_mark in label for label in labels)
+
+
+async def test_card_future_marks_declined(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Лиза")
+    assert client.id is not None
+    starts_at = datetime(2030, 1, 15, 9, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        await SqlAlchemyAppointmentsRepo(session).add(
+            Appointment(
+                id=None,
+                specialist_id=_SPECIALIST_ID,
+                client_id=client.id,
+                starts_at=starts_at,
+                comment=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    await _seed_reminder_status(
+        session_factory,
+        client_id=client.id,
+        starts_at=starts_at,
+        status=ReminderStatus.DECLINED,
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    labels = [
+        b.text for row in _markup(cb.message.edit_text).inline_keyboard for b in row
+    ]
+    assert any(label.startswith(messages.reminder.declined_mark) for label in labels)
 
 
 async def test_show_menu_empty(

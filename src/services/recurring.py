@@ -315,6 +315,30 @@ def next_occurrence(
     return min(occurrences, key=lambda occ: occ.starts_at) if occurrences else None
 
 
+def nearest_series_landing_day(
+    series_ctx: SeriesContext, day: date, tz: str, *, forward: bool
+) -> date | None:
+    """Calendar day the nearest future series occurrence lands on, past `day`.
+
+    Forward: the minimum landing date strictly after `day`, bounded by the same
+    horizon as `next_occurrence` so an infinite series cannot drive an unbounded
+    scan. Backward: always None — past occurrences are materialised into real rows,
+    so active series contribute no day before `today` (real rows cover the past).
+    """
+    if not forward:
+        return None
+    win_start = day + timedelta(days=1)
+    win_end = win_start + _NEXT_OCCURRENCE_HORIZON
+    landing_days = [
+        utc_to_wall(occ.starts_at, tz).date()
+        for s in series_ctx.series
+        for occ in occurrences_landing_in(
+            s, series_ctx.for_series(s.id), win_start, win_end, tz, series_ctx.today
+        )
+    ]
+    return min(landing_days) if landing_days else None
+
+
 def _exceptions_by_series(
     exceptions: list[RecurringException],
 ) -> dict[int, list[RecurringException]]:

@@ -22,7 +22,7 @@
 | `reminder_enabled`  | BOOLEAN     | нет | Включены ли авто-напоминания клиентам. Server-default `1` (opt-out). |
 | `reminder_time`     | VARCHAR(5)  | нет | Настенное `ЧЧ:ММ` ежедневного прохода напоминаний. Server-default `12:00`. |
 | `reminder_last_run_on` | DATE     | да  | Дата (в tz) последнего выполненного прохода напоминаний; антидубль/догон. `NULL` — ещё не выполнялся. |
-| `subscription_default` | INTEGER  | нет | Дефолтное число встреч, подставляемое в подсказку создания/продления абонемента. Server-default `8`. |
+| `subscription_presets` | VARCHAR(64) | нет | Варианты числа встреч (кнопки) при создании/продлении абонемента — список через запятую, канонизированный (по возрастанию, без повторов). Server-default `4,8,12`. |
 
 Индексы:
 
@@ -217,6 +217,7 @@
 - `0007_appointment_reminders.py` — добавляет в `specialists` колонки `reminder_enabled` (server-default `1`), `reminder_time` (server-default `12:00`), `reminder_last_run_on` (nullable); создаёт таблицу `appointment_reminders` (`UNIQUE(specialist_id, client_id, starts_at)`). Существующие специалисты → напоминания включены на 12:00. Down-ревизия удаляет таблицу и три колонки.
 - `0008_subscriptions.py` — добавляет в `specialists` колонку `subscription_default` (server-default `8`); создаёт таблицу `subscriptions` (FK на `clients` и `specialists`, индекс `ix_subscriptions_client_status`). Существующие специалисты → `subscription_default = 8`. Down-ревизия удаляет таблицу и колонку.
 - `0009_message_templates.py` — создаёт таблицу `message_templates` (FK на `specialists`, `UNIQUE(specialist_id, template_key)`). Данные не наполняются: отсутствие строки = дефолт из `messages.toml`. Down-ревизия удаляет таблицу.
+- `0010_subscription_presets.py` — заменяет в `specialists` колонку `subscription_default` (одно число) на `subscription_presets` (список вариантов через запятую, server-default `4,8,12`). Существующие специалисты получают стандартный список; старое значение не переносится. Down-ревизия возвращает `subscription_default` (server-default `8`).
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

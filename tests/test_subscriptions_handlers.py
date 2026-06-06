@@ -166,19 +166,21 @@ async def test_start_create_sets_state_and_prompt(
     await h.start_create(cb, state, _SP)
     assert state.state == SubscriptionFlow.create_meetings
     assert state.store["client_id"] == client.id
-    assert "8" in _texts(cb.message.edit_text)[0]  # default in the prompt
+    # Default presets become buttons (4/8/12) carrying the chosen value.
+    assert _button_texts(_markup(cb.message.edit_text))[:3] == ["4", "8", "12"]
+    assert f"subs:createval:{client.id}:8" in _callbacks(_markup(cb.message.edit_text))
 
 
-async def test_create_default_creates_subscription(
+async def test_create_preset_creates_subscription(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client = await _seed_client(session_factory)
     assert client.id is not None
     h = _subs(messages, session_factory)
-    cb = _fake_callback(f"subs:createdef:{client.id}")
+    cb = _fake_callback(f"subs:createval:{client.id}:8")
     state = _state(state=SubscriptionFlow.create_meetings)
-    await h.create_default(cb, state, _SP)
+    await h.create_preset(cb, state, _SP)
     assert state.state is None
     async with session_factory() as session:
         sub = await get_active(
@@ -224,7 +226,7 @@ async def test_create_value_invalid_reasks(
     assert state.state == SubscriptionFlow.create_meetings
 
 
-async def test_create_default_opens_existing_when_active(
+async def test_create_preset_opens_existing_when_active(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
@@ -238,8 +240,8 @@ async def test_create_default_opens_existing_when_active(
             meetings=5,
         )
     h = _subs(messages, session_factory)
-    cb = _fake_callback(f"subs:createdef:{client.id}")
-    await h.create_default(cb, _state(state=SubscriptionFlow.create_meetings), _SP)
+    cb = _fake_callback(f"subs:createval:{client.id}:8")
+    await h.create_preset(cb, _state(state=SubscriptionFlow.create_meetings), _SP)
     # Existing active subscription's card is shown (remaining 5), not a new one.
     assert "5" in _texts(cb.message.edit_text)[0]
 
@@ -318,15 +320,17 @@ async def test_start_extend_sets_state(
     await h.start_extend(cb, state, _SP)
     assert state.state == SubscriptionFlow.extend_meetings
     assert state.store["subscription_id"] == sid
+    # Preset buttons carry "subs:extendval:<sid>:<n>".
+    assert f"subs:extendval:{sid}:8" in _callbacks(_markup(cb.message.edit_text))
 
 
-async def test_extend_default(
+async def test_extend_preset(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     sid = await _seed_active(session_factory, meetings=8)
     h = _subs(messages, session_factory)
-    cb = _fake_callback(f"subs:extenddef:{sid}")
-    await h.extend_default(cb, _state(state=SubscriptionFlow.extend_meetings), _SP)
+    cb = _fake_callback(f"subs:extendval:{sid}:8")
+    await h.extend_preset(cb, _state(state=SubscriptionFlow.extend_meetings), _SP)
     async with session_factory() as session:
         sub = await SqlAlchemySubscriptionsRepo(session).get_for_specialist(sid, _SP)
     assert sub is not None
@@ -334,13 +338,13 @@ async def test_extend_default(
     assert sub.remaining == 16
 
 
-async def test_extend_default_not_found_alerts(
+async def test_extend_preset_not_found_alerts(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     h = _subs(messages, session_factory)
-    cb = _fake_callback("subs:extenddef:404")
-    await h.extend_default(cb, _state(state=SubscriptionFlow.extend_meetings), _SP)
+    cb = _fake_callback("subs:extendval:404:8")
+    await h.extend_preset(cb, _state(state=SubscriptionFlow.extend_meetings), _SP)
     cb.answer.assert_awaited_with(messages.subscriptions.not_found, show_alert=True)
 
 

@@ -22,6 +22,8 @@ class SubscriptionsPage:
 # Верхний порог числа встреч — защита от абсурдного ввода, не жёсткое правило
 # (тот же подход, что и _MAX_SLOT_MINUTES в services/specialists.py).
 _MAX_MEETINGS = 200
+# Сколько вариантов-кнопок допускаем в настройке (умещаются в клавиатуру).
+_MAX_PRESETS = 8
 
 
 def parse_meetings(raw: str) -> int | None:
@@ -37,6 +39,29 @@ def parse_meetings(raw: str) -> int | None:
     if meetings <= 0 or meetings > _MAX_MEETINGS:
         return None
     return meetings
+
+
+def parse_presets(raw: str) -> str | None:
+    """Проверить и канонизировать список вариантов, заданный через запятую.
+
+    Каждый элемент — корректное число встреч (см. parse_meetings). Возвращает
+    канонический вид (по возрастанию, без повторов, например 4,8,12) либо None
+    для некорректного ввода (пустой список, мусор, слишком много вариантов).
+    """
+    values: set[int] = set()
+    for part in raw.split(","):
+        meetings = parse_meetings(part)
+        if meetings is None:
+            return None
+        values.add(meetings)
+    if not values or len(values) > _MAX_PRESETS:
+        return None
+    return ",".join(str(n) for n in sorted(values))
+
+
+def presets_list(stored: str) -> list[int]:
+    """Разобрать канонический список вариантов в числа по возрастанию."""
+    return [int(part) for part in stored.split(",")]
 
 
 def _log(event: str, subscription: Subscription) -> None:

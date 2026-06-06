@@ -3,8 +3,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
 
-from src.domain.subscription import DEFAULT_SUBSCRIPTION_MEETINGS
-
 # Defaults for a freshly invited specialist; also the migration's server-defaults.
 DEFAULT_TIMEZONE = "Asia/Yekaterinburg"
 DEFAULT_DAY_START = "09:00"
@@ -15,8 +13,9 @@ DEFAULT_WORKING_DAYS = "0,1,2,3,4"
 # Appointment reminders are opt-out (on by default) and fire at noon wall-time.
 DEFAULT_REMINDER_ENABLED = True
 DEFAULT_REMINDER_TIME = "12:00"
-# Дефолтное число встреч, подставляемое в подсказку при создании/продлении абонемента.
-DEFAULT_SUBSCRIPTION_DEFAULT = DEFAULT_SUBSCRIPTION_MEETINGS
+# Варианты числа встреч (кнопки) при создании/продлении абонемента — список
+# через запятую, канонизированный (по возрастанию, без повторов).
+DEFAULT_SUBSCRIPTION_PRESETS = "4,8,12"
 
 
 class ChatIdConflictError(Exception):
@@ -44,7 +43,7 @@ class Specialist:
     reminder_time: str = DEFAULT_REMINDER_TIME
     reminder_last_run_on: date | None = None
     # Дефолтное число встреч в абонементе, подставляемое в подсказку создания/продления.
-    subscription_default: int = DEFAULT_SUBSCRIPTION_DEFAULT
+    subscription_presets: str = DEFAULT_SUBSCRIPTION_PRESETS
 
 
 class SpecialistsRepo(Protocol):

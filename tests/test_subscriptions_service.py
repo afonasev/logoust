@@ -12,6 +12,8 @@ from src.services.subscriptions import (
     list_active_page,
     list_closed_page,
     parse_meetings,
+    parse_presets,
+    presets_list,
 )
 
 _SP = 1
@@ -199,3 +201,23 @@ def test_parse_meetings_rejects_invalid():
     assert parse_meetings("abc") is None
     assert parse_meetings("") is None
     assert parse_meetings("201") is None  # above the upper bound
+
+
+def test_parse_presets_canonicalises():
+    # Sorts, dedups and strips whitespace.
+    assert parse_presets("12, 4, 8, 4") == "4,8,12"
+    assert parse_presets("8") == "8"
+
+
+def test_parse_presets_rejects_invalid():
+    assert parse_presets("") is None  # empty list
+    assert parse_presets("4,abc") is None  # bad element
+    assert parse_presets("4,0") is None  # zero is not a valid count
+    assert parse_presets("4,,8") is None  # empty element
+    # More than _MAX_PRESETS (8) distinct variants.
+    assert parse_presets("1,2,3,4,5,6,7,8,9") is None
+
+
+def test_presets_list_parses_canonical_string():
+    assert presets_list("4,8,12") == [4, 8, 12]
+    assert presets_list("8") == [8]

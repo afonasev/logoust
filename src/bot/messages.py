@@ -172,7 +172,7 @@ class SettingsMessages:
     btn_working_days: str
     btn_reminder: str
     btn_reminder_time: str
-    btn_subscription_default: str
+    btn_subscription_presets: str
     state_on: str
     state_off: str
     btn_back: str
@@ -182,11 +182,11 @@ class SettingsMessages:
     ask_day_end: str
     ask_slot: str
     ask_reminder_time: str
-    ask_subscription_default: str
+    ask_subscription_presets: str
     no_working_days: str
     bad_time: str
     bad_slot: str
-    bad_subscription_default: str
+    bad_subscription_presets: str
     saved: str
     not_found: str
 
@@ -215,7 +215,6 @@ class SubscriptionsMessages:
     closed: str
     not_found: str
     cancelled: str
-    btn_default: str
     btn_decrement: str
     btn_extend: str
     btn_close: str
@@ -425,8 +424,8 @@ def load_messages(path: Path) -> BotMessages:
             btn_working_days=_require(data, "settings.btn_working_days"),
             btn_reminder=_require(data, "settings.btn_reminder"),
             btn_reminder_time=_require(data, "settings.btn_reminder_time"),
-            btn_subscription_default=_require(
-                data, "settings.btn_subscription_default"
+            btn_subscription_presets=_require(
+                data, "settings.btn_subscription_presets"
             ),
             state_on=_require(data, "settings.state_on"),
             state_off=_require(data, "settings.state_off"),
@@ -437,14 +436,14 @@ def load_messages(path: Path) -> BotMessages:
             ask_day_end=_require(data, "settings.ask_day_end"),
             ask_slot=_require(data, "settings.ask_slot"),
             ask_reminder_time=_require(data, "settings.ask_reminder_time"),
-            ask_subscription_default=_require(
-                data, "settings.ask_subscription_default"
+            ask_subscription_presets=_require(
+                data, "settings.ask_subscription_presets"
             ),
             no_working_days=_require(data, "settings.no_working_days"),
             bad_time=_require(data, "settings.bad_time"),
             bad_slot=_require(data, "settings.bad_slot"),
-            bad_subscription_default=_require(
-                data, "settings.bad_subscription_default"
+            bad_subscription_presets=_require(
+                data, "settings.bad_subscription_presets"
             ),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
@@ -472,7 +471,6 @@ def load_messages(path: Path) -> BotMessages:
             closed=_require(data, "subscriptions.closed"),
             not_found=_require(data, "subscriptions.not_found"),
             cancelled=_require(data, "subscriptions.cancelled"),
-            btn_default=_require(data, "subscriptions.btn_default"),
             btn_decrement=_require(data, "subscriptions.btn_decrement"),
             btn_extend=_require(data, "subscriptions.btn_extend"),
             btn_close=_require(data, "subscriptions.btn_close"),

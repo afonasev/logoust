@@ -3,10 +3,6 @@ from datetime import datetime
 import enum
 from typing import Protocol
 
-# Стартовое число встреч в абонементе; также server-default миграции для
-# настройки специалиста subscription_default.
-DEFAULT_SUBSCRIPTION_MEETINGS = 8
-
 
 class SubscriptionStatus(enum.Enum):
     ACTIVE = "active"

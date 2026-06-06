@@ -56,7 +56,7 @@ _CB_WORKDAYS = "settings:workdays"
 _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 _CB_REMINDER_TOGGLE = "settings:reminder"
 _CB_REMINDER_TIME = "settings:reminder_time"
-_CB_SUBSCRIPTION = "settings:subscription_default"
+_CB_SUBSCRIPTION = "settings:subscription_presets"
 _CB_TEMPLATES = "settings:templates"
 _CB_TPL_EDIT = "tpl:edit:"  # + template_key
 _CB_TPL_RESET = "tpl:reset:"  # + template_key
@@ -67,7 +67,7 @@ _FIELD_BY_CALLBACK = {
     _CB_DAY_END: SettingField.DAY_END,
     _CB_SLOT: SettingField.SLOT_MINUTES,
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
-    _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_DEFAULT,
+    _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_PRESETS,
 }
 
 
@@ -76,7 +76,7 @@ class EditSetting(StatesGroup):
     day_end = State()
     slot = State()
     reminder_time = State()
-    subscription_default = State()
+    subscription_presets = State()
 
 
 class EditTemplate(StatesGroup):
@@ -140,7 +140,7 @@ _STATE_BY_FIELD = {
     SettingField.DAY_END: EditSetting.day_end,
     SettingField.SLOT_MINUTES: EditSetting.slot,
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
-    SettingField.SUBSCRIPTION_DEFAULT: EditSetting.subscription_default,
+    SettingField.SUBSCRIPTION_PRESETS: EditSetting.subscription_presets,
 }
 
 
@@ -168,7 +168,7 @@ def _menu_keyboard(
             ],
             [
                 InlineKeyboardButton(
-                    text=m.btn_subscription_default, callback_data=_CB_SUBSCRIPTION
+                    text=m.btn_subscription_presets, callback_data=_CB_SUBSCRIPTION
                 )
             ],
             [InlineKeyboardButton(text=templates_btn, callback_data=_CB_TEMPLATES)],
@@ -218,7 +218,7 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         working_days=_format_working_days(specialist.working_days, m),
         reminders=m.state_on if specialist.reminder_enabled else m.state_off,
         reminder_time=specialist.reminder_time,
-        subscription_default=specialist.subscription_default,
+        subscription_presets=specialist.subscription_presets,
     )
 
 
@@ -343,15 +343,15 @@ class SettingsHandlers:
             return self._m.ask_day_end
         if field is SettingField.REMINDER_TIME:
             return self._m.ask_reminder_time
-        if field is SettingField.SUBSCRIPTION_DEFAULT:
-            return self._m.ask_subscription_default
+        if field is SettingField.SUBSCRIPTION_PRESETS:
+            return self._m.ask_subscription_presets
         return self._m.ask_slot
 
     def _error(self, field: SettingField) -> str:
         if field is SettingField.SLOT_MINUTES:
             return self._m.bad_slot
-        if field is SettingField.SUBSCRIPTION_DEFAULT:
-            return self._m.bad_subscription_default
+        if field is SettingField.SUBSCRIPTION_PRESETS:
+            return self._m.bad_subscription_presets
         return self._m.bad_time
 
     async def apply_value(
@@ -404,11 +404,11 @@ class SettingsHandlers:
     ) -> None:
         await self.apply_value(message, state, specialist_id, SettingField.SLOT_MINUTES)
 
-    async def apply_subscription_default(
+    async def apply_subscription_presets(
         self, message: Message, state: FSMContext, specialist_id: int
     ) -> None:
         await self.apply_value(
-            message, state, specialist_id, SettingField.SUBSCRIPTION_DEFAULT
+            message, state, specialist_id, SettingField.SUBSCRIPTION_PRESETS
         )
 
     # --- client message templates --------------------------------------------
@@ -500,7 +500,7 @@ def build_router(
     router.message.register(h.apply_slot, EditSetting.slot)
     router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
     router.message.register(
-        h.apply_subscription_default, EditSetting.subscription_default
+        h.apply_subscription_presets, EditSetting.subscription_presets
     )
     router.message.register(h.apply_template, EditTemplate.body)
 

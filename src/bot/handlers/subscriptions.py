@@ -30,6 +30,7 @@ from src.services.subscriptions import (
     list_active_page,
     list_closed_page,
     parse_meetings,
+    presets_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,12 @@ def _callback_message(callback: CallbackQuery) -> Message:
 def _parse_id(callback_data: str | None) -> int:
     # callback_data shape: "subs:<action>:<id>"; the id is the last segment.
     return int((callback_data or "").rsplit(":", 1)[1])
+
+
+def _parse_id_value(callback_data: str | None) -> tuple[int, int]:
+    # callback_data shape: "subs:<action>:<id>:<value>" (preset pick).
+    parts = (callback_data or "").split(":")
+    return int(parts[2]), int(parts[3])
 
 
 def render_card(
@@ -102,19 +109,22 @@ def _card_keyboard(
 
 
 def _prompt_keyboard(
-    accept_callback: str, cancel_callback: str, default: int, m: SubscriptionsMessages
+    presets: list[int],
+    value_prefix: str,
+    cancel_callback: str,
+    m: SubscriptionsMessages,
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=m.btn_default.format(default=default),
-                    callback_data=accept_callback,
-                )
-            ],
-            [InlineKeyboardButton(text=m.btn_cancel, callback_data=cancel_callback)],
-        ]
+    # One button per preset variant (chunked four-per-row so a long list wraps),
+    # then Cancel. Typing a custom number still works via the FSM message handler.
+    buttons = [
+        InlineKeyboardButton(text=str(n), callback_data=f"{value_prefix}{n}")
+        for n in presets
+    ]
+    rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+    rows.append(
+        [InlineKeyboardButton(text=m.btn_cancel, callback_data=cancel_callback)]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _close_confirm_keyboard(sid: int, m: SubscriptionsMessages) -> InlineKeyboardMarkup:
@@ -245,11 +255,11 @@ class SubscriptionsHandlers:
             return text, _back_to_client_keyboard(subscription.client_id, self._m)
         return text, _card_keyboard(subscription, self._m)
 
-    async def _default(self, specialist_id: int) -> int:
+    async def _presets(self, specialist_id: int) -> list[int]:
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
         assert specialist is not None  # noqa: S101 — middleware guarantees it
-        return specialist.subscription_default
+        return presets_list(specialist.subscription_presets)
 
     # --- lists: active & closed -----------------------------------------------
 
@@ -343,23 +353,22 @@ class SubscriptionsHandlers:
         client_id = _parse_id(callback.data)
         await state.set_state(SubscriptionFlow.create_meetings)
         await state.update_data(client_id=client_id)
-        default = await self._default(specialist_id)
+        presets = await self._presets(specialist_id)
         await _callback_message(callback).edit_text(
-            self._m.create_prompt.format(default=default),
+            self._m.create_prompt,
             reply_markup=_prompt_keyboard(
-                f"subs:createdef:{client_id}",
+                presets,
+                f"subs:createval:{client_id}:",
                 f"subs:cancel:{client_id}",
-                default,
                 self._m,
             ),
         )
         await callback.answer()
 
-    async def create_default(
+    async def create_preset(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
-        client_id = _parse_id(callback.data)
-        meetings = await self._default(specialist_id)
+        client_id, meetings = _parse_id_value(callback.data)
         await state.clear()
         await self._create_cb(callback, specialist_id, client_id, meetings)
 
@@ -433,20 +442,19 @@ class SubscriptionsHandlers:
         sid = _parse_id(callback.data)
         await state.set_state(SubscriptionFlow.extend_meetings)
         await state.update_data(subscription_id=sid)
-        default = await self._default(specialist_id)
+        presets = await self._presets(specialist_id)
         await _callback_message(callback).edit_text(
-            self._m.extend_prompt.format(default=default),
+            self._m.extend_prompt,
             reply_markup=_prompt_keyboard(
-                f"subs:extenddef:{sid}", f"subs:card:{sid}", default, self._m
+                presets, f"subs:extendval:{sid}:", f"subs:card:{sid}", self._m
             ),
         )
         await callback.answer()
 
-    async def extend_default(
+    async def extend_preset(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
-        sid = _parse_id(callback.data)
-        meetings = await self._default(specialist_id)
+        sid, meetings = _parse_id_value(callback.data)
         await state.clear()
         await self._extend_cb(callback, specialist_id, sid, meetings)
 
@@ -565,12 +573,12 @@ def build_router(
     router.callback_query.register(h.show_card, F.data.startswith("subs:card:"))
     router.callback_query.register(h.start_create, F.data.startswith("subs:create:"))
     router.callback_query.register(
-        h.create_default, F.data.startswith("subs:createdef:")
+        h.create_preset, F.data.startswith("subs:createval:")
     )
     router.callback_query.register(h.cancel_create, F.data.startswith("subs:cancel:"))
     router.callback_query.register(h.start_extend, F.data.startswith("subs:extend:"))
     router.callback_query.register(
-        h.extend_default, F.data.startswith("subs:extenddef:")
+        h.extend_preset, F.data.startswith("subs:extendval:")
     )
     router.callback_query.register(h.decrement, F.data.startswith("subs:dec:"))
     router.callback_query.register(h.ask_close, F.data.startswith("subs:closeask:"))

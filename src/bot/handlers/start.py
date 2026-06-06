@@ -11,9 +11,11 @@ from src.bot.deeplink import CLIENT_TOKEN_PREFIX
 from src.bot.handlers.clients import build_main_keyboard
 from src.bot.messages import BotMessages
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import link_client_by_token
 from src.services.invites import ConsumeResult, consume_invite
+from src.services.message_templates import resolve_template
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +106,17 @@ async def _link_client_and_reply(
             chat_id=message.from_user.id,
             username=message.from_user.username,
         )
-    if client is None:
-        await message.answer(messages.clients.link_unknown)
-    else:
-        await message.answer(messages.clients.linked)
+        if client is None:
+            await message.answer(messages.clients.link_unknown)
+            return
+        # The confirmation can be customized by the owning specialist.
+        text = await resolve_template(
+            SqlAlchemyMessageTemplatesRepo(session),
+            specialist_id=client.specialist_id,
+            key="linked",
+            default=messages.clients.linked,
+        )
+    await message.answer(text)
 
 
 def make_start_handler(

@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 class ReminderMessages:
     """Reminder texts pulled from messages.toml, threaded into the service."""
 
-    client_text: str  # {child} {date} {time} — the message sent to the client
+    # Resolved per specialist (override ?? default); depersonalized — {date} {time}
+    # only, no child name. An extra child= kwarg at format time is simply ignored.
+    client_text: str
 
 
 @dataclass(slots=True)

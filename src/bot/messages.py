@@ -234,6 +234,27 @@ class WindowsMessages:
 
 
 @dataclass(frozen=True, slots=True)
+class TemplatesMessages:
+    btn_open: str
+    title: str
+    btn_edit: str
+    btn_reset: str
+    required_mark: str
+    no_placeholders: str
+    edit_prompt: str
+    saved: str
+    reset_done: str
+    reset_noop: str
+    err_empty: str
+    err_malformed: str
+    err_disallowed: str
+    err_missing: str
+    # Keyed by template_key — labels shown in the list, defaults with no home section.
+    labels: dict[str, str]
+    defaults: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class BotMessages:
     start: StartMessages
     clients: ClientsMessages
@@ -243,6 +264,7 @@ class BotMessages:
     settings: SettingsMessages
     subscriptions: SubscriptionsMessages
     windows: WindowsMessages
+    templates: TemplatesMessages
 
 
 def _require(data: dict[str, Any], path: str) -> Any:
@@ -464,6 +486,24 @@ def load_messages(path: Path) -> BotMessages:
             day_header=_require(data, "windows.day_header"),
             empty_day=_require(data, "windows.empty_day"),
             no_working_days=_require(data, "windows.no_working_days"),
+        ),
+        templates=TemplatesMessages(
+            btn_open=_require(data, "templates.btn_open"),
+            title=_require(data, "templates.title").strip(),
+            btn_edit=_require(data, "templates.btn_edit"),
+            btn_reset=_require(data, "templates.btn_reset"),
+            required_mark=_require(data, "templates.required_mark"),
+            no_placeholders=_require(data, "templates.no_placeholders"),
+            edit_prompt=_require(data, "templates.edit_prompt").strip(),
+            saved=_require(data, "templates.saved"),
+            reset_done=_require(data, "templates.reset_done"),
+            reset_noop=_require(data, "templates.reset_noop"),
+            err_empty=_require(data, "templates.err_empty"),
+            err_malformed=_require(data, "templates.err_malformed"),
+            err_disallowed=_require(data, "templates.err_disallowed"),
+            err_missing=_require(data, "templates.err_missing"),
+            labels=_require(data, "templates.labels"),
+            defaults=_require(data, "templates.defaults"),
         ),
     )
 

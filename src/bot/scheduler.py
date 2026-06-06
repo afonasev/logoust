@@ -17,12 +17,14 @@ from src.bot.handlers.reminders import build_reminder_keyboard
 from src.bot.messages import BotMessages
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.message_templates import resolve_template
 from src.services.reminder import (
     ReminderMessages,
     ReminderToSend,
@@ -30,10 +32,6 @@ from src.services.reminder import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _reminder_messages(messages: BotMessages) -> ReminderMessages:
-    return ReminderMessages(client_text=messages.reminder.client_text)
 
 
 async def run_reminder_pass(
@@ -45,9 +43,16 @@ async def run_reminder_pass(
     """One reminder pass over all enabled specialists at `now`."""
     async with session_factory() as session:
         candidates = await SqlAlchemySpecialistsRepo(session).list_reminder_candidates()
-    reminder_messages = _reminder_messages(messages)
     for specialist in candidates:
+        assert specialist.id is not None  # noqa: S101 — candidates are persisted
         async with session_factory() as session:
+            # Each specialist may override the reminder text; resolve per pass.
+            client_text = await resolve_template(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist.id,
+                key="appt_reminder",
+                default=messages.reminder.client_text,
+            )
             to_send = await run_reminders_if_due(
                 specialist,
                 now,
@@ -57,7 +62,7 @@ async def run_reminder_pass(
                 recurring_repo=SqlAlchemyRecurringRepo(session),
                 exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
                 clients_repo=SqlAlchemyClientsRepo(session),
-                messages=reminder_messages,
+                messages=ReminderMessages(client_text=client_text),
             )
         for item in to_send:
             await _deliver(bot, messages, item)

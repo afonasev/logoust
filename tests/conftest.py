@@ -24,6 +24,7 @@ from src.infrastructure.db import (
     build_engine,
     build_session_factory,
 )
+import src.infrastructure.message_templates_repo  # noqa: F401
 import src.infrastructure.recurring_repo  # noqa: F401
 import src.infrastructure.reminders_repo  # noqa: F401
 import src.infrastructure.specialists_repo  # noqa: F401

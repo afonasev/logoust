@@ -33,6 +33,7 @@ from src.domain.schedule import format_ru_short, utc_to_wall
 from src.domain.subscription import Subscription
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
@@ -53,6 +54,7 @@ from src.services.clients import (
     list_archived_page,
     restore_client,
 )
+from src.services.message_templates import resolve_template
 from src.services.recurring import SeriesContext, load_series_context, settle
 from src.services.reminder import statuses_for_appointments
 from src.services.subscriptions import get_active
@@ -782,14 +784,18 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 client_id=client_id,
                 specialist_id=specialist_id,
             )
-        if client is None or client.invite_token is None:
-            await callback.answer(self._m.not_found, show_alert=True)
-            return
+            if client is None or client.invite_token is None:
+                await callback.answer(self._m.not_found, show_alert=True)
+                return
+            template = await resolve_template(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist_id,
+                key="invite_forward",
+                default=self._m.invite_forward,
+            )
         link = build_client_start_link(client.invite_token)
         # Separate message so the specialist can forward it to the client as-is.
-        await _callback_message(callback).answer(
-            self._m.invite_forward.format(link=link)
-        )
+        await _callback_message(callback).answer(template.format(link=link))
         await callback.answer()
 
     # --- archive / restore ----------------------------------------------------

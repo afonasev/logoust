@@ -6,13 +6,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.settings import (
     EditSetting,
+    EditTemplate,
     SettingsHandlers,
     render_settings,
 )
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.domain.specialist import Specialist
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.invites import create_invite
+from src.services.message_templates import (
+    resolve_template,
+    save_template_override,
+)
 from src.services.specialists import get_settings
 
 _SP = 1
@@ -22,6 +28,9 @@ class FakeState:
     def __init__(self, state: object | None = None) -> None:
         self.store: dict[str, Any] = {}
         self.state = state
+
+    async def get_data(self) -> dict[str, Any]:
+        return dict(self.store)
 
     async def update_data(self, **kwargs: Any) -> dict[str, Any]:
         self.store.update(kwargs)
@@ -362,3 +371,157 @@ async def test_apply_slot_invalid_then_valid(
         updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
     assert updated is not None
     assert updated.slot_minutes == 45
+
+
+# --- client message templates ------------------------------------------------
+
+
+async def _seed_override(
+    factory: async_sessionmaker[AsyncSession], key: str, body: str
+) -> None:
+    async with factory() as session:
+        await save_template_override(
+            SqlAlchemyMessageTemplatesRepo(session),
+            specialist_id=_SP,
+            key=key,
+            body=body,
+        )
+
+
+async def _resolved(
+    factory: async_sessionmaker[AsyncSession], key: str, default: str
+) -> str:
+    async with factory() as session:
+        return await resolve_template(
+            SqlAlchemyMessageTemplatesRepo(session),
+            specialist_id=_SP,
+            key=key,
+            default=default,
+        )
+
+
+async def test_show_templates_lists_and_clears_state(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback()
+    state = _state(state="x")
+    await h.show_templates(cb, state)
+    assert state.state is None
+    assert _texts(cb.message.edit_text)[0] == messages.templates.title
+
+
+async def test_edit_template_shows_current_and_placeholders(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("tpl:edit:appt_reminder")
+    state = _state()
+    await h.edit_template(cb, state, _SP)
+    assert state.state == EditTemplate.body
+    assert state.store["tpl_key"] == "appt_reminder"
+    prompt = _texts(cb.message.edit_text)[0]
+    assert messages.templates.labels["appt_reminder"] in prompt
+    assert "{date}" in prompt  # required placeholder shown
+
+
+async def test_edit_template_without_placeholders_shows_hint(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("tpl:edit:linked")
+    await h.edit_template(cb, _state(), _SP)
+    assert messages.templates.no_placeholders in _texts(cb.message.edit_text)[0]
+
+
+async def test_apply_template_saves_valid_override(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "appt_reminder"
+    msg = _fake_message("Ждём вас {date} в {time}")
+    await h.apply_template(msg, state, _SP)
+    assert state.state is None
+    assert _texts(msg.answer)[0] == messages.templates.saved
+    stored = await _resolved(session_factory, "appt_reminder", "default")
+    assert stored == "Ждём вас {date} в {time}"
+
+
+async def test_apply_template_missing_required_keeps_state(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "appt_reminder"
+    msg = _fake_message("без времени {date}")
+    await h.apply_template(msg, state, _SP)
+    # Stays in the FSM state so the specialist can retry; nothing was stored.
+    assert state.state == EditTemplate.body
+    assert "{time}" in _texts(msg.answer)[0]
+    assert await _resolved(session_factory, "appt_reminder", "default") == "default"
+
+
+async def test_apply_template_empty_text_reports_error(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "appt_reminder"
+    msg = _fake_message("   ")
+    await h.apply_template(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.templates.err_empty
+
+
+async def test_apply_template_malformed_braces_reports_error(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "appt_reminder"
+    msg = _fake_message("{date} в {time")
+    await h.apply_template(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.templates.err_malformed
+
+
+async def test_apply_template_disallowed_placeholder_reports_error(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "appt_reminder"
+    msg = _fake_message("{date} {time} {child}")
+    await h.apply_template(msg, state, _SP)
+    assert "{child}" in _texts(msg.answer)[0]
+
+
+async def test_apply_template_disallowed_on_no_placeholder_key(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # `linked` allows nothing, so the error lists "no placeholders" as the whitelist.
+    h = _handlers(messages, session_factory)
+    state = _state(state=EditTemplate.body)
+    state.store["tpl_key"] = "linked"
+    msg = _fake_message("привет {foo}")
+    await h.apply_template(msg, state, _SP)
+    assert messages.templates.no_placeholders in _texts(msg.answer)[0]
+
+
+async def test_reset_template_removes_override(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_override(session_factory, "appt_reminder", "мой {date} {time}")
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("tpl:reset:appt_reminder")
+    await h.reset_template_action(cb, _SP)
+    assert _texts(cb.answer)[0] == messages.templates.reset_done
+    assert await _resolved(session_factory, "appt_reminder", "default") == "default"
+
+
+async def test_reset_template_without_override_is_noop(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("tpl:reset:appt_reminder")
+    await h.reset_template_action(cb, _SP)
+    assert _texts(cb.answer)[0] == messages.templates.reset_noop

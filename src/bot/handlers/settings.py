@@ -12,15 +12,28 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.client_templates import template_default
 from src.bot.handlers.clients import SpecialistMiddleware
-from src.bot.messages import BotMessages, SettingsMessages
+from src.bot.messages import BotMessages, SettingsMessages, TemplatesMessages
+from src.domain.message_template import (
+    CLIENT_TEMPLATES,
+    TemplateSpec,
+    TemplateViolation,
+    Violation,
+)
 from src.domain.schedule import (
     RU_WEEKDAYS_SHORT,
     RUSSIAN_TIMEZONES,
     parse_working_days,
 )
 from src.domain.specialist import Specialist
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.message_templates import (
+    reset_template,
+    resolve_template,
+    save_template_override,
+)
 from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
@@ -44,6 +57,9 @@ _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 _CB_REMINDER_TOGGLE = "settings:reminder"
 _CB_REMINDER_TIME = "settings:reminder_time"
 _CB_SUBSCRIPTION = "settings:subscription_default"
+_CB_TEMPLATES = "settings:templates"
+_CB_TPL_EDIT = "tpl:edit:"  # + template_key
+_CB_TPL_RESET = "tpl:reset:"  # + template_key
 
 # Maps the FSM step to the setting it edits and the prompt/error texts.
 _FIELD_BY_CALLBACK = {
@@ -63,6 +79,62 @@ class EditSetting(StatesGroup):
     subscription_default = State()
 
 
+class EditTemplate(StatesGroup):
+    body = State()
+
+
+def _format_placeholders(names: frozenset[str]) -> str:
+    return ", ".join(f"{{{name}}}" for name in sorted(names))
+
+
+def _placeholder_hint(spec: TemplateSpec, m: TemplatesMessages) -> str:
+    """Human list of a template's placeholders, required ones marked, for the prompt."""
+    if not spec.allowed:
+        return m.no_placeholders
+    parts = []
+    for name in sorted(spec.allowed):
+        mark = m.required_mark if name in spec.required else ""
+        parts.append(f"{{{name}}}{mark}")
+    return ", ".join(parts)
+
+
+def _render_violations(
+    violations: list[Violation], key: str, m: TemplatesMessages
+) -> str:
+    """Turn structured validation violations into one user-facing error message."""
+    spec = CLIENT_TEMPLATES[key]
+    allowed = _format_placeholders(spec.allowed) or m.no_placeholders
+    lines: list[str] = []
+    for v in violations:
+        if v.kind is TemplateViolation.EMPTY:
+            lines.append(m.err_empty)
+        elif v.kind is TemplateViolation.MALFORMED:
+            lines.append(m.err_malformed)
+        elif v.kind is TemplateViolation.DISALLOWED:
+            bad = ", ".join(f"{{{p}}}" for p in v.placeholders)
+            lines.append(m.err_disallowed.format(bad=bad, allowed=allowed))
+        else:  # MISSING_REQUIRED
+            missing = ", ".join(f"{{{p}}}" for p in v.placeholders)
+            lines.append(m.err_missing.format(missing=missing))
+    return "\n".join(lines)
+
+
+def _templates_keyboard(m: TemplatesMessages, back_text: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=m.labels[key], callback_data=f"{_CB_TPL_EDIT}{key}"
+            ),
+            InlineKeyboardButton(
+                text=m.btn_reset, callback_data=f"{_CB_TPL_RESET}{key}"
+            ),
+        ]
+        for key in CLIENT_TEMPLATES
+    ]
+    rows.append([InlineKeyboardButton(text=back_text, callback_data=_CB_MENU)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 _STATE_BY_FIELD = {
     SettingField.DAY_START: EditSetting.day_start,
     SettingField.DAY_END: EditSetting.day_end,
@@ -72,7 +144,9 @@ _STATE_BY_FIELD = {
 }
 
 
-def _menu_keyboard(specialist: Specialist, m: SettingsMessages) -> InlineKeyboardMarkup:
+def _menu_keyboard(
+    specialist: Specialist, m: SettingsMessages, templates_btn: str
+) -> InlineKeyboardMarkup:
     state = m.state_on if specialist.reminder_enabled else m.state_off
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -97,6 +171,7 @@ def _menu_keyboard(specialist: Specialist, m: SettingsMessages) -> InlineKeyboar
                     text=m.btn_subscription_default, callback_data=_CB_SUBSCRIPTION
                 )
             ],
+            [InlineKeyboardButton(text=templates_btn, callback_data=_CB_TEMPLATES)],
         ]
     )
 
@@ -162,6 +237,8 @@ class SettingsHandlers:
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         self._m = messages.settings
+        self._tm = messages.templates
+        self._messages = messages
         self._session_factory = session_factory
 
     async def _load(self, specialist_id: int) -> Specialist | None:
@@ -179,7 +256,7 @@ class SettingsHandlers:
             return
         await message.answer(
             render_settings(specialist, self._m),
-            reply_markup=_menu_keyboard(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m, self._tm.btn_open),
         )
 
     async def open_menu(
@@ -192,7 +269,7 @@ class SettingsHandlers:
             return
         await _callback_message(callback).edit_text(
             render_settings(specialist, self._m),
-            reply_markup=_menu_keyboard(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m, self._tm.btn_open),
         )
         await callback.answer()
 
@@ -302,7 +379,7 @@ class SettingsHandlers:
         await message.answer(self._m.saved)
         await message.answer(
             render_settings(specialist, self._m),
-            reply_markup=_menu_keyboard(specialist, self._m),
+            reply_markup=_menu_keyboard(specialist, self._m, self._tm.btn_open),
         )
 
     async def apply_day_start(
@@ -334,6 +411,78 @@ class SettingsHandlers:
             message, state, specialist_id, SettingField.SUBSCRIPTION_DEFAULT
         )
 
+    # --- client message templates --------------------------------------------
+
+    async def show_templates(self, callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await _callback_message(callback).edit_text(
+            self._tm.title,
+            reply_markup=_templates_keyboard(self._tm, self._m.btn_back),
+        )
+        await callback.answer()
+
+    async def edit_template(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        key = (callback.data or "").removeprefix(_CB_TPL_EDIT)
+        async with self._session_factory() as session:
+            current = await resolve_template(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist_id,
+                key=key,
+                default=template_default(self._messages, key),
+            )
+        await state.update_data(tpl_key=key)
+        await state.set_state(EditTemplate.body)
+        await _callback_message(callback).edit_text(
+            self._tm.edit_prompt.format(
+                label=self._tm.labels[key],
+                current=current,
+                placeholders=_placeholder_hint(CLIENT_TEMPLATES[key], self._tm),
+            )
+        )
+        await callback.answer()
+
+    async def apply_template(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        data = await state.get_data()
+        key = data.get("tpl_key")
+        if key is None:  # pragma: no cover - state always carries the key
+            await state.clear()
+            return
+        async with self._session_factory() as session:
+            violations = await save_template_override(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist_id,
+                key=key,
+                body=message.text or "",
+            )
+        if violations:
+            # Stay in the FSM state so the specialist can correct and resend.
+            await message.answer(_render_violations(violations, key, self._tm))
+            return
+        await state.clear()
+        await message.answer(self._tm.saved)
+        await message.answer(
+            self._tm.title,
+            reply_markup=_templates_keyboard(self._tm, self._m.btn_back),
+        )
+
+    async def reset_template_action(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        key = (callback.data or "").removeprefix(_CB_TPL_RESET)
+        async with self._session_factory() as session:
+            removed = await reset_template(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist_id,
+                key=key,
+            )
+        await callback.answer(
+            self._tm.reset_done if removed else self._tm.reset_noop, show_alert=True
+        )
+
 
 def build_router(
     messages: BotMessages,
@@ -353,8 +502,14 @@ def build_router(
     router.message.register(
         h.apply_subscription_default, EditSetting.subscription_default
     )
+    router.message.register(h.apply_template, EditTemplate.body)
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
+    router.callback_query.register(h.show_templates, F.data == _CB_TEMPLATES)
+    router.callback_query.register(h.edit_template, F.data.startswith(_CB_TPL_EDIT))
+    router.callback_query.register(
+        h.reset_template_action, F.data.startswith(_CB_TPL_RESET)
+    )
     router.callback_query.register(h.show_timezones, F.data == _CB_TZLIST)
     router.callback_query.register(h.set_timezone, F.data.startswith("settings:settz:"))
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_START)

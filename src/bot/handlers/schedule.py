@@ -44,6 +44,7 @@ from src.domain.schedule import (
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringExceptionsRepo,
     SqlAlchemyRecurringRepo,
@@ -68,6 +69,7 @@ from src.services.appointments import (
     taken_slot_times,
 )
 from src.services.clients import client_name_map
+from src.services.message_templates import resolve_template
 from src.services.recurring import (
     SeriesContext,
     create_series,
@@ -571,27 +573,49 @@ def _parse_series_notify(callback_data: str | None) -> tuple[str, int, int, str]
     return event, int(raw_client), int(raw_wd), f"{raw_hhmm[:2]}:{raw_hhmm[2:]}"
 
 
-def _notify_text(event: str, starts_at: datetime, tz: str, m: ScheduleMessages) -> str:
+# A one-off notify event maps to a template_key that is also the ScheduleMessages
+# attribute name holding its default — so getattr(m, key) is the default text.
+_NOTIFY_KEYS = {
+    "c": "notify_created",
+    "r": "notify_rescheduled",
+    "x": "notify_cancelled",
+}
+
+
+def _series_notify_key(event: str) -> str:
+    if event == "c":
+        return "notify_series_created"
+    if event == "m":
+        return "notify_series_changed"
+    return "notify_series_cancelled"
+
+
+async def _resolve_notify(
+    session_factory: async_sessionmaker[AsyncSession],
+    specialist_id: int,
+    key: str,
+    default: str,
+) -> str:
+    async with session_factory() as session:
+        return await resolve_template(
+            SqlAlchemyMessageTemplatesRepo(session),
+            specialist_id=specialist_id,
+            key=key,
+            default=default,
+        )
+
+
+def _notify_text(template: str, starts_at: datetime, tz: str) -> str:
     wall = utc_to_wall(starts_at, tz)
-    template = {
-        "c": m.notify_created,
-        "r": m.notify_rescheduled,
-        "x": m.notify_cancelled,
-    }[event]
     return template.format(date=format_ru_date(wall.date()), time=f"{wall:%H:%M}")
 
 
-def _series_notify_text(
-    event: str, weekday: int, hhmm: str, m: ScheduleMessages
-) -> str:
-    # "Каждый четверг" → "каждый четверг" so it reads inside a sentence.
+def _series_notify_text(template: str, weekday: int, hhmm: str) -> str:
+    # "Каждый четверг" → "каждый четверг" so it reads inside a sentence. Both rule
+    # and time are passed; each template uses whichever placeholder it declares.
     every = RU_WEEKDAYS_EVERY[weekday]
     rule = f"{every[0].lower()}{every[1:]} в {hhmm}"
-    if event == "c":
-        return m.notify_series_created.format(rule=rule)
-    if event == "m":
-        return m.notify_series_changed.format(rule=rule)
-    return m.notify_series_cancelled.format(time=hhmm)
+    return template.format(rule=rule, time=hhmm)
 
 
 def _notify_cb_for(
@@ -630,6 +654,8 @@ async def _ask_notify(  # noqa: PLR0913, PLR0917
     client: Client | None,
     starts_at: datetime,
     tz: str,
+    specialist_id: int,
+    session_factory: async_sessionmaker[AsyncSession],
     m: ScheduleMessages,
 ) -> None:
     # Final step after a one-off create/reschedule/delete result: offer to notify
@@ -637,7 +663,11 @@ async def _ask_notify(  # noqa: PLR0913, PLR0917
     notify_cb = _notify_cb_for(event, client, starts_at)
     if notify_cb is None:
         return
-    preview = _notify_text(event, starts_at, tz, m)
+    key = _NOTIFY_KEYS[event]
+    template = await _resolve_notify(
+        session_factory, specialist_id, key, getattr(m, key)
+    )
+    preview = _notify_text(template, starts_at, tz)
     await target.answer(
         m.notify_ask.format(text=preview),
         reply_markup=_notify_ask_keyboard(notify_cb, m),
@@ -650,6 +680,8 @@ async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     client: Client | None,
     weekday: int,
     hhmm: str,
+    specialist_id: int,
+    session_factory: async_sessionmaker[AsyncSession],
     m: ScheduleMessages,
 ) -> None:
     # Final step after a series create/edit/stop: the message describes the weekly
@@ -657,7 +689,11 @@ async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     notify_cb = _series_notify_cb_for(event, client, weekday, hhmm)
     if notify_cb is None:
         return
-    preview = _series_notify_text(event, weekday, hhmm, m)
+    key = _series_notify_key(event)
+    template = await _resolve_notify(
+        session_factory, specialist_id, key, getattr(m, key)
+    )
+    preview = _series_notify_text(template, weekday, hhmm)
     await target.answer(
         m.notify_ask.format(text=preview),
         reply_markup=_notify_ask_keyboard(notify_cb, m),
@@ -917,7 +953,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             f"clients:card:{data['client_id']}",
         )
         await _ask_notify(
-            target, "c", client, appt.starts_at, specialist.timezone, self._m
+            target,
+            "c",
+            client,
+            appt.starts_at,
+            specialist.timezone,
+            specialist_id,
+            self._session_factory,
+            self._m,
         )
 
     async def _finish_regular(
@@ -963,7 +1006,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             ),
         )
         await _ask_series_notify(
-            target, "c", client, series.weekday, series.time_hhmm, self._m
+            target,
+            "c",
+            client,
+            series.weekday,
+            series.time_hhmm,
+            specialist_id,
+            self._session_factory,
+            self._m,
         )
 
     async def _do_reschedule(
@@ -993,7 +1043,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             target, moved, child, specialist.timezone, f"sched:day_view:{data['day']}"
         )
         await _ask_notify(
-            target, "r", client, moved.starts_at, specialist.timezone, self._m
+            target,
+            "r",
+            client,
+            moved.starts_at,
+            specialist.timezone,
+            specialist_id,
+            self._session_factory,
+            self._m,
         )
 
     async def _send_card(
@@ -1073,7 +1130,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             specialist = await self._load_settings(specialist_id)
             client = await self._load_client(specialist_id, appt.client_id)
             await _ask_notify(
-                target, "x", client, appt.starts_at, specialist.timezone, self._m
+                target,
+                "x",
+                client,
+                appt.starts_at,
+                specialist.timezone,
+                specialist_id,
+                self._session_factory,
+                self._m,
             )
         await callback.answer()
 
@@ -1091,7 +1155,11 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             await message.edit_text(self._m.notify_not_linked)
             await callback.answer()
             return
-        text = _notify_text(event, starts_at, specialist.timezone, self._m)
+        key = _NOTIFY_KEYS[event]
+        template = await _resolve_notify(
+            self._session_factory, specialist_id, key, getattr(self._m, key)
+        )
+        text = _notify_text(template, starts_at, specialist.timezone)
         extra = {"specialist_id": specialist_id, "client_id": client_id}
         sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
         await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
@@ -1106,7 +1174,11 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             await message.edit_text(self._m.notify_not_linked)
             await callback.answer()
             return
-        text = _series_notify_text(event, weekday, hhmm, self._m)
+        key = _series_notify_key(event)
+        template = await _resolve_notify(
+            self._session_factory, specialist_id, key, getattr(self._m, key)
+        )
+        text = _series_notify_text(template, weekday, hhmm)
         extra = {"specialist_id": specialist_id, "client_id": client_id}
         sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
         await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
@@ -1726,7 +1798,14 @@ class RecurringHandlers:
         # Editing changes the weekly rule → notify with the series ("modified") text.
         client = await self._load_client(specialist_id, series.client_id)
         await _ask_series_notify(
-            target, "m", client, series.weekday, series.time_hhmm, self._sm
+            target,
+            "m",
+            client,
+            series.weekday,
+            series.time_hhmm,
+            specialist_id,
+            self._session_factory,
+            self._sm,
         )
 
     async def _do_move(
@@ -1771,7 +1850,14 @@ class RecurringHandlers:
         assert series is not None  # noqa: S101 — move succeeded, so the series exists
         client = await self._load_client(specialist_id, series.client_id)
         await _ask_notify(
-            target, "r", client, new_starts_at, specialist.timezone, self._sm
+            target,
+            "r",
+            client,
+            new_starts_at,
+            specialist.timezone,
+            specialist_id,
+            self._session_factory,
+            self._sm,
         )
 
     # --- series card ---------------------------------------------------------
@@ -1908,7 +1994,14 @@ class RecurringHandlers:
         # Stopping the whole series → notify with the series ("cancelled") text.
         client = await self._load_client(specialist_id, stopped.client_id)
         await _ask_series_notify(
-            target, "x", client, stopped.weekday, stopped.time_hhmm, self._sm
+            target,
+            "x",
+            client,
+            stopped.weekday,
+            stopped.time_hhmm,
+            specialist_id,
+            self._session_factory,
+            self._sm,
         )
         await callback.answer()
 
@@ -1957,7 +2050,16 @@ class RecurringHandlers:
         assert series is not None  # noqa: S101 — skip succeeded, so the series exists
         client = await self._load_client(specialist_id, series.client_id)
         starts_at = wall_to_utc(origin_date, series.time_hhmm, specialist.timezone)
-        await _ask_notify(target, "x", client, starts_at, specialist.timezone, self._sm)
+        await _ask_notify(
+            target,
+            "x",
+            client,
+            starts_at,
+            specialist.timezone,
+            specialist_id,
+            self._session_factory,
+            self._sm,
+        )
         await callback.answer()
 
     async def cancel(

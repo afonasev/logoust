@@ -185,6 +185,26 @@
 - Инвариант «один активный» держится запросом `client_id = ? AND status = 'active'` в сервисе; partial unique index оставлен на будущее (поток ввода последовательный, гонка двойного создания практически нулевая).
 - Абонемент не связан со встречами/расписанием: остаток меняется только ручными действиями.
 
+### `message_templates`
+
+Переопределение специалистом текста клиентского сообщения. Строка есть → это override; строки нет → при рендере берётся дефолт из `messages.toml`. Каталог настраиваемых ключей и их whitelist плейсхолдеров живут в домене (`CLIENT_TEMPLATES`); данными таблица не наполняется.
+
+| Колонка         | Тип         | NULL | Замечание                                                          |
+| --------------- | ----------- | ---- | ------------------------------------------------------------------ |
+| `id`            | INTEGER     | нет  | PK, autoincrement.                                                 |
+| `specialist_id` | INTEGER     | нет  | FK → `specialists.id`. Владелец переопределения.                   |
+| `template_key`  | VARCHAR(64) | нет  | Ключ из каталога `CLIENT_TEMPLATES` (например, `appt_reminder`).   |
+| `body`          | TEXT        | нет  | Текст специалиста; прошёл строгую валидацию плейсхолдеров.          |
+
+Индексы:
+
+- `uq_message_template_key` — `UNIQUE(specialist_id, template_key)`. Одно переопределение на пару; upsert заменяет, отсутствие строки = дефолт.
+
+Решения по схеме:
+
+- Отдельная таблица, а не JSON-колонка на `specialists`: есть FK-дисциплина и дешёвый точечный сброс одного ключа (`DELETE`).
+- Новый клиентский текст в будущем = новый ключ в каталоге + дефолт в `messages.toml`, миграция данных не нужна.
+
 ## Миграции
 
 - Каталог: `alembic/versions/`.
@@ -196,6 +216,7 @@
 - `0006_recurring_appointments.py` — создаёт таблицы `recurring_appointments` (индекс `ix_recurring_specialist_active`) и `recurring_exceptions` (`UNIQUE(series_id, original_date)`); добавляет в `appointments` колонки `series_id`, `origin_date` (обе nullable) и уникальный индекс `uq_appointments_series_origin`. Существующие записи → `series_id`/`origin_date = NULL` (разовые, поведение не меняется). Колонки добавлены без inline-FK (SQLite не ALTER-ит ограничения). Down-ревизия удаляет индекс, колонки и обе таблицы.
 - `0007_appointment_reminders.py` — добавляет в `specialists` колонки `reminder_enabled` (server-default `1`), `reminder_time` (server-default `12:00`), `reminder_last_run_on` (nullable); создаёт таблицу `appointment_reminders` (`UNIQUE(specialist_id, client_id, starts_at)`). Существующие специалисты → напоминания включены на 12:00. Down-ревизия удаляет таблицу и три колонки.
 - `0008_subscriptions.py` — добавляет в `specialists` колонку `subscription_default` (server-default `8`); создаёт таблицу `subscriptions` (FK на `clients` и `specialists`, индекс `ix_subscriptions_client_status`). Существующие специалисты → `subscription_default = 8`. Down-ревизия удаляет таблицу и колонку.
+- `0009_message_templates.py` — создаёт таблицу `message_templates` (FK на `specialists`, `UNIQUE(specialist_id, template_key)`). Данные не наполняются: отсутствие строки = дефолт из `messages.toml`. Down-ревизия удаляет таблицу.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

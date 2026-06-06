@@ -616,10 +616,12 @@ _NOTIFY_AUDIT_EVENTS = {
 
 
 def _series_notify_key(event: str) -> str:
-    # Only schedule create ("c") and stop ("x") notify the client about the weekly
-    # rule; per-slot configure edits apply silently (no noisy per-tweak message).
+    # Create ("c") and per-slot changes ("m") describe the resulting weekly rule;
+    # stop ("x") describes the cancellation. Each maps to its own editable template.
     if event == "c":
         return "notify_series_created"
+    if event == "m":
+        return "notify_series_changed"
     return "notify_series_cancelled"
 
 
@@ -2385,8 +2387,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             await target.answer(self._m.not_found)
             return
         await target.answer(self._m.edited)
-        text, keyboard = await self._render_config(slot.schedule_id)
-        await target.answer(text, reply_markup=keyboard)
+        await self._ask_series_change(target, state, specialist_id, slot.schedule_id)
 
     async def start_cfg_add(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
@@ -2408,10 +2409,11 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
     ) -> None:
         data = await state.get_data()
         specialist = await self._load_settings(specialist_id)
+        schedule_id = data["schedule_id"]
         async with self._session_factory() as session:
             await add_slot(
                 SqlAlchemyRecurringSlotRepo(session),
-                schedule_id=data["schedule_id"],
+                schedule_id=schedule_id,
                 weekday=data["weekday"],
                 time_hhmm=hhmm,
                 tz=specialist.timezone,
@@ -2419,10 +2421,11 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             )
         await state.clear()
         await target.answer(self._m.edited)
-        text, keyboard = await self._render_config(data["schedule_id"])
-        await target.answer(text, reply_markup=keyboard)
+        await self._ask_series_change(target, state, specialist_id, schedule_id)
 
-    async def delete_slot(self, callback: CallbackQuery, specialist_id: int) -> None:
+    async def delete_slot(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         slot_id = _last_int(callback.data)
         async with self._session_factory() as session:
             slot = await remove_slot(
@@ -2436,22 +2439,88 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             await callback.answer(self._m.not_found, show_alert=True)
             return
         target = _callback_message(callback)
+        await callback.answer()
+        await target.edit_text(self._m.slot_removed)
         schedule = await self._load_schedule(slot.schedule_id, specialist_id)
         # remove_slot stops the schedule when the last active slot is removed; the
-        # loaded schedule is still readable (no active filter) but now inactive.
+        # loaded schedule is still readable (no active filter) but now inactive. A
+        # still-active schedule is a change; a stopped one is a cancellation.
         if schedule is None or not schedule.active:
-            await target.edit_text(self._m.slot_removed)
+            await self._ask_series_stop(target, state, specialist_id, slot)
+        else:
+            await self._ask_series_change(
+                target, state, specialist_id, slot.schedule_id
+            )
+
+    # --- offer to notify the client about a configure change -----------------
+
+    async def _ask_series_change(
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        schedule_id: int,
+    ) -> None:
+        # After a per-slot edit/add/delete that keeps the schedule active: offer to
+        # tell the client the new weekly rule (event "m" → notify_series_changed).
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        assert schedule is not None  # noqa: S101 — just-edited schedule still exists
+        slots = await self._load_slots(schedule_id)
+        client = await self._load_client(specialist_id, schedule.client_id)
+        card_back = f"recur:sched:{schedule_id}"
+        shown = await _ask_series_notify(
+            target,
+            state,
+            "m",
+            client,
+            _rule_text([(s.weekday, s.time_hhmm) for s in slots]),
+            slots[0].time_hhmm if slots else "",
+            schedule_target_key(schedule_id),
+            card_back,
+            specialist_id,
+            self._session_factory,
+            self._sm,
+        )
+        if not shown:
             await _open_card(
                 self._navigator,
                 target,
                 specialist_id=specialist_id,
-                card_back="",
+                card_back=card_back,
             )
-            await callback.answer()
-            return
-        text, keyboard = await self._render_config(slot.schedule_id)
-        await target.edit_text(text, reply_markup=keyboard)
-        await callback.answer()
+
+    async def _ask_series_stop(
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        slot: RecurringSlot,
+    ) -> None:
+        # The removed slot was the last active one, so the schedule is now stopped:
+        # offer the cancellation notice (event "x"), described by that slot's time.
+        schedule = await self._load_schedule(slot.schedule_id, specialist_id)
+        client = (
+            await self._load_client(specialist_id, schedule.client_id)
+            if schedule is not None
+            else None
+        )
+        shown = await _ask_series_notify(
+            target,
+            state,
+            "x",
+            client,
+            _rule_text([(slot.weekday, slot.time_hhmm)]),
+            slot.time_hhmm,
+            schedule_target_key(slot.schedule_id),
+            "",
+            specialist_id,
+            self._session_factory,
+            self._sm,
+        )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=""
+            )
 
     # --- stop the whole schedule ---------------------------------------------
 

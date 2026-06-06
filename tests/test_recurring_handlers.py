@@ -877,6 +877,54 @@ async def test_add_slot_via_config(
     assert {(s.weekday, s.time_hhmm) for s in slots} == {(0, "12:00"), (4, "15:00")}
 
 
+async def test_edit_slot_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=_next_weekday(today, 0),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_slot_time(_fake_callback(f"recur:slottime:{slot_id}"), state, _SP)
+    msg_cb = _fake_callback("recur:tslot:1600")
+    await h.pick_slot(msg_cb, state, _SP)
+    # The change offers to notify the client about the new weekly rule (event "m").
+    assert "sched:ntfwhen" in _callbacks(_markup(msg_cb.message.answer))
+    assert state.store["notify"]["event"] == "m"
+    assert state.store["notify"]["target_key"] == f"schedule:{schedule_id}"
+
+
+async def test_add_slot_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="12:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_cfg_add(_fake_callback(f"recur:cfgadd:{schedule_id}"), state, _SP)
+    await h.pick_weekday(_fake_callback("recur:wd:4"), state, _SP)
+    msg_cb = _fake_callback("recur:tslot:1500")
+    await h.pick_slot(msg_cb, state, _SP)
+    assert "sched:ntfwhen" in _callbacks(_markup(msg_cb.message.answer))
+    assert state.store["notify"]["event"] == "m"
+
+
 async def test_start_cfg_add_foreign_blocked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
@@ -912,15 +960,14 @@ async def test_delete_slot_keeps_schedule_with_remaining(
     )
     h = _recur(messages, session_factory)
     cb = _fake_callback(f"recur:slotdel:{slot_del}")
-    await h.delete_slot(cb, _SP)
-    # Re-renders the configure list (one slot remains).
-    assert messages.recurring.configure_title in _texts(cb.message.edit_text)
-    callbacks = _callbacks(_markup(cb.message.edit_text))
-    assert f"recur:slot:{slot_keep}" in callbacks
-    assert f"recur:slot:{slot_del}" not in callbacks
+    await h.delete_slot(cb, _state(), _SP)
+    # Reports the removal; schedule stays active with the remaining slot.
+    assert messages.recurring.slot_removed in _texts(cb.message.edit_text)
     schedule = await _load_schedule(session_factory, schedule_id)
     assert schedule is not None
     assert schedule.active is True
+    slots = await _load_slots(session_factory, schedule_id)
+    assert {s.id for s in slots} == {slot_keep}
 
 
 async def test_delete_last_slot_stops_schedule(
@@ -934,7 +981,7 @@ async def test_delete_last_slot_stops_schedule(
     )
     h = _recur(messages, session_factory)
     cb = _fake_callback(f"recur:slotdel:{slot_id}")
-    await h.delete_slot(cb, _SP)
+    await h.delete_slot(cb, _state(), _SP)
     # The slot is deactivated and, being the last active one, stops the schedule.
     schedule = await _load_schedule(session_factory, schedule_id)
     assert schedule is not None
@@ -958,10 +1005,58 @@ async def test_delete_slot_foreign_blocked(
     )
     h = _recur(messages, session_factory)
     cb = _fake_callback(f"recur:slotdel:{slot_id}")
-    await h.delete_slot(cb, other)
+    await h.delete_slot(cb, _state(), other)
     cb.message.edit_text.assert_not_awaited()
     slots = await _load_slots(session_factory, schedule_id)
     assert len(slots) == 1  # untouched
+
+
+async def test_delete_slot_keeps_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="12:00",
+    )
+    slot_del = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=2,
+        start_date=date(2026, 6, 3),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotdel:{slot_del}")
+    state = _state()
+    await h.delete_slot(cb, state, _SP)
+    # Schedule stays active → the deletion is a change (event "m").
+    assert "sched:ntfwhen" in _callbacks(_markup(cb.message.answer))
+    assert state.store["notify"]["event"] == "m"
+
+
+async def test_delete_last_slot_asks_series_cancel_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotdel:{slot_id}")
+    state = _state()
+    await h.delete_slot(cb, state, _SP)
+    # Last slot gone → schedule stopped → the cancellation notice (event "x").
+    assert "sched:ntfwhen" in _callbacks(_markup(cb.message.answer))
+    assert state.store["notify"]["event"] == "x"
+    assert state.store["notify"]["target_key"] == f"schedule:{schedule_id}"
 
 
 # --- stop the whole schedule ------------------------------------------------

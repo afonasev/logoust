@@ -229,10 +229,19 @@ class SettingsMessages:
     btn_payment_on: str
     btn_payment_off: str
     btn_payment_time: str
+    btn_consumption: str
+    btn_consumption_on: str
+    btn_consumption_off: str
+    btn_consumption_time: str
+    btn_consumption_now: str
     btn_subscription_presets: str
     btn_deferred_time: str
     state_on: str
     state_off: str
+    help_reminder: str
+    help_digest: str
+    help_payment: str
+    help_consumption: str
     btn_back: str
     btn_cancel: str
     value_now: str
@@ -244,6 +253,7 @@ class SettingsMessages:
     ask_reminder_time: str
     ask_digest_time: str
     ask_payment_time: str
+    ask_consumption_time: str
     ask_subscription_presets: str
     ask_deferred_time: str
     no_working_days: str
@@ -254,6 +264,8 @@ class SettingsMessages:
     digest_now_failed: str
     reminders_now_empty: str
     reminders_now_done: str
+    consumption_now_empty: str
+    consumption_now_done: str
     saved: str
     not_found: str
 
@@ -297,6 +309,34 @@ class SubscriptionsMessages:
     btn_confirm_close: str
     btn_cancel: str
     btn_back_client: str
+    journal_row_auto: str
+    journal_row_manual: str
+    ded_title: str
+    ded_created: str
+    ded_meeting: str
+    ded_manual: str
+    ded_record_comment: str
+    ded_closing_comment: str
+    ded_closing_empty: str
+    btn_ded_comment: str
+    btn_ded_cancel: str
+    btn_back_card: str
+    ded_cancelled: str
+    ask_closing_comment: str
+    closing_comment_set: str
+    ded_not_found: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConsumptionMessages:
+    title: str
+    deducted_header: str
+    deducted_btn: str
+    missed_header: str
+    missed_no_subscription: str
+    missed_exhausted: str
+    now_empty: str
+    now_done: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +397,7 @@ class BotMessages:
     payment: PaymentMessages
     digest: DigestMessages
     subscriptions: SubscriptionsMessages
+    consumption: ConsumptionMessages
     windows: WindowsMessages
     templates: TemplatesMessages
     audit: AuditMessages
@@ -572,12 +613,21 @@ def load_messages(path: Path) -> BotMessages:
             btn_payment_on=_require(data, "settings.btn_payment_on"),
             btn_payment_off=_require(data, "settings.btn_payment_off"),
             btn_payment_time=_require(data, "settings.btn_payment_time"),
+            btn_consumption=_require(data, "settings.btn_consumption"),
+            btn_consumption_on=_require(data, "settings.btn_consumption_on"),
+            btn_consumption_off=_require(data, "settings.btn_consumption_off"),
+            btn_consumption_time=_require(data, "settings.btn_consumption_time"),
+            btn_consumption_now=_require(data, "settings.btn_consumption_now"),
             btn_subscription_presets=_require(
                 data, "settings.btn_subscription_presets"
             ),
             btn_deferred_time=_require(data, "settings.btn_deferred_time"),
             state_on=_require(data, "settings.state_on"),
             state_off=_require(data, "settings.state_off"),
+            help_reminder=_require(data, "settings.help_reminder"),
+            help_digest=_require(data, "settings.help_digest"),
+            help_payment=_require(data, "settings.help_payment"),
+            help_consumption=_require(data, "settings.help_consumption"),
             btn_back=_require(data, "settings.btn_back"),
             btn_cancel=_require(data, "settings.btn_cancel"),
             value_now=_require(data, "settings.value_now"),
@@ -589,6 +639,7 @@ def load_messages(path: Path) -> BotMessages:
             ask_reminder_time=_require(data, "settings.ask_reminder_time"),
             ask_digest_time=_require(data, "settings.ask_digest_time"),
             ask_payment_time=_require(data, "settings.ask_payment_time"),
+            ask_consumption_time=_require(data, "settings.ask_consumption_time"),
             ask_subscription_presets=_require(
                 data, "settings.ask_subscription_presets"
             ),
@@ -603,6 +654,8 @@ def load_messages(path: Path) -> BotMessages:
             digest_now_failed=_require(data, "settings.digest_now_failed"),
             reminders_now_empty=_require(data, "settings.reminders_now_empty"),
             reminders_now_done=_require(data, "settings.reminders_now_done"),
+            consumption_now_empty=_require(data, "settings.consumption_now_empty"),
+            consumption_now_done=_require(data, "settings.consumption_now_done"),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
         ),
@@ -648,6 +701,32 @@ def load_messages(path: Path) -> BotMessages:
             btn_confirm_close=_require(data, "subscriptions.btn_confirm_close"),
             btn_cancel=_require(data, "subscriptions.btn_cancel"),
             btn_back_client=_require(data, "subscriptions.btn_back_client"),
+            journal_row_auto=_require(data, "subscriptions.journal_row_auto"),
+            journal_row_manual=_require(data, "subscriptions.journal_row_manual"),
+            ded_title=_require(data, "subscriptions.ded_title"),
+            ded_created=_require(data, "subscriptions.ded_created"),
+            ded_meeting=_require(data, "subscriptions.ded_meeting"),
+            ded_manual=_require(data, "subscriptions.ded_manual"),
+            ded_record_comment=_require(data, "subscriptions.ded_record_comment"),
+            ded_closing_comment=_require(data, "subscriptions.ded_closing_comment"),
+            ded_closing_empty=_require(data, "subscriptions.ded_closing_empty"),
+            btn_ded_comment=_require(data, "subscriptions.btn_ded_comment"),
+            btn_ded_cancel=_require(data, "subscriptions.btn_ded_cancel"),
+            btn_back_card=_require(data, "subscriptions.btn_back_card"),
+            ded_cancelled=_require(data, "subscriptions.ded_cancelled"),
+            ask_closing_comment=_require(data, "subscriptions.ask_closing_comment"),
+            closing_comment_set=_require(data, "subscriptions.closing_comment_set"),
+            ded_not_found=_require(data, "subscriptions.ded_not_found"),
+        ),
+        consumption=ConsumptionMessages(
+            title=_require(data, "consumption.title"),
+            deducted_header=_require(data, "consumption.deducted_header"),
+            deducted_btn=_require(data, "consumption.deducted_btn"),
+            missed_header=_require(data, "consumption.missed_header"),
+            missed_no_subscription=_require(data, "consumption.missed_no_subscription"),
+            missed_exhausted=_require(data, "consumption.missed_exhausted"),
+            now_empty=_require(data, "consumption.now_empty"),
+            now_done=_require(data, "consumption.now_done"),
         ),
         windows=WindowsMessages(
             button=_require(data, "windows.button"),

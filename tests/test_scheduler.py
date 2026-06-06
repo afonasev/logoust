@@ -6,12 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import (
+    run_consumption_pass,
     run_digest_pass,
     run_outbox_pass,
     run_payment_reminder_pass,
     run_reminder_pass,
 )
 from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
+from src.domain.schedule import today_in_tz
 from src.domain.scheduled_message import (
     ScheduledClientMessage,
     ScheduledMessageStatus,
@@ -27,6 +29,7 @@ from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
+from src.services.subscriptions import create_subscription
 
 _TZ = "Asia/Yekaterinburg"
 _SP = 1
@@ -483,4 +486,113 @@ async def test_payment_pass_skips_disabled_specialist(
         )
     bot = AsyncMock()
     await run_payment_reminder_pass(bot, session_factory, _messages(), _NOW)
+    bot.send_message.assert_not_awaited()
+
+
+# --- consumption pass ---------------------------------------------------------
+
+# 15:00 UTC → 20:00 wall on 2026-06-15, exactly the default consumption_time.
+_CONS_NOW = datetime(2026, 6, 15, 15, 0, tzinfo=UTC)
+
+
+async def _seed_subscription(
+    factory: async_sessionmaker[AsyncSession], client_id: int, *, meetings: int
+) -> int:
+    async with factory() as session:
+        sub = await create_subscription(
+            SqlAlchemySubscriptionsRepo(session),
+            client_id=client_id,
+            specialist_id=_SP,
+            meetings=meetings,
+        )
+    assert sub is not None
+    assert sub.id is not None
+    return sub.id
+
+
+async def test_consumption_pass_reports_deductions(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    sub_id = await _seed_subscription(session_factory, client_id, meetings=5)
+    await _seed_today_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.args[0] == 900  # the specialist's chat
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert _callbacks(markup) == [f"subs:card:{sub_id}"]
+    async with session_factory() as session:
+        sub = await SqlAlchemySubscriptionsRepo(session).get_for_specialist(sub_id, _SP)
+        specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert sub is not None
+    assert sub.remaining == 4
+    assert specialist is not None
+    assert specialist.consumption_last_run_on == today_in_tz(_CONS_NOW, _TZ)
+
+
+async def test_consumption_pass_missed_has_no_buttons(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    # No subscription → the meeting is reported as a ❗ line, with no buttons.
+    await _seed_today_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.kwargs["reply_markup"] is None
+    text = bot.send_message.await_args.args[1]
+    assert _messages().consumption.missed_header in text
+
+
+async def test_consumption_pass_empty_is_silent_but_stamps(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
+    bot.send_message.assert_not_awaited()
+    async with session_factory() as session:
+        specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert specialist is not None
+    assert specialist.consumption_last_run_on == today_in_tz(_CONS_NOW, _TZ)
+
+
+async def test_consumption_pass_delivery_failure_keeps_deduction(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    sub_id = await _seed_subscription(session_factory, client_id, meetings=5)
+    await _seed_today_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
+    # Delivery failed, but the deduction is committed and not rolled back.
+    async with session_factory() as session:
+        sub = await SqlAlchemySubscriptionsRepo(session).get_for_specialist(sub_id, _SP)
+    assert sub is not None
+    assert sub.remaining == 4
+
+
+async def test_consumption_pass_skips_disabled_specialist(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            _SP, {"consumption_enabled": False}
+        )
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
     bot.send_message.assert_not_awaited()

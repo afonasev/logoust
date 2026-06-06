@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -13,10 +14,20 @@ from src.bot.messages import BotMessages
 from src.domain.client import Client, ClientStatus
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
-from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
+from src.infrastructure.subscriptions_repo import (
+    SqlAlchemySubscriptionDeductionsRepo,
+    SqlAlchemySubscriptionsRepo,
+)
 from src.services.clients import NewClient, add_client, archive_client
 from src.services.invites import create_invite
-from src.services.subscriptions import create_subscription, get_active
+from src.services.subscriptions import (
+    create_subscription,
+    decrement_meeting,
+    get_active,
+    list_deductions,
+)
+
+_DED_NOW = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
 
 _SP = 1
 
@@ -425,6 +436,175 @@ async def test_decrement_not_found_alerts(
     cb = _fake_callback("subs:dec:404")
     await h.decrement(cb, _SP)
     cb.answer.assert_awaited_with(messages.subscriptions.not_found, show_alert=True)
+
+
+# --- deduction journal --------------------------------------------------------
+
+
+async def _seed_deduction(
+    session_factory: async_sessionmaker[AsyncSession], sid: int
+) -> int:
+    async with session_factory() as session:
+        deduction = await decrement_meeting(
+            SqlAlchemySubscriptionDeductionsRepo(session),
+            subscription_id=sid,
+            specialist_id=_SP,
+            now=_DED_NOW,
+        )
+    assert deduction is not None
+    assert deduction.id is not None
+    return deduction.id
+
+
+async def test_card_shows_journal_row(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)
+    did = await _seed_deduction(session_factory, sid)
+    h = _subs(messages, session_factory)
+    cb = _fake_callback(f"subs:card:{sid}")
+    await h.show_card(cb, _state(), _SP)
+    assert f"subs:ded:{did}" in _callbacks(_markup(cb.message.edit_text))
+
+
+async def test_show_deduction_renders_actions(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)
+    did = await _seed_deduction(session_factory, sid)
+    h = _subs(messages, session_factory)
+    cb = _fake_callback(f"subs:ded:{did}")
+    await h.show_deduction(cb, _state(), _SP)
+    text = _texts(cb.message.edit_text)[0]
+    assert messages.subscriptions.ded_title in text
+    assert messages.subscriptions.ded_manual in text
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert f"subs:dedcomment:{did}" in callbacks
+    assert f"subs:dedcancel:{did}" in callbacks
+    assert f"subs:card:{sid}" in callbacks
+
+
+async def test_show_deduction_not_found_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _subs(messages, session_factory)
+    cb = _fake_callback("subs:ded:404")
+    await h.show_deduction(cb, _state(), _SP)
+    cb.answer.assert_awaited_with(messages.subscriptions.ded_not_found, show_alert=True)
+
+
+async def test_cancel_deduction_returns_to_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)  # remaining 5
+    did = await _seed_deduction(session_factory, sid)  # remaining 4
+    h = _subs(messages, session_factory)
+    cb = _fake_callback(f"subs:dedcancel:{did}")
+    await h.cancel_deduction(cb, _SP)
+    cb.answer.assert_awaited_with(messages.subscriptions.ded_cancelled)
+    async with session_factory() as session:
+        sub = await SqlAlchemySubscriptionsRepo(session).get_for_specialist(sid, _SP)
+        journal = await list_deductions(
+            SqlAlchemySubscriptionDeductionsRepo(session), subscription_id=sid
+        )
+    assert sub is not None
+    assert sub.remaining == 5  # returned
+    assert journal == []  # hidden
+
+
+async def test_cancel_deduction_unknown_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _subs(messages, session_factory)
+    cb = _fake_callback("subs:dedcancel:404")
+    await h.cancel_deduction(cb, _SP)
+    cb.answer.assert_awaited_with(messages.subscriptions.ded_not_found, show_alert=True)
+
+
+async def test_deduction_comment_flow(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)
+    did = await _seed_deduction(session_factory, sid)
+    h = _subs(messages, session_factory)
+    cb = _fake_callback(f"subs:dedcomment:{did}")
+    state = _state()
+    await h.start_deduction_comment(cb, state)
+    assert state.state == SubscriptionFlow.closing_comment
+    assert state.store["deduction_id"] == did
+    msg = _fake_message("прошло хорошо")
+    await h.apply_deduction_comment(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.subscriptions.closing_comment_set
+    async with session_factory() as session:
+        journal = await list_deductions(
+            SqlAlchemySubscriptionDeductionsRepo(session), subscription_id=sid
+        )
+    assert journal[0].closing_comment == "прошло хорошо"
+
+
+async def test_apply_deduction_comment_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _subs(messages, session_factory)
+    msg = _fake_message("текст")
+    state = _state({"deduction_id": 404}, SubscriptionFlow.closing_comment)
+    await h.apply_deduction_comment(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.subscriptions.ded_not_found
+
+
+async def test_auto_deduction_screen_shows_meeting_and_comments(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)
+    async with session_factory() as session:
+        repo = SqlAlchemySubscriptionDeductionsRepo(session)
+        result = await repo.add_auto(
+            subscription_id=sid,
+            appointment_id=777,
+            appointment_starts_at=datetime(2026, 6, 7, 5, 0, tzinfo=UTC),
+            appointment_comment="логопед",
+            created_at=_DED_NOW,
+        )
+        assert result.deduction is not None
+        did = result.deduction.id
+        assert did is not None
+        await repo.set_closing_comment(did, _SP, comment="всё ок")
+    h = _subs(messages, session_factory)
+    # Card row uses the auto template (carries the meeting date).
+    cb_card = _fake_callback(f"subs:card:{sid}")
+    await h.show_card(cb_card, _state(), _SP)
+    row_texts = _button_texts(_markup(cb_card.message.edit_text))
+    assert any("07.06" in t for t in row_texts)
+    # Screen shows the meeting line and both comments.
+    cb = _fake_callback(f"subs:ded:{did}")
+    await h.show_deduction(cb, _state(), _SP)
+    text = _texts(cb.message.edit_text)[0]
+    assert "логопед" in text
+    assert "всё ок" in text
+    assert messages.subscriptions.ded_manual not in text
+
+
+async def test_closed_card_journal_is_readonly(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    sid = await _seed_active(session_factory, meetings=5)
+    did = await _seed_deduction(session_factory, sid)
+    h = _subs(messages, session_factory)
+    await h.close(_fake_callback(f"subs:close:{sid}"), _SP)
+    # The journal row is still tappable on a closed card.
+    cb = _fake_callback(f"subs:card:{sid}")
+    await h.show_card(cb, _state(), _SP)
+    assert f"subs:ded:{did}" in _callbacks(_markup(cb.message.edit_text))
+    # ...but its screen offers no actions (only back).
+    cb2 = _fake_callback(f"subs:ded:{did}")
+    await h.show_deduction(cb2, _state(), _SP)
+    callbacks = _callbacks(_markup(cb2.message.edit_text))
+    assert not any(c.startswith("subs:dedcomment") for c in callbacks)
+    assert not any(c.startswith("subs:dedcancel") for c in callbacks)
+    assert f"subs:card:{sid}" in callbacks
 
 
 # --- close --------------------------------------------------------------------

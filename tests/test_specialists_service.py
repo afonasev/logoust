@@ -8,6 +8,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_consumption,
     toggle_digest,
     toggle_payment_reminder,
     toggle_reminder,
@@ -185,3 +186,15 @@ async def test_toggle_payment_reminder_flips_and_handles_missing(
     assert again is not None
     assert again.payment_reminder_enabled is True
     assert await toggle_payment_reminder(repo, specialist_id=404) is None
+
+
+async def test_toggle_consumption_flips_and_handles_missing(session: AsyncSession):
+    specialist_id = await _seed(session)
+    repo = SqlAlchemySpecialistsRepo(session)
+    updated = await toggle_consumption(repo, specialist_id=specialist_id)
+    assert updated is not None
+    assert updated.consumption_enabled is False
+    again = await toggle_consumption(repo, specialist_id=specialist_id)
+    assert again is not None
+    assert again.consumption_enabled is True
+    assert await toggle_consumption(repo, specialist_id=404) is None

@@ -209,8 +209,34 @@
 
 - `purchased` и `remaining` — оба кумулятивные счётчики, без отдельной таблицы движений (YAGNI): карточка отвечает на «сколько куплено / сколько осталось» без журнала.
 - Инвариант «один активный» держится запросом `client_id = ? AND status = 'active'` в сервисе; partial unique index оставлен на будущее (поток ввода последовательный, гонка двойного создания практически нулевая).
-- Абонемент не связан со встречами/расписанием: остаток меняется только ручными действиями.
+- Остаток меняется ручным «вычесть встречу», продлением, отменой списания и **вечерним авто-проходом** (`subscription_deductions`); каждое списание оставляет строку журнала.
 - `payment_reminded_at` — второй слой антидубля напоминания об оплате (первый — `specialists.payment_reminder_last_run_on`, «решение за день»). Ставится по факту показа алерта специалисту (а не отправки клиенту), поэтому даже непривязанный клиент не порождает повторов; продление обнуляет его, чтобы следующее обнуление остатка снова дало алерт.
+
+### `subscription_deductions`
+
+Журнал списаний абонемента: каждая строка — одна списанная встреча. Авто-списания (вечерний проход) хранят ссылку на встречу `appointment_id` и **снимки** её даты/времени и комментария записи; ручные — `appointment_id IS NULL` без снимков. Отмена не удаляет строку, а проставляет `cancelled_at` (строка продолжает держать замок идемпотентности).
+
+| Колонка                 | Тип      | NULL | Замечание                                                                 |
+| ----------------------- | -------- | ---- | ------------------------------------------------------------------------- |
+| `id`                    | INTEGER  | нет  | PK, autoincrement. Используется в `callback_data`.                        |
+| `subscription_id`       | INTEGER  | нет  | FK → `subscriptions.id`. Абонемент, с которого списано.                   |
+| `appointment_id`        | INTEGER  | да   | FK → `appointments.id` `ON DELETE SET NULL`. `NULL` у ручного списания.   |
+| `appointment_starts_at` | DATETIME | да   | Снимок даты/времени встречи на момент списания (aware UTC).               |
+| `appointment_comment`   | TEXT     | да   | Снимок комментария записи на момент списания.                            |
+| `closing_comment`       | TEXT     | да   | Редактируемая заметка «после встречи» (единственное мутабельное поле).    |
+| `created_at`            | DATETIME | нет  | Момент списания (aware UTC).                                              |
+| `cancelled_at`          | DATETIME | да   | Момент отмены; `NULL` у активной строки. Отменённые скрыты из истории.    |
+
+Индексы:
+
+- `uq_subscription_deductions_appointment` — `UNIQUE`, **частичный** (`WHERE appointment_id IS NOT NULL`). Замок идемпотентности: ≤1 списание на встречу; повторный/параллельный проход упирается в индекс и пропускает встречу. Ручные списания (`NULL`) не конфликтуют между собой.
+- `ix_subscription_deductions_subscription` — по `subscription_id`, обслуживает журнал на карточке.
+
+Решения по схеме:
+
+- Списание встречи и декремент остатка атомарны (одна транзакция: вставка-замок → `UPDATE … WHERE remaining > 0`), поэтому повторный проход не задваивает, а две встречи клиента за день не теряют декремент.
+- Снимки даты/комментария делают историю самодостаточной: правка/удаление встречи не меняют прошлые строки (`appointment_id` гасится в `NULL`).
+- Отмена — мягкая (`cancelled_at`): жёсткое удаление освободило бы замок и встреча списалась бы снова следующим проходом.
 
 ### `message_templates`
 
@@ -307,6 +333,7 @@
 - `0013_deferred_client_notify.py` — добавляет в `specialists` колонку `deferred_notify_time` (server-default `20:00`); создаёт таблицу `scheduled_client_messages` (FK на `specialists` и `clients`, три индекса). Существующие специалисты → пресет 20:00. Down-ревизия удаляет таблицу и колонку.
 - `0014_multi_slot_recurring.py` — заменяет однопроходную регулярную схему на «расписание → слоты → исключения». Удаляет таблицы `recurring_exceptions` и `recurring_appointments` (с индексом `ix_recurring_specialist_active`) и затирает материализованные регулярные строки в `appointments`/`appointment_reminders` (`WHERE series_id IS NOT NULL`; прод пуст, разовые записи с `series_id IS NULL` сохраняются). Переименовывает колонку `series_id` → `slot_id` в обоих журналах; индекс `uq_appointments_series_origin` → `uq_appointments_slot_origin` по `(slot_id, origin_date)`. Создаёт три таблицы: `recurring_schedules` (индекс `ix_recurring_schedules_specialist_active`), `recurring_slots` (индекс `ix_recurring_slots_schedule_active`), `recurring_slot_overrides` (`UNIQUE(slot_id, original_date)` = `uq_override_slot_date`). Down-ревизия полностью восстанавливает прежнюю схему (без данных — прод пуст).
 - `0015_subscription_payment_reminder.py` — добавляет в `specialists` колонки `payment_reminder_enabled` (server-default `1`), `payment_reminder_time` (server-default `12:00`), `payment_reminder_last_run_on` (nullable) и в `subscriptions` колонку `payment_reminded_at` (DateTime tz, nullable). Существующие специалисты → напоминание об оплате включено на 12:00; существующие абонементы → `payment_reminded_at = NULL`. Down-ревизия удаляет все четыре колонки.
+- `0016_subscription_consumption.py` — создаёт таблицу `subscription_deductions` с частичным уникальным индексом `uq_subscription_deductions_appointment` (`WHERE appointment_id IS NOT NULL`) и `ix_subscription_deductions_subscription`; добавляет в `specialists` колонки `consumption_enabled` (server-default `1`), `consumption_time` (server-default `20:00`), `consumption_last_run_on` (nullable). Существующие специалисты → авто-списание включено на 20:00. Индекс `uq_appointments_slot_origin` (для идемпотентной материализации повтора) уже есть с 0014. Down-ревизия удаляет колонки, индексы и таблицу.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

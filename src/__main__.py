@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.dispatcher import build_dispatcher
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import (
+    run_consumption_pass,
     run_digest_pass,
     run_outbox_pass,
     run_payment_reminder_pass,
@@ -53,6 +54,10 @@ async def _scheduler_loop(
             await run_payment_reminder_pass(bot, session_factory, messages, now)
         except Exception:
             logger.exception("scheduler.payment_reminder_pass_failed")
+        try:
+            await run_consumption_pass(bot, session_factory, messages, now)
+        except Exception:
+            logger.exception("scheduler.consumption_pass_failed")
         try:
             await run_outbox_pass(bot, session_factory, messages, now)
         except Exception:

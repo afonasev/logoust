@@ -2,6 +2,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import logging
 
+from src.domain.deduction import (
+    SubscriptionDeduction,
+    SubscriptionDeductionsRepo,
+)
 from src.domain.subscription import (
     Subscription,
     SubscriptionsRepo,
@@ -147,25 +151,95 @@ async def create_subscription(
 
 
 async def decrement_meeting(
-    repo: SubscriptionsRepo, *, subscription_id: int, specialist_id: int
-) -> Subscription | None:
-    """Списать одну встречу. None — если абонемент не найден.
+    deductions_repo: SubscriptionDeductionsRepo,
+    *,
+    subscription_id: int,
+    specialist_id: int,
+    now: datetime,
+) -> SubscriptionDeduction | None:
+    """Ручное «вычесть встречу»: атомарный декремент + строка журнала (реш. 7).
 
-    Остаток не уходит ниже 0: при remaining == 0 возвращается без изменений.
+    None — когда списывать нечего: остаток уже 0 (строка не создаётся, остаток в
+    минус не уходит) либо абонемент не активный / не найден. Строка журнала идёт
+    без привязки к встрече (`appointment_id IS NULL`); комментарий «после встречи»
+    добавляется позже на экране списания.
     """
-    subscription = await repo.get_for_specialist(subscription_id, specialist_id)
+    deduction = await deductions_repo.add_manual(
+        subscription_id=subscription_id,
+        specialist_id=specialist_id,
+        created_at=now,
+    )
+    if deduction is None:
+        return None
+    logger.info(
+        "subscription.decremented",
+        extra={"specialist_id": specialist_id, "subscription_id": subscription_id},
+    )
+    return deduction
+
+
+async def list_deductions(
+    deductions_repo: SubscriptionDeductionsRepo, *, subscription_id: int
+) -> list[SubscriptionDeduction]:
+    """Неотменённые строки журнала списаний абонемента (свежие сверху)."""
+    return await deductions_repo.list_active_for_subscription(subscription_id)
+
+
+async def get_deduction(
+    deductions_repo: SubscriptionDeductionsRepo,
+    *,
+    deduction_id: int,
+    specialist_id: int,
+) -> SubscriptionDeduction | None:
+    return await deductions_repo.get_for_specialist(deduction_id, specialist_id)
+
+
+async def cancel_deduction(
+    deductions_repo: SubscriptionDeductionsRepo,
+    *,
+    deduction_id: int,
+    specialist_id: int,
+    now: datetime,
+) -> Subscription | None:
+    """Мягко отменить списание: остаток +1, строка помечается отменённой (реш. 4).
+
+    Идемпотентна (повторная отмена ничего не меняет) и доступна только на активном
+    абонементе. Строка остаётся в БД и держит замок — отменённая встреча повторно
+    не спишется. None — если списание не найдено / уже отменено / абонемент закрыт.
+    """
+    subscription = await deductions_repo.cancel(
+        deduction_id, specialist_id, cancelled_at=now
+    )
     if subscription is None:
         return None
-    if subscription.remaining <= 0:
-        return subscription
-    updated = await repo.update_counters(
-        subscription_id,
-        specialist_id,
-        purchased=subscription.purchased,
-        remaining=subscription.remaining - 1,
+    logger.info(
+        "subscription.deduction_cancelled",
+        extra={"specialist_id": specialist_id, "deduction_id": deduction_id},
     )
-    assert updated is not None  # noqa: S101 — just fetched it under the same owner
-    _log("subscription.decremented", updated)
+    return subscription
+
+
+async def set_deduction_comment(
+    deductions_repo: SubscriptionDeductionsRepo,
+    *,
+    deduction_id: int,
+    specialist_id: int,
+    comment: str | None,
+) -> SubscriptionDeduction | None:
+    """Задать/изменить комментарий «после встречи». None — если редактировать нельзя.
+
+    Доступно только на активном абонементе; факты строки (привязка, дата, снимок
+    комментария записи) не меняются.
+    """
+    updated = await deductions_repo.set_closing_comment(
+        deduction_id, specialist_id, comment=comment
+    )
+    if updated is None:
+        return None
+    logger.info(
+        "subscription.deduction_commented",
+        extra={"specialist_id": specialist_id, "deduction_id": deduction_id},
+    )
     return updated
 
 

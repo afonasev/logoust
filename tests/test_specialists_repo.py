@@ -256,6 +256,54 @@ async def test_mark_payment_reminder_run_sets_last_run_on(session: AsyncSession)
     assert fetched.payment_reminder_last_run_on == run_on
 
 
+async def test_add_applies_consumption_defaults(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-consumption"))
+    assert saved.consumption_enabled is True
+    assert saved.consumption_time == "20:00"
+    assert saved.consumption_last_run_on is None
+
+
+async def test_list_consumption_candidates_only_enabled_and_welcomed(
+    session: AsyncSession,
+):
+    repo = SqlAlchemySpecialistsRepo(session)
+    on = await repo.add(_make("token-cons-on"))
+    assert on.id is not None
+    await repo.mark_welcomed(
+        on.id,
+        telegram_chat_id=51,
+        telegram_username=None,
+        welcomed_at=datetime.now(UTC),
+    )
+    # Welcomed but disabled → excluded.
+    off = await repo.add(_make("token-cons-off"))
+    assert off.id is not None
+    await repo.mark_welcomed(
+        off.id,
+        telegram_chat_id=52,
+        telegram_username=None,
+        welcomed_at=datetime.now(UTC),
+    )
+    await repo.update_settings(off.id, {"consumption_enabled": False})
+    # Enabled but never welcomed (no chat to send to) → excluded.
+    await repo.add(_make("token-cons-unwelcomed"))
+
+    candidates = await repo.list_consumption_candidates()
+    assert [c.id for c in candidates] == [on.id]
+
+
+async def test_mark_consumption_run_sets_last_run_on(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-cons-mark"))
+    assert saved.id is not None
+    run_on = date(2026, 6, 15)
+    await repo.mark_consumption_run(saved.id, run_on)
+    fetched = await repo.get(saved.id)
+    assert fetched is not None
+    assert fetched.consumption_last_run_on == run_on
+
+
 def test_orm_repr_includes_token_prefix():
     orm = SpecialistORM(
         id=1,

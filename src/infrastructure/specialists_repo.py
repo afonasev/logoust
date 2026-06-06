@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.domain.specialist import (
+    DEFAULT_CONSUMPTION_ENABLED,
+    DEFAULT_CONSUMPTION_TIME,
     DEFAULT_DAY_END,
     DEFAULT_DAY_START,
     DEFAULT_DEFERRED_NOTIFY_TIME,
@@ -77,6 +79,13 @@ class SpecialistORM(Base):
     payment_reminder_last_run_on: Mapped[date | None] = mapped_column(
         Date, nullable=True
     )
+    consumption_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=DEFAULT_CONSUMPTION_ENABLED
+    )
+    consumption_time: Mapped[str] = mapped_column(
+        String(5), nullable=False, default=DEFAULT_CONSUMPTION_TIME
+    )
+    consumption_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
     subscription_presets: Mapped[str] = mapped_column(
         String(64), nullable=False, default=DEFAULT_SUBSCRIPTION_PRESETS
     )
@@ -110,6 +119,9 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         payment_reminder_enabled=bool(orm.payment_reminder_enabled),
         payment_reminder_time=orm.payment_reminder_time,
         payment_reminder_last_run_on=orm.payment_reminder_last_run_on,
+        consumption_enabled=bool(orm.consumption_enabled),
+        consumption_time=orm.consumption_time,
+        consumption_last_run_on=orm.consumption_last_run_on,
         subscription_presets=orm.subscription_presets,
         deferred_notify_time=orm.deferred_notify_time,
     )
@@ -204,6 +216,23 @@ class SqlAlchemySpecialistsRepo:
         if orm is None:  # pragma: no cover - pass only marks loaded candidates
             return
         orm.payment_reminder_last_run_on = run_on
+        await self._session.commit()
+
+    async def list_consumption_candidates(self) -> list[Specialist]:
+        # Only welcomed specialists can receive the consumption report, so skip
+        # those without a chat — the pass then never has to guard a None chat_id.
+        stmt = select(SpecialistORM).where(
+            SpecialistORM.consumption_enabled.is_(True),
+            SpecialistORM.telegram_chat_id.is_not(None),
+        )
+        result = await self._session.execute(stmt)
+        return [to_domain(orm) for orm in result.scalars().all()]
+
+    async def mark_consumption_run(self, specialist_id: int, run_on: date) -> None:
+        orm = await self._session.get(SpecialistORM, specialist_id)
+        if orm is None:  # pragma: no cover - pass only marks loaded candidates
+            return
+        orm.consumption_last_run_on = run_on
         await self._session.commit()
 
     async def mark_welcomed(

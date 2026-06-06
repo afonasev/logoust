@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.client_templates import template_default
 from src.bot.handlers.clients import SpecialistMiddleware
 from src.bot.messages import BotMessages, SettingsMessages, TemplatesMessages
-from src.bot.scheduler import deliver_reminder
+from src.bot.scheduler import deliver_consumption_report, deliver_reminder
 from src.domain.message_template import (
     CLIENT_TEMPLATES,
     TemplateSpec,
@@ -41,6 +41,11 @@ from src.infrastructure.recurring_repo import (
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.infrastructure.subscriptions_repo import (
+    SqlAlchemySubscriptionDeductionsRepo,
+    SqlAlchemySubscriptionsRepo,
+)
+from src.services.consumption import run_consumption
 from src.services.digest import collect_today_digest
 from src.services.message_templates import (
     reset_template,
@@ -52,6 +57,7 @@ from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
+    toggle_consumption,
     toggle_digest,
     toggle_payment_reminder,
     toggle_reminder,
@@ -64,9 +70,9 @@ logger = logging.getLogger(__name__)
 _TZ_LABELS = dict(RUSSIAN_TIMEZONES)
 
 _CB_MENU = "settings:menu"
-# Inert header button (names a feature group); answered silently so the tap does
-# not leave a loading spinner.
-_CB_NOOP = "settings:noop"
+# Feature-group header button: tapping it shows a short help blurb for that block
+# as a pop-up alert (callback shape "settings:help:<feature>").
+_CB_HELP = "settings:help:"
 _CB_TZLIST = "settings:tzlist"
 _CB_DAY_START = "settings:day_start"
 _CB_DAY_END = "settings:day_end"
@@ -81,6 +87,9 @@ _CB_DIGEST_TIME = "settings:digest_time"
 _CB_DIGEST_NOW = "settings:digest_now"
 _CB_PAYMENT_TOGGLE = "settings:payment"
 _CB_PAYMENT_TIME = "settings:payment_time"
+_CB_CONSUMPTION_TOGGLE = "settings:consumption"
+_CB_CONSUMPTION_TIME = "settings:consumption_time"
+_CB_CONSUMPTION_NOW = "settings:consumption_now"
 _CB_SUBSCRIPTION = "settings:subscription_presets"
 _CB_DEFERRED_TIME = "settings:deferred_time"
 _CB_TEMPLATES = "settings:templates"
@@ -95,6 +104,7 @@ _FIELD_BY_CALLBACK = {
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
     _CB_DIGEST_TIME: SettingField.DIGEST_TIME,
     _CB_PAYMENT_TIME: SettingField.PAYMENT_REMINDER_TIME,
+    _CB_CONSUMPTION_TIME: SettingField.CONSUMPTION_TIME,
     _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_PRESETS,
     _CB_DEFERRED_TIME: SettingField.DEFERRED_NOTIFY_TIME,
 }
@@ -107,6 +117,7 @@ class EditSetting(StatesGroup):
     reminder_time = State()
     digest_time = State()
     payment_time = State()
+    consumption_time = State()
     subscription_presets = State()
     deferred_time = State()
 
@@ -174,6 +185,7 @@ _STATE_BY_FIELD = {
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
     SettingField.DIGEST_TIME: EditSetting.digest_time,
     SettingField.PAYMENT_REMINDER_TIME: EditSetting.payment_time,
+    SettingField.CONSUMPTION_TIME: EditSetting.consumption_time,
     SettingField.SUBSCRIPTION_PRESETS: EditSetting.subscription_presets,
     SettingField.DEFERRED_NOTIFY_TIME: EditSetting.deferred_time,
 }
@@ -187,6 +199,7 @@ _CURRENT_BY_FIELD: dict[SettingField, Callable[[Specialist], str]] = {
     SettingField.REMINDER_TIME: lambda s: s.reminder_time,
     SettingField.DIGEST_TIME: lambda s: s.morning_notify_time,
     SettingField.PAYMENT_REMINDER_TIME: lambda s: s.payment_reminder_time,
+    SettingField.CONSUMPTION_TIME: lambda s: s.consumption_time,
     SettingField.SUBSCRIPTION_PRESETS: lambda s: s.subscription_presets,
     SettingField.DEFERRED_NOTIFY_TIME: lambda s: s.deferred_notify_time,
 }
@@ -214,6 +227,11 @@ def _menu_keyboard(
     payment_toggle = (
         m.btn_payment_on if specialist.payment_reminder_enabled else m.btn_payment_off
     )
+    consumption_toggle = (
+        m.btn_consumption_on
+        if specialist.consumption_enabled
+        else m.btn_consumption_off
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=m.btn_timezone, callback_data=_CB_TZLIST)],
@@ -228,7 +246,11 @@ def _menu_keyboard(
                 ),
             ],
             # Non-clickable header so the row below reads as one feature group.
-            [InlineKeyboardButton(text=m.btn_reminder, callback_data=_CB_NOOP)],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_reminder, callback_data=f"{_CB_HELP}reminder"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=reminder_toggle, callback_data=_CB_REMINDER_TOGGLE
@@ -240,7 +262,11 @@ def _menu_keyboard(
                     text=m.btn_reminder_now, callback_data=_CB_REMINDER_NOW
                 ),
             ],
-            [InlineKeyboardButton(text=m.btn_digest, callback_data=_CB_NOOP)],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_digest, callback_data=f"{_CB_HELP}digest"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=digest_toggle, callback_data=_CB_DIGEST_TOGGLE
@@ -252,13 +278,33 @@ def _menu_keyboard(
                     text=m.btn_digest_now, callback_data=_CB_DIGEST_NOW
                 ),
             ],
-            [InlineKeyboardButton(text=m.btn_payment, callback_data=_CB_NOOP)],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_payment, callback_data=f"{_CB_HELP}payment"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=payment_toggle, callback_data=_CB_PAYMENT_TOGGLE
                 ),
                 InlineKeyboardButton(
                     text=m.btn_payment_time, callback_data=_CB_PAYMENT_TIME
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_consumption, callback_data=f"{_CB_HELP}consumption"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=consumption_toggle, callback_data=_CB_CONSUMPTION_TOGGLE
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_consumption_time, callback_data=_CB_CONSUMPTION_TIME
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_consumption_now, callback_data=_CB_CONSUMPTION_NOW
                 ),
             ],
             [
@@ -322,6 +368,8 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         digest_time=specialist.morning_notify_time,
         payment=m.state_on if specialist.payment_reminder_enabled else m.state_off,
         payment_time=specialist.payment_reminder_time,
+        consumption=m.state_on if specialist.consumption_enabled else m.state_off,
+        consumption_time=specialist.consumption_time,
         deferred_notify_time=specialist.deferred_notify_time,
         subscription_presets=specialist.subscription_presets,
     )
@@ -406,6 +454,47 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             )
         await self.open_menu(callback, state, specialist_id)
 
+    async def toggle_consumption(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        async with self._session_factory() as session:
+            await toggle_consumption(
+                SqlAlchemySpecialistsRepo(session), specialist_id=specialist_id
+            )
+        await self.open_menu(callback, state, specialist_id)
+
+    async def send_consumption_now(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        # Real run: deduct today's passed meetings immediately, bypassing the time
+        # gate AND the daily stamp. The per-appointment lock dedups, so the real
+        # 20:00 pass later adds nothing; the day stamp stays untouched so that pass
+        # still fires (design.md, решение 6).
+        specialist = await self._load(specialist_id)
+        if specialist is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        async with self._session_factory() as session:
+            report = await run_consumption(
+                specialist,
+                datetime.now(UTC),
+                appointments_repo=SqlAlchemyAppointmentsRepo(session),
+                subscriptions_repo=SqlAlchemySubscriptionsRepo(session),
+                deductions_repo=SqlAlchemySubscriptionDeductionsRepo(session),
+                clients_repo=SqlAlchemyClientsRepo(session),
+                schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+                slot_repo=SqlAlchemyRecurringSlotRepo(session),
+                override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
+            )
+        if report.is_empty:
+            await callback.answer(self._m.consumption_now_empty, show_alert=True)
+            return
+        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        await deliver_consumption_report(
+            callback.bot, self._messages, specialist, report
+        )
+        await callback.answer(self._m.consumption_now_done, show_alert=True)
+
     async def send_digest_now(
         self, callback: CallbackQuery, specialist_id: int
     ) -> None:
@@ -483,10 +572,16 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             self._m.reminders_now_done.format(count=len(to_send)), show_alert=True
         )
 
-    @staticmethod
-    async def noop(callback: CallbackQuery) -> None:
-        # Inert header button: just dismiss the loading spinner.
-        await callback.answer()
+    async def show_help(self, callback: CallbackQuery) -> None:
+        # Tapping a feature-group header shows a short help blurb as a pop-up.
+        feature = (callback.data or "").removeprefix(_CB_HELP)
+        helps = {
+            "reminder": self._m.help_reminder,
+            "digest": self._m.help_digest,
+            "payment": self._m.help_payment,
+            "consumption": self._m.help_consumption,
+        }
+        await callback.answer(helps[feature], show_alert=True)
 
     async def show_timezones(self, callback: CallbackQuery) -> None:
         await _callback_message(callback).edit_text(
@@ -560,6 +655,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             SettingField.REMINDER_TIME: self._m.ask_reminder_time,
             SettingField.DIGEST_TIME: self._m.ask_digest_time,
             SettingField.PAYMENT_REMINDER_TIME: self._m.ask_payment_time,
+            SettingField.CONSUMPTION_TIME: self._m.ask_consumption_time,
             SettingField.SUBSCRIPTION_PRESETS: self._m.ask_subscription_presets,
             SettingField.DEFERRED_NOTIFY_TIME: self._m.ask_deferred_time,
         }
@@ -624,6 +720,13 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             message, state, specialist_id, SettingField.PAYMENT_REMINDER_TIME
         )
 
+    async def apply_consumption_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(
+            message, state, specialist_id, SettingField.CONSUMPTION_TIME
+        )
+
     async def apply_day_end(
         self, message: Message, state: FSMContext, specialist_id: int
     ) -> None:
@@ -676,7 +779,17 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
                 label=self._tm.labels[key],
                 current=current,
                 placeholders=_placeholder_hint(CLIENT_TEMPLATES[key], self._tm),
-            )
+            ),
+            # "Отмена" → back to the templates list (show_templates clears the FSM).
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=self._m.btn_cancel, callback_data=_CB_TEMPLATES
+                        )
+                    ]
+                ]
+            ),
         )
         await callback.answer()
 
@@ -738,6 +851,7 @@ def build_router(
     router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
     router.message.register(h.apply_digest_time, EditSetting.digest_time)
     router.message.register(h.apply_payment_time, EditSetting.payment_time)
+    router.message.register(h.apply_consumption_time, EditSetting.consumption_time)
     router.message.register(
         h.apply_subscription_presets, EditSetting.subscription_presets
     )
@@ -745,7 +859,7 @@ def build_router(
     router.message.register(h.apply_template, EditTemplate.body)
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
-    router.callback_query.register(h.noop, F.data == _CB_NOOP)
+    router.callback_query.register(h.show_help, F.data.startswith(_CB_HELP))
     router.callback_query.register(h.show_templates, F.data == _CB_TEMPLATES)
     router.callback_query.register(h.edit_template, F.data.startswith(_CB_TPL_EDIT))
     router.callback_query.register(
@@ -759,6 +873,7 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_DIGEST_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_PAYMENT_TIME)
+    router.callback_query.register(h.ask_value, F.data == _CB_CONSUMPTION_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_SUBSCRIPTION)
     router.callback_query.register(h.ask_value, F.data == _CB_DEFERRED_TIME)
     router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
@@ -766,6 +881,12 @@ def build_router(
     router.callback_query.register(h.toggle_digest, F.data == _CB_DIGEST_TOGGLE)
     router.callback_query.register(h.send_digest_now, F.data == _CB_DIGEST_NOW)
     router.callback_query.register(h.toggle_payment, F.data == _CB_PAYMENT_TOGGLE)
+    router.callback_query.register(
+        h.toggle_consumption, F.data == _CB_CONSUMPTION_TOGGLE
+    )
+    router.callback_query.register(
+        h.send_consumption_now, F.data == _CB_CONSUMPTION_NOW
+    )
     router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
     router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))
     return router

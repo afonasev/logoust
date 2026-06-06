@@ -11,7 +11,10 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
-from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
+from src.infrastructure.subscriptions_repo import (
+    SqlAlchemySubscriptionDeductionsRepo,
+    SqlAlchemySubscriptionsRepo,
+)
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -97,9 +100,10 @@ async def _seed_subscription(
         assert sub.id is not None
         for _ in range(spend):
             await decrement_meeting(
-                SqlAlchemySubscriptionsRepo(session),
+                SqlAlchemySubscriptionDeductionsRepo(session),
                 subscription_id=sub.id,
                 specialist_id=_SP,
+                now=_NOW,
             )
     return sub.id
 

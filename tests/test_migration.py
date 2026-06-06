@@ -61,6 +61,10 @@ def test_initial_migration_creates_specialists_table(
         "payment_reminder_enabled",
         "payment_reminder_time",
         "payment_reminder_last_run_on",
+        # Added by 0016 (evening consumption-pass settings).
+        "consumption_enabled",
+        "consumption_time",
+        "consumption_last_run_on",
     }
     assert set(columns) == expected
 
@@ -797,6 +801,82 @@ def test_payment_reminder_migration_adds_columns_and_backfills(
     assert "payment_reminder_enabled" not in specialist_columns
     sub_columns = {c["name"] for c in insp.get_columns("subscriptions")}
     assert "payment_reminded_at" not in sub_columns
+    engine.dispose()
+
+
+def test_consumption_migration_adds_table_and_backfills(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0016 and seed a specialist that predates the consumption settings.
+    command.upgrade(cfg, "0015")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    assert "subscription_deductions" in insp.get_table_names()
+    columns = {c["name"] for c in insp.get_columns("subscription_deductions")}
+    assert columns == {
+        "id",
+        "subscription_id",
+        "appointment_id",
+        "appointment_starts_at",
+        "appointment_comment",
+        "closing_comment",
+        "created_at",
+        "cancelled_at",
+    }
+    index_names = {i["name"] for i in insp.get_indexes("subscription_deductions")}
+    assert "uq_subscription_deductions_appointment" in index_names
+    assert "ix_subscription_deductions_subscription" in index_names
+    # The per-meeting idempotency lock is unique and partial (NULLs excluded).
+    lock = next(
+        i
+        for i in insp.get_indexes("subscription_deductions")
+        if i["name"] == "uq_subscription_deductions_appointment"
+    )
+    assert lock["unique"]
+    # The repeat-materialisation lock from 0014 must still be present.
+    appt_indexes = {i["name"] for i in insp.get_indexes("appointments")}
+    assert "uq_appointments_slot_origin" in appt_indexes
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert {
+        "consumption_enabled",
+        "consumption_time",
+        "consumption_last_run_on",
+    } <= specialist_columns
+
+    # The pre-existing specialist backfills to enabled at 20:00 (opt-out default).
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT consumption_enabled, consumption_time, "
+                "consumption_last_run_on "
+                "FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).one()
+    assert row == (1, "20:00", None)
+
+    command.downgrade(cfg, "0015")
+    insp = inspect(engine)
+    assert "subscription_deductions" not in insp.get_table_names()
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "consumption_enabled" not in specialist_columns
     engine.dispose()
 
 

@@ -20,6 +20,7 @@ from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -28,6 +29,7 @@ from src.services.message_templates import (
     save_template_override,
 )
 from src.services.specialists import get_settings
+from src.services.subscriptions import create_subscription
 
 _SP = 1
 
@@ -495,13 +497,19 @@ def test_render_settings_shows_digest_state():
     assert "10:00" in text  # default digest time
 
 
-async def test_noop_header_just_answers(
+async def test_show_help_shows_feature_blurb(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     h = _handlers(messages, session_factory)
-    cb = _fake_callback("settings:noop")
-    await h.noop(cb)
-    cb.answer.assert_awaited_once()
+    for feature, expected in (
+        ("reminder", messages.settings.help_reminder),
+        ("digest", messages.settings.help_digest),
+        ("payment", messages.settings.help_payment),
+        ("consumption", messages.settings.help_consumption),
+    ):
+        cb = _fake_callback(f"settings:help:{feature}")
+        await h.show_help(cb)
+        cb.answer.assert_awaited_once_with(expected, show_alert=True)
 
 
 async def test_toggle_digest_flips_flag(
@@ -653,6 +661,129 @@ async def test_send_digest_now_works_when_disabled(
     cb.bot.send_message.assert_awaited_once()
 
 
+# --- consumption (авто-списание) ---------------------------------------------
+
+
+def test_render_settings_shows_consumption_state():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    text = render_settings(specialist, m)
+    assert "Авто-списание" in text
+    assert "20:00" in text  # default consumption_time
+
+
+async def test_toggle_consumption_flips_flag(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:consumption")
+    await h.toggle_consumption(cb, _state(), _SP)
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.consumption_enabled is False
+
+
+async def test_apply_consumption_time_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("21:00")
+    state = _state(state=EditSetting.consumption_time)
+    await h.apply_consumption_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.consumption_time == "21:00"
+
+
+async def test_ask_value_consumption_time_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:consumption_time")
+    state = _state()
+    await h.ask_value(cb, state, _SP)
+    assert state.state == EditSetting.consumption_time
+    assert _texts(cb.message.edit_text)[0].startswith(
+        messages.settings.ask_consumption_time
+    )
+
+
+async def _seed_consumable(factory: async_sessionmaker[AsyncSession]) -> None:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        client = await add_client(
+            SqlAlchemyClientsRepo(session),
+            NewClient(
+                specialist_id=_SP,
+                child_name="Петя",
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        await create_subscription(
+            SqlAlchemySubscriptionsRepo(session),
+            client_id=client.id,
+            specialist_id=_SP,
+            meetings=5,
+        )
+        # 00:00 wall today → always already passed whenever the test runs.
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=_SP,
+            client_id=client.id,
+            day=today_in_tz(now, "Asia/Yekaterinburg"),
+            hhmm="00:00",
+            comment=None,
+            tz="Asia/Yekaterinburg",
+            now=now,
+        )
+
+
+async def test_send_consumption_now_sends_and_keeps_last_run_on(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    await _seed_consumable(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:consumption_now")
+    await h.send_consumption_now(cb, _SP)
+    cb.bot.send_message.assert_awaited_once()
+    assert cb.bot.send_message.await_args.args[0] == 999
+    # Real run, but must not stamp the day — the real 20:00 pass still fires.
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.consumption_last_run_on is None
+    assert _texts(cb.answer)[0] == messages.settings.consumption_now_done
+
+
+async def test_send_consumption_now_empty_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _welcome(session_factory, chat_id=999)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:consumption_now")
+    await h.send_consumption_now(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.answer)[0] == messages.settings.consumption_now_empty
+
+
 # --- client message templates ------------------------------------------------
 
 
@@ -703,6 +834,10 @@ async def test_edit_template_shows_current_and_placeholders(
     prompt = _texts(cb.message.edit_text)[0]
     assert messages.templates.labels["appt_reminder"] in prompt
     assert "{date}" in prompt  # required placeholder shown
+    # A Cancel button is offered to bail out of the edit back to the list.
+    assert messages.settings.btn_cancel in _button_texts(cb.message.edit_text)
+    markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].callback_data == "settings:templates"
 
 
 async def test_edit_template_without_placeholders_shows_hint(

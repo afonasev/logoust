@@ -23,6 +23,10 @@ DEFAULT_MORNING_NOTIFY_TIME = "10:00"
 # in their timezone.
 DEFAULT_PAYMENT_REMINDER_ENABLED = True
 DEFAULT_PAYMENT_REMINDER_TIME = "12:00"
+# The evening subscription-consumption pass is opt-out (on by default) and fires at
+# 20:00 wall-time ("end of the working day") in their timezone.
+DEFAULT_CONSUMPTION_ENABLED = True
+DEFAULT_CONSUMPTION_TIME = "20:00"
 # Варианты числа встреч (кнопки) при создании/продлении абонемента — список
 # через запятую, канонизированный (по возрастанию, без повторов).
 DEFAULT_SUBSCRIPTION_PRESETS = "4,8,12"
@@ -65,6 +69,12 @@ class Specialist:
     payment_reminder_enabled: bool = DEFAULT_PAYMENT_REMINDER_ENABLED
     payment_reminder_time: str = DEFAULT_PAYMENT_REMINDER_TIME
     payment_reminder_last_run_on: date | None = None
+    # Daily evening subscription-consumption pass: on/off, wall-clock "HH:MM"
+    # trigger, and the last day (in tz) the pass ran — the anti-duplicate / catch-up
+    # guard.
+    consumption_enabled: bool = DEFAULT_CONSUMPTION_ENABLED
+    consumption_time: str = DEFAULT_CONSUMPTION_TIME
+    consumption_last_run_on: date | None = None
     # Дефолтное число встреч в абонементе, подставляемое в подсказку создания/продления.
     subscription_presets: str = DEFAULT_SUBSCRIPTION_PRESETS
     # Настенное "HH:MM" кнопки-пресета при откладывании уведомления клиенту.
@@ -103,6 +113,24 @@ def is_payment_reminder_due(specialist: "Specialist", now: datetime) -> bool:
         return False
     # Both sides are zero-padded "HH:MM", so a lexical compare is a time compare.
     return f"{utc_to_wall(now, tz):%H:%M}" >= specialist.payment_reminder_time
+
+
+def is_consumption_due(specialist: "Specialist", now: datetime) -> bool:
+    """Whether the evening subscription-consumption pass should run at `now`.
+
+    True when consumption is enabled, the specialist's wall-clock time has reached
+    `consumption_time`, and the pass has not already run today (in their timezone).
+    The `>=` threshold gives a catch-up after downtime within the same day; the
+    day-stamp guard makes repeat ticks and restarts no-ops (see design.md, решение
+    2 и 6).
+    """
+    if not specialist.consumption_enabled:
+        return False
+    tz = specialist.timezone
+    if specialist.consumption_last_run_on == today_in_tz(now, tz):
+        return False
+    # Both sides are zero-padded "HH:MM", so a lexical compare is a time compare.
+    return f"{utc_to_wall(now, tz):%H:%M}" >= specialist.consumption_time
 
 
 class SpecialistsRepo(Protocol):
@@ -155,5 +183,13 @@ class SpecialistsRepo(Protocol):
     ) -> list[Specialist]: ...
 
     async def mark_payment_reminder_run(  # pragma: no cover
+        self, specialist_id: int, run_on: date
+    ) -> None: ...
+
+    async def list_consumption_candidates(  # pragma: no cover
+        self,
+    ) -> list[Specialist]: ...
+
+    async def mark_consumption_run(  # pragma: no cover
         self, specialist_id: int, run_on: date
     ) -> None: ...

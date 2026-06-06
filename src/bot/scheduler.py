@@ -36,7 +36,15 @@ from src.infrastructure.recurring_repo import (
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
-from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
+from src.infrastructure.subscriptions_repo import (
+    SqlAlchemySubscriptionDeductionsRepo,
+    SqlAlchemySubscriptionsRepo,
+)
+from src.services.consumption import (
+    ConsumptionReport,
+    MissReason,
+    run_consumption_if_due,
+)
 from src.services.digest import send_digest_if_due
 from src.services.message_templates import resolve_template
 from src.services.payment_reminder import (
@@ -210,6 +218,117 @@ async def _deliver_payment_alert(
         if alert.chat_id is not None
         else None
     )
+    with suppress(TelegramForbiddenError, TelegramBadRequest):
+        await bot.send_message(specialist.telegram_chat_id, text, reply_markup=markup)
+
+
+async def run_consumption_pass(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    messages: BotMessages,
+    now: datetime,
+) -> None:
+    """One evening subscription-consumption pass over all enabled specialists.
+
+    For each specialist due today, the service deducts today's passed meetings and
+    accumulates a report; the report (charged subscriptions as buttons + a ❗ list of
+    meetings it could not charge) is delivered here, keeping aiogram out of the
+    service. A delivery failure never rolls back the deductions (they are already
+    committed inside the service).
+    """
+    async with session_factory() as session:
+        candidates = await SqlAlchemySpecialistsRepo(
+            session
+        ).list_consumption_candidates()
+    for specialist in candidates:
+        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        await _run_consumption_for_specialist(
+            bot, session_factory, messages, specialist, now
+        )
+
+
+async def _run_consumption_for_specialist(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    messages: BotMessages,
+    specialist: Specialist,
+    now: datetime,
+) -> None:
+    async with session_factory() as session:
+        await run_consumption_if_due(
+            specialist,
+            now,
+            appointments_repo=SqlAlchemyAppointmentsRepo(session),
+            subscriptions_repo=SqlAlchemySubscriptionsRepo(session),
+            deductions_repo=SqlAlchemySubscriptionDeductionsRepo(session),
+            clients_repo=SqlAlchemyClientsRepo(session),
+            schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+            slot_repo=SqlAlchemyRecurringSlotRepo(session),
+            override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
+            specialists_repo=SqlAlchemySpecialistsRepo(session),
+            report=partial(deliver_consumption_report, bot, messages, specialist),
+        )
+
+
+def render_consumption_report(
+    report: ConsumptionReport, specialist: Specialist, messages: BotMessages
+) -> str:
+    """Report text: charged-subscriptions header + the ❗ list of uncharged meetings.
+
+    The charged subscriptions themselves are buttons (see `_consumption_keyboard`);
+    here we only add the header so the message reads even without tapping.
+    """
+    m = messages.consumption
+    lines = [m.title]
+    if report.deducted:
+        lines.append(m.deducted_header)
+    if report.missed:
+        lines.append(m.missed_header)
+        for miss in report.missed:
+            wall = utc_to_wall(miss.starts_at, specialist.timezone)
+            template = (
+                m.missed_no_subscription
+                if miss.reason is MissReason.NO_SUBSCRIPTION
+                else m.missed_exhausted
+            )
+            lines.append(template.format(child=miss.child_name, time=f"{wall:%H:%M}"))
+    return "\n".join(lines)
+
+
+def _consumption_keyboard(
+    report: ConsumptionReport, messages: BotMessages
+) -> InlineKeyboardMarkup | None:
+    if not report.deducted:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=messages.consumption.deducted_btn.format(
+                        child=entry.child_name, remaining=entry.remaining
+                    ),
+                    callback_data=f"subs:card:{entry.subscription_id}",
+                )
+            ]
+            for entry in report.deducted
+        ]
+    )
+
+
+async def deliver_consumption_report(
+    bot: Bot, messages: BotMessages, specialist: Specialist, report: ConsumptionReport
+) -> None:
+    """Send the consumption report to the specialist (shared with "send now").
+
+    A delivery failure is swallowed — the deductions are already committed and must
+    not be rolled back by a messaging error.
+    """
+    if specialist.telegram_chat_id is None:  # pragma: no cover — candidates welcomed
+        return
+    text = render_consumption_report(report, specialist, messages)
+    markup = _consumption_keyboard(report, messages)
+    # Telling the specialist may itself fail (they blocked the bot); swallow it —
+    # the deductions are already committed and must not be rolled back.
     with suppress(TelegramForbiddenError, TelegramBadRequest):
         await bot.send_message(specialist.telegram_chat_id, text, reply_markup=markup)
 

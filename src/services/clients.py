@@ -4,6 +4,7 @@ import enum
 import logging
 import secrets
 
+from src.domain.audit import AuditEvent, AuditRepo
 from src.domain.client import (
     Client,
     ClientsRepo,
@@ -13,6 +14,7 @@ from src.domain.client import (
     normalize_phone,
     normalize_telegram,
 )
+from src.services.audit import record_action
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,9 @@ def _clean(value: str | None) -> str | None:
     return stripped or None
 
 
-async def add_client(repo: ClientsRepo, data: NewClient) -> Client:
+async def add_client(
+    repo: ClientsRepo, data: NewClient, *, audit: AuditRepo | None = None
+) -> Client:
     child = _clean(data.child_name)
     contact = _clean(data.contact_name)
     if child is None:
@@ -97,6 +101,13 @@ async def add_client(repo: ClientsRepo, data: NewClient) -> Client:
         "client.created",
         extra={"specialist_id": data.specialist_id, "client_id": saved.id},
     )
+    if audit is not None:
+        await record_action(
+            audit,
+            specialist_id=data.specialist_id,
+            event=AuditEvent.CLIENT_CREATED,
+            client_id=saved.id,
+        )
     return saved
 
 
@@ -147,7 +158,11 @@ async def edit_client_field(
 
 
 async def archive_client(
-    repo: ClientsRepo, *, client_id: int, specialist_id: int
+    repo: ClientsRepo,
+    *,
+    client_id: int,
+    specialist_id: int,
+    audit: AuditRepo | None = None,
 ) -> bool:
     now = datetime.now(UTC)
     client = await repo.set_status(
@@ -163,11 +178,22 @@ async def archive_client(
         "client.archived",
         extra={"specialist_id": specialist_id, "client_id": client_id},
     )
+    if audit is not None:
+        await record_action(
+            audit,
+            specialist_id=specialist_id,
+            event=AuditEvent.CLIENT_ARCHIVED,
+            client_id=client_id,
+        )
     return True
 
 
 async def restore_client(
-    repo: ClientsRepo, *, client_id: int, specialist_id: int
+    repo: ClientsRepo,
+    *,
+    client_id: int,
+    specialist_id: int,
+    audit: AuditRepo | None = None,
 ) -> bool:
     now = datetime.now(UTC)
     client = await repo.set_status(
@@ -183,6 +209,13 @@ async def restore_client(
         "client.restored",
         extra={"specialist_id": specialist_id, "client_id": client_id},
     )
+    if audit is not None:
+        await record_action(
+            audit,
+            specialist_id=specialist_id,
+            event=AuditEvent.CLIENT_RESTORED,
+            client_id=client_id,
+        )
     return True
 
 

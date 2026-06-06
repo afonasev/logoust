@@ -6,7 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import run_digest_pass, run_reminder_pass
+from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -87,6 +89,46 @@ async def test_pass_sends_to_due_client(
             _SP, [(client_id, starts_at)]
         )
     assert statuses
+
+
+async def _audit_messages(
+    factory: async_sessionmaker[AsyncSession],
+) -> list[tuple[AuditEvent, DeliveryStatus | None]]:
+    async with factory() as session:
+        rows = await SqlAlchemyAuditRepo(session).list_for_specialist(
+            _SP, limit=50, offset=0
+        )
+    return [(r.event, r.status) for r in rows if r.kind is AuditKind.MESSAGE]
+
+
+async def test_reminder_delivery_records_audit_message(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_reminder_pass(bot, session_factory, _messages(), _NOW)
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.REMINDER, DeliveryStatus.SENT)
+    ]
+
+
+async def test_reminder_failure_records_failed_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await run_reminder_pass(bot, session_factory, _messages(), _NOW)
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.REMINDER, DeliveryStatus.FAILED)
+    ]
 
 
 async def test_pass_skips_non_due_specialist(

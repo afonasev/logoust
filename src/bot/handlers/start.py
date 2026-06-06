@@ -3,13 +3,16 @@ import logging
 import re
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.client_audit import record_client_message
 from src.bot.deeplink import CLIENT_TOKEN_PREFIX
 from src.bot.handlers.clients import build_main_keyboard
 from src.bot.messages import BotMessages
+from src.domain.audit import AuditEvent, DeliveryStatus
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -116,7 +119,22 @@ async def _link_client_and_reply(
             key="linked",
             default=messages.clients.linked,
         )
-    await message.answer(text)
+    assert client.id is not None  # noqa: S101 — linked clients are persisted
+    status, error = DeliveryStatus.SENT, None
+    try:
+        await message.answer(text)
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
+        status, error = DeliveryStatus.FAILED, str(exc)
+    # The link confirmation is a client-facing message — journal it like the rest.
+    await record_client_message(
+        session_factory,
+        specialist_id=client.specialist_id,
+        client_id=client.id,
+        event=AuditEvent.WELCOME,
+        text=text,
+        status=status,
+        error=error,
+    )
 
 
 def make_start_handler(

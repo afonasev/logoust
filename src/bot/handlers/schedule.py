@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.client_audit import record_client_message
 from src.bot.handlers.clients import ClientsHandlers, SpecialistMiddleware
 from src.bot.messages import (
     BotMessages,
@@ -24,6 +25,7 @@ from src.bot.messages import (
 )
 from src.bot.navigation import Navigator
 from src.domain.appointment import Appointment
+from src.domain.audit import AuditEvent, DeliveryStatus
 from src.domain.client import Client
 from src.domain.recurring import RecurringAppointment, RecurringException
 from src.domain.reminder import ReminderStatus
@@ -43,6 +45,7 @@ from src.domain.schedule import (
 )
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
@@ -581,6 +584,15 @@ _NOTIFY_KEYS = {
     "x": "notify_cancelled",
 }
 
+# Event letter → audit event, shared by one-off and series notifications. A series
+# "modified" (m) is a schedule change, so it journals as rescheduled.
+_NOTIFY_AUDIT_EVENTS = {
+    "c": AuditEvent.NOTIFY_CREATED,
+    "r": AuditEvent.NOTIFY_RESCHEDULED,
+    "m": AuditEvent.NOTIFY_RESCHEDULED,
+    "x": AuditEvent.NOTIFY_CANCELLED,
+}
+
 
 def _series_notify_key(event: str) -> str:
     if event == "c":
@@ -700,19 +712,44 @@ async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     )
 
 
-async def _send_notify(
-    callback: CallbackQuery, chat_id: int, text: str, extra: dict[str, int]
+async def _send_notify(  # noqa: PLR0913
+    callback: CallbackQuery,
+    chat_id: int,
+    text: str,
+    extra: dict[str, int],
+    *,
+    event: str,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> bool:
-    # Shared delivery for one-off and series notify "Yes": send and report success.
-    # Failure (client blocked the bot / chat gone) is swallowed — the appointment
-    # operation stays applied; the caller shows the outcome.
+    # Shared delivery for one-off and series notify "Yes": send, journal the
+    # outcome, report success. Failure (client blocked the bot / chat gone) is
+    # swallowed — the appointment operation stays applied; the caller shows the
+    # outcome. The audit row is written either way (the "not delivered" fact too).
     assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+    audit_event = _NOTIFY_AUDIT_EVENTS[event]
     try:
         await callback.bot.send_message(chat_id, text)
-    except (TelegramForbiddenError, TelegramBadRequest):
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
         logger.warning("appointment.notify_failed", extra=extra)
+        await record_client_message(
+            session_factory,
+            specialist_id=extra["specialist_id"],
+            client_id=extra["client_id"],
+            event=audit_event,
+            text=text,
+            status=DeliveryStatus.FAILED,
+            error=str(exc),
+        )
         return False
     logger.info("appointment.notified", extra=extra)
+    await record_client_message(
+        session_factory,
+        specialist_id=extra["specialist_id"],
+        client_id=extra["client_id"],
+        event=audit_event,
+        text=text,
+        status=DeliveryStatus.SENT,
+    )
     return True
 
 
@@ -939,6 +976,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 comment=comment,
                 tz=specialist.timezone,
                 now=datetime.now(UTC),
+                audit=SqlAlchemyAuditRepo(session),
             )
         client = await self._load_client(specialist_id, data["client_id"])
         child = client.child_name if client is not None else self._m.dash
@@ -1030,6 +1068,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 hhmm=hhmm,
                 tz=specialist.timezone,
                 now=datetime.now(UTC),
+                audit=SqlAlchemyAuditRepo(session),
             )
         await state.clear()
         if moved is None:
@@ -1115,7 +1154,11 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             # time) can still be built afterwards (see design.md, decision 2).
             appt = await repo.get_for_specialist(appt_id, specialist_id)
             await delete_appointment(
-                repo, appointment_id=appt_id, specialist_id=specialist_id
+                repo,
+                appointment_id=appt_id,
+                specialist_id=specialist_id,
+                audit=SqlAlchemyAuditRepo(session),
+                client_id=appt.client_id if appt is not None else None,
             )
         target = _callback_message(callback)
         await _post_action(
@@ -1161,7 +1204,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         )
         text = _notify_text(template, starts_at, specialist.timezone)
         extra = {"specialist_id": specialist_id, "client_id": client_id}
-        sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
+        sent = await _send_notify(
+            callback,
+            client.telegram_chat_id,
+            text,
+            extra,
+            event=event,
+            session_factory=self._session_factory,
+        )
         await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
         await callback.answer()
 
@@ -1180,7 +1230,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         )
         text = _series_notify_text(template, weekday, hhmm)
         extra = {"specialist_id": specialist_id, "client_id": client_id}
-        sent = await _send_notify(callback, client.telegram_chat_id, text, extra)
+        sent = await _send_notify(
+            callback,
+            client.telegram_chat_id,
+            text,
+            extra,
+            event=event,
+            session_factory=self._session_factory,
+        )
         await message.edit_text(self._m.notify_sent if sent else self._m.notify_failed)
         await callback.answer()
 

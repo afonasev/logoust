@@ -32,6 +32,7 @@ from src.domain.reminder import ReminderStatus
 from src.domain.schedule import format_ru_short, utc_to_wall
 from src.domain.subscription import Subscription
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
@@ -107,7 +108,7 @@ class EditClient(StatesGroup):
 
 def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
     """Постоянная клавиатура специалиста: клиенты, расписание, окна, абонементы,
-    настройки."""
+    аудит, настройки."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -117,6 +118,7 @@ def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text=messages.subscriptions.button),
+                KeyboardButton(text=messages.audit.button),
                 KeyboardButton(text=messages.settings.button),
             ],
         ],
@@ -814,6 +816,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 SqlAlchemyClientsRepo(session),
                 client_id=client_id,
                 specialist_id=specialist_id,
+                audit=SqlAlchemyAuditRepo(session),
             )
         await self._open_card(callback, specialist_id, client_id)
 
@@ -824,6 +827,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 SqlAlchemyClientsRepo(session),
                 client_id=client_id,
                 specialist_id=specialist_id,
+                audit=SqlAlchemyAuditRepo(session),
             )
         await self._open_card(callback, specialist_id, client_id)
 
@@ -899,6 +903,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                         contact_phone=data.get("contact_phone"),
                         contact_telegram=data.get("contact_telegram"),
                     ),
+                    audit=SqlAlchemyAuditRepo(session),
                 )
         except ClientValidationError:
             # Only NO_CONTACT_CHANNEL is reachable here — required fields were

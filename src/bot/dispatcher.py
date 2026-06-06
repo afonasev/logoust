@@ -1,6 +1,7 @@
 from aiogram import Dispatcher
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.handlers.audit import build_router as build_audit_router
 from src.bot.handlers.clients import build_router as build_clients_router
 from src.bot.handlers.reminders import build_router as build_reminders_router
 from src.bot.handlers.schedule import build_router as build_schedule_router
@@ -27,5 +28,6 @@ def build_dispatcher(
     dp.include_router(build_settings_router(messages, session_factory))
     dp.include_router(build_subscriptions_router(messages, session_factory))
     dp.include_router(build_windows_router(messages, session_factory))
+    dp.include_router(build_audit_router(messages, session_factory))
     dp.include_router(build_start_router(messages, session_factory))
     return dp

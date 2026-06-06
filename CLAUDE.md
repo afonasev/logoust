@@ -48,6 +48,7 @@ We are developing a smart assistant for the Logoust speech therapy office. Our g
 File-type-specific rules in `.claude/rules/` load automatically (via `globs:` frontmatter) when editing matching files and must be followed:
 
 - `python.md` — backend conventions (SQLAlchemy 2.0, async sessions, testing pitfalls, Ruff gotchas).
+- `bot.md` — aiogram layer conventions; in particular, every client-facing message MUST be journalled via the `client_audit` funnel.
 - `docs.md` — when and how to update `README.md` and `docs/`.
 - `openspec.md` — when and how to update `openspec/specs/`.
 

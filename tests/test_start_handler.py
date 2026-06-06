@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from unittest.mock import AsyncMock
 
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import CommandObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -12,7 +13,9 @@ from src.bot.handlers.start import (
     make_token_handler,
 )
 from src.bot.messages import BotMessages
+from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.client import ClientStatus
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client, create_client_invite
@@ -250,6 +253,37 @@ async def test_start_links_client_on_cli_token(
     msg = _fake_message()
     await handler(msg, _cmd(f"cli_{token}"))
     msg.answer.assert_awaited_once_with(messages.clients.linked)
+
+
+async def test_link_confirmation_records_message_sent(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    token = await _client_token(session)
+    handler = make_start_handler(messages, session_factory)
+    await handler(_fake_message(), _cmd(f"cli_{token}"))
+    async with session_factory() as s:
+        rows = await SqlAlchemyAuditRepo(s).list_for_specialist(1, limit=10, offset=0)
+    assert [(r.kind, r.event, r.status) for r in rows] == [
+        (AuditKind.MESSAGE, AuditEvent.WELCOME, DeliveryStatus.SENT)
+    ]
+
+
+async def test_link_confirmation_delivery_failure_records_failed(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    token = await _client_token(session)
+    handler = make_start_handler(messages, session_factory)
+    msg = _fake_message()
+    msg.answer.side_effect = TelegramForbiddenError(method=None, message="blocked")  # type: ignore[arg-type]
+    await handler(msg, _cmd(f"cli_{token}"))  # the failure must not propagate
+    async with session_factory() as s:
+        rows = await SqlAlchemyAuditRepo(s).list_for_specialist(1, limit=10, offset=0)
+    assert rows[0].status is DeliveryStatus.FAILED
+    assert rows[0].error
 
 
 async def test_start_unknown_cli_token(

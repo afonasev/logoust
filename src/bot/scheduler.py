@@ -13,8 +13,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.client_audit import record_client_message
 from src.bot.handlers.reminders import build_reminder_keyboard
 from src.bot.messages import BotMessages
+from src.domain.audit import AuditEvent, DeliveryStatus
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
@@ -66,7 +68,7 @@ async def run_reminder_pass(
                 messages=ReminderMessages(client_text=client_text),
             )
         for item in to_send:
-            await _deliver(bot, messages, item)
+            await _deliver(bot, messages, item, session_factory)
 
 
 async def run_digest_pass(
@@ -102,7 +104,12 @@ async def run_digest_pass(
                 )
 
 
-async def _deliver(bot: Bot, messages: BotMessages, item: ReminderToSend) -> None:
+async def _deliver(
+    bot: Bot,
+    messages: BotMessages,
+    item: ReminderToSend,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     extra = {"specialist_id": item.specialist_id, "client_id": item.client_id}
     try:
         await bot.send_message(
@@ -110,9 +117,26 @@ async def _deliver(bot: Bot, messages: BotMessages, item: ReminderToSend) -> Non
             item.text,
             reply_markup=build_reminder_keyboard(item.reminder_id, messages.reminder),
         )
-    except (TelegramForbiddenError, TelegramBadRequest):
+    except (TelegramForbiddenError, TelegramBadRequest) as exc:
         # Client blocked the bot / chat unavailable: the journal row already exists
         # so we never retry-loop; the day stays marked done.
         logger.warning("appointment.reminder_failed", extra=extra)
+        await record_client_message(
+            session_factory,
+            specialist_id=item.specialist_id,
+            client_id=item.client_id,
+            event=AuditEvent.REMINDER,
+            text=item.text,
+            status=DeliveryStatus.FAILED,
+            error=str(exc),
+        )
         return
     logger.info("appointment.reminder_sent", extra=extra)
+    await record_client_message(
+        session_factory,
+        specialist_id=item.specialist_id,
+        client_id=item.client_id,
+        event=AuditEvent.REMINDER,
+        text=item.text,
+        status=DeliveryStatus.SENT,
+    )

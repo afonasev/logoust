@@ -19,9 +19,11 @@ from src.bot.handlers.schedule import (
 )
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
+from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.domain.schedule import format_ru_date, today_in_tz, utc_to_wall, wall_to_utc
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
@@ -1268,6 +1270,59 @@ async def test_notify_series_failed_on_forbidden(
     )
     await h.notify_series(cb, _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
+
+
+async def _audit_messages(
+    factory: async_sessionmaker[AsyncSession],
+) -> list[tuple[AuditEvent, DeliveryStatus | None]]:
+    async with factory() as session:
+        rows = await SqlAlchemyAuditRepo(session).list_for_specialist(
+            _SP, limit=50, offset=0
+        )
+    return [(r.event, r.status) for r in rows if r.kind is AuditKind.MESSAGE]
+
+
+async def test_notify_records_audit_message(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_notify_callback("r", client_id, _FUTURE))
+    await h.notify(cb, _SP)
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.NOTIFY_RESCHEDULED, DeliveryStatus.SENT)
+    ]
+
+
+async def test_notify_series_records_audit_message(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # The reported gap: rescheduling a *regular* record (event "m") must be audited.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_series_notify_callback("m", client_id, 3, "14:00"))
+    await h.notify_series(cb, _SP)
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.NOTIFY_RESCHEDULED, DeliveryStatus.SENT)
+    ]
+
+
+async def test_notify_series_failure_records_failed_audit(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(_series_notify_callback("x", client_id, 3, "14:00"))
+    cb.bot.send_message.side_effect = TelegramForbiddenError(
+        method=None,  # type: ignore[arg-type]
+        message="blocked",
+    )
+    await h.notify_series(cb, _SP)
+    rows = await _audit_messages(session_factory)
+    assert rows == [(AuditEvent.NOTIFY_CANCELLED, DeliveryStatus.FAILED)]
 
 
 # --- auto-return after irreversible actions -----------------------------------

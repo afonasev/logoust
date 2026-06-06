@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 import logging
 
 from src.domain.appointment import Appointment, AppointmentsRepo
+from src.domain.audit import AuditEvent, AuditRepo
 from src.domain.schedule import (
     day_start_utc,
     generate_slots,
@@ -14,6 +15,7 @@ from src.domain.schedule import (
     wall_to_utc,
 )
 from src.domain.specialist import Specialist
+from src.services.audit import record_action
 from src.services.recurring import (
     SeriesContext,
     nearest_series_landing_day,
@@ -143,6 +145,7 @@ async def create_appointment(  # noqa: PLR0913
     comment: str | None,
     tz: str,
     now: datetime,
+    audit: AuditRepo | None = None,
 ) -> Appointment:
     _ensure_not_past(day, tz, now)
     starts_at = wall_to_utc(day, hhmm, tz)
@@ -165,6 +168,13 @@ async def create_appointment(  # noqa: PLR0913
             "appointment_id": saved.id,
         },
     )
+    if audit is not None:
+        await record_action(
+            audit,
+            specialist_id=specialist_id,
+            event=AuditEvent.APPT_CREATED,
+            client_id=client_id,
+        )
     return saved
 
 
@@ -177,6 +187,7 @@ async def reschedule_appointment(  # noqa: PLR0913
     hhmm: str,
     tz: str,
     now: datetime,
+    audit: AuditRepo | None = None,
 ) -> Appointment | None:
     _ensure_not_past(day, tz, now)
     starts_at = wall_to_utc(day, hhmm, tz)
@@ -192,11 +203,23 @@ async def reschedule_appointment(  # noqa: PLR0913
         "appointment.rescheduled",
         extra={"specialist_id": specialist_id, "appointment_id": appointment_id},
     )
+    if audit is not None:
+        await record_action(
+            audit,
+            specialist_id=specialist_id,
+            event=AuditEvent.APPT_RESCHEDULED,
+            client_id=moved.client_id,
+        )
     return moved
 
 
 async def delete_appointment(
-    repo: AppointmentsRepo, *, appointment_id: int, specialist_id: int
+    repo: AppointmentsRepo,
+    *,
+    appointment_id: int,
+    specialist_id: int,
+    audit: AuditRepo | None = None,
+    client_id: int | None = None,
 ) -> bool:
     deleted = await repo.delete(appointment_id, specialist_id)
     if deleted:
@@ -204,6 +227,15 @@ async def delete_appointment(
             "appointment.deleted",
             extra={"specialist_id": specialist_id, "appointment_id": appointment_id},
         )
+        if audit is not None:
+            # client_id is read by the caller before the row is gone (delete returns
+            # only a bool), so the action row can still carry the affected client.
+            await record_action(
+                audit,
+                specialist_id=specialist_id,
+                event=AuditEvent.APPT_DELETED,
+                client_id=client_id,
+            )
     return deleted
 
 

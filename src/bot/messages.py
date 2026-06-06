@@ -265,6 +265,23 @@ class TemplatesMessages:
 
 
 @dataclass(frozen=True, slots=True)
+class AuditMessages:
+    button: str
+    title: str
+    empty: str
+    line_message: str
+    line_action: str
+    client_suffix: str
+    status_sent: str
+    status_failed: str
+    action_icon: str
+    btn_prev: str
+    btn_next: str
+    # Keyed by AuditEvent slug — display label for each journalled event.
+    events: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
 class BotMessages:
     start: StartMessages
     clients: ClientsMessages
@@ -276,6 +293,7 @@ class BotMessages:
     subscriptions: SubscriptionsMessages
     windows: WindowsMessages
     templates: TemplatesMessages
+    audit: AuditMessages
 
 
 def _require(data: dict[str, Any], path: str) -> Any:
@@ -530,6 +548,20 @@ def load_messages(path: Path) -> BotMessages:
             err_missing=_require(data, "templates.err_missing"),
             labels=_require(data, "templates.labels"),
             defaults=_require(data, "templates.defaults"),
+        ),
+        audit=AuditMessages(
+            button=_require(data, "audit.button"),
+            title=_require(data, "audit.title"),
+            empty=_require(data, "audit.empty"),
+            line_message=_require(data, "audit.line_message"),
+            line_action=_require(data, "audit.line_action"),
+            client_suffix=_require(data, "audit.client_suffix"),
+            status_sent=_require(data, "audit.status_sent"),
+            status_failed=_require(data, "audit.status_failed"),
+            action_icon=_require(data, "audit.action_icon"),
+            btn_prev=_require(data, "audit.btn_prev"),
+            btn_next=_require(data, "audit.btn_next"),
+            events=_require(data, "audit.events"),
         ),
     )
 

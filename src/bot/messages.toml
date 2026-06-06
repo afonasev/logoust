@@ -323,3 +323,32 @@ linked = "Подтверждение привязки"
 payment_reminder = """
 Здравствуйте! Ваш абонемент подходит к концу. Пожалуйста, продлите его, чтобы продолжить занятия.
 """
+
+[audit]
+button = "📜 Аудит"
+title = "📜 Журнал событий:"
+empty = "Журнал событий пуст."
+# message-строка: иконка статуса доставки + время + событие + клиент, текст на
+# отдельной строке. action-строка: иконка действия + время + событие + клиент.
+line_message = "{icon} {when} · {event}{client}\n{text}"  # noqa: RUF001
+line_action = "{icon} {when} · {event}{client}"  # noqa: RUF001
+client_suffix = " · {child}"  # noqa: RUF001
+status_sent = "✅"
+status_failed = "⚠️"
+action_icon = "📌"
+btn_prev = "◀ позже"
+btn_next = "раньше ▶"
+
+[audit.events]
+# Подписи журналируемых событий (ключ = slug из domain.audit.AuditEvent).
+notify_created = "Уведомление: запись создана"
+notify_rescheduled = "Уведомление: запись перенесена"
+notify_cancelled = "Уведомление: запись отменена"
+welcome = "Приветствие отправлено"
+reminder = "Напоминание о записи"
+client_created = "Клиент добавлен"
+client_archived = "Клиент в архиве"
+client_restored = "Клиент восстановлен"
+appt_created = "Запись создана"
+appt_rescheduled = "Запись перенесена"
+appt_deleted = "Запись удалена"

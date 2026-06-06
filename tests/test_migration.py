@@ -522,6 +522,43 @@ def test_morning_digest_migration_adds_columns_and_backfills(
     engine.dispose()
 
 
+def test_audit_log_migration_creates_table_and_index(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(sync_url, poolclass=NullPool)
+    insp = inspect(engine)
+    assert "audit_log" in insp.get_table_names()
+    columns = {c["name"] for c in insp.get_columns("audit_log")}
+    assert columns == {
+        "id",
+        "specialist_id",
+        "created_at",
+        "kind",
+        "event",
+        "client_id",
+        "text",
+        "status",
+        "error",
+    }
+    index_names = {i["name"] for i in insp.get_indexes("audit_log")}
+    assert "ix_audit_specialist_created" in index_names
+
+    command.downgrade(cfg, "0011")
+    insp = inspect(engine)
+    assert "audit_log" not in insp.get_table_names()
+    engine.dispose()
+
+
 def test_working_days_migration_adds_column_and_backfills(
     alembic_config: tuple[Config, str],
     monkeypatch,

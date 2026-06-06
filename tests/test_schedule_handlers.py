@@ -6,8 +6,10 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.schedule import (
+    RecurringHandlers,
     Schedule,
     ScheduleHandlers,
+    _build_navigator,
     _notify_callback,
     _parse_notify,
     _series_notify_callback,
@@ -176,7 +178,10 @@ async def _seed_appt(
 def _handlers(
     messages: BotMessages, factory: async_sessionmaker[AsyncSession]
 ) -> ScheduleHandlers:
-    return ScheduleHandlers(messages, factory)
+    h = ScheduleHandlers(messages, factory)
+    r = RecurringHandlers(messages, factory)
+    h.set_navigator(_build_navigator(messages, factory, h, r))
+    return h
 
 
 # --- pure builders ------------------------------------------------------------
@@ -584,9 +589,11 @@ async def test_confirm_then_do_delete(
 
     del_cb = _fake_callback(f"sched:delyes:{appt.id}~{back}")
     await h.do_delete(del_cb, _SP)
+    # The stale card becomes the standalone "deleted" result (buttons dropped)...
     assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
-    # After deletion the back button returns to the card's origin, not the feed.
-    assert _callbacks(_markup(del_cb.message.edit_text)) == [back]
+    # ...and the origin (client card) re-opens as a fresh message — no dead-end.
+    card_cbs = _callbacks(_markup(del_cb.message.answer))
+    assert f"clients:edit:{client_id}" in card_cbs
     async with session_factory() as session:
         assert appt.id is not None
         assert (
@@ -1072,7 +1079,9 @@ async def test_delete_does_not_ask_for_unlinked_client(
     h = _handlers(messages, session_factory)
     del_cb = _fake_callback(f"sched:delyes:{appt.id}~")
     await h.do_delete(del_cb, _SP)
-    del_cb.message.answer.assert_not_awaited()
+    # Only the auto-return menu is sent — no separate notify prompt for an
+    # unlinked client.
+    del_cb.message.answer.assert_awaited_once()
 
 
 async def test_delete_missing_appointment_does_not_ask(
@@ -1082,7 +1091,9 @@ async def test_delete_missing_appointment_does_not_ask(
     h = _handlers(messages, session_factory)
     del_cb = _fake_callback("sched:delyes:999~")
     await h.do_delete(del_cb, _SP)
-    del_cb.message.answer.assert_not_awaited()
+    # Idempotent delete of a gone appointment still auto-returns, but never asks
+    # to notify (no appointment to describe).
+    del_cb.message.answer.assert_awaited_once()
 
 
 async def test_notify_sends_text_for_each_event(
@@ -1257,3 +1268,31 @@ async def test_notify_series_failed_on_forbidden(
     )
     await h.notify_series(cb, _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_failed
+
+
+# --- auto-return after irreversible actions -----------------------------------
+
+
+async def test_delete_from_day_returns_to_same_day(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    day = utc_to_wall(_FUTURE, _TZ).date()
+    del_cb = _fake_callback(f"sched:delyes:{appt.id}~sched:day_view:{day.isoformat()}")
+    await h.do_delete(del_cb, _SP)
+    assert _texts(del_cb.message.edit_text)[0] == messages.schedule.deleted
+    # The same day re-opens as the freshest screen (no dead-end "Back").
+    assert format_ru_date(day) in _texts(del_cb.message.answer)[0]
+
+
+async def test_nav_client_history_renders_history(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    text, _ = await h.nav_client_history(_SP, f"sched:chist:{client_id}:0")
+    assert text == messages.schedule.client_history_empty

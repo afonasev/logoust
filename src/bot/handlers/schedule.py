@@ -15,13 +15,14 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.handlers.clients import SpecialistMiddleware
+from src.bot.handlers.clients import ClientsHandlers, SpecialistMiddleware
 from src.bot.messages import (
     BotMessages,
     RecurringMessages,
     ReminderMessages,
     ScheduleMessages,
 )
+from src.bot.navigation import Navigator
 from src.domain.appointment import Appointment
 from src.domain.client import Client
 from src.domain.recurring import RecurringAppointment, RecurringException
@@ -500,16 +501,25 @@ def _delete_confirm_keyboard(
     )
 
 
-def _deleted_keyboard(
-    m: ScheduleMessages, back: str | None = None
-) -> InlineKeyboardMarkup:
-    # With a contextual `back`, go back to where the card was opened from;
-    # otherwise (recurring stop/skip/cancel) fall back to today's feed.
-    if back:
-        button = InlineKeyboardButton(text=_BTN_BACK, callback_data=back)
-    else:
-        button = InlineKeyboardButton(text=m.btn_today, callback_data=_CB_FEED)
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+async def _post_action(  # noqa: PLR0913
+    navigator: Navigator | None,
+    message: Message,
+    *,
+    result_text: str,
+    back: str,
+    specialist_id: int,
+    edit: bool,
+) -> None:
+    # Thin module-level shim so both handler aggregators share one call site for the
+    # post-action contract. The navigator is wired in build_router before any update.
+    assert navigator is not None  # noqa: S101
+    await navigator.open_after_action(
+        message,
+        result_text=result_text,
+        back=back,
+        specialist_id=specialist_id,
+        edit=edit,
+    )
 
 
 def _cancel_keyboard() -> InlineKeyboardMarkup:
@@ -683,6 +693,11 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         self._rm = messages.recurring
         self._rem = messages.reminder
         self._session_factory = session_factory
+        # Set in build_router once every router's view builders exist.
+        self._navigator: Navigator | None = None
+
+    def set_navigator(self, navigator: Navigator) -> None:
+        self._navigator = navigator
 
     async def _load_settings(self, specialist_id: int) -> Specialist:
         async with self._session_factory() as session:
@@ -704,6 +719,27 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             return await SqlAlchemyClientsRepo(session).get_for_specialist(
                 client_id, specialist_id
             )
+
+    # --- navigation builders (re-open a target from another router) -----------
+
+    async def nav_day(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        # Serves "sched:day_view:<iso>", "sched:feed", and the unknown-target
+        # fallback (anything that is not a concrete day → today's landing day).
+        if back.startswith("sched:day_view:"):
+            day: date | None = date.fromisoformat(back.rsplit(":", 1)[1])
+        else:
+            day = None
+        return await self._day_view(specialist_id, day)
+
+    async def nav_client_history(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        _, _, raw_client, raw_page = back.split(":")
+        return await self._client_history_view(
+            specialist_id, int(raw_client), int(raw_page)
+        )
 
     # --- picker entry & navigation -------------------------------------------
 
@@ -1025,8 +1061,13 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 repo, appointment_id=appt_id, specialist_id=specialist_id
             )
         target = _callback_message(callback)
-        await target.edit_text(
-            self._m.deleted, reply_markup=_deleted_keyboard(self._m, back or None)
+        await _post_action(
+            self._navigator,
+            target,
+            result_text=self._m.deleted,
+            back=back,
+            specialist_id=specialist_id,
+            edit=True,
         )
         if appt is not None:
             specialist = await self._load_settings(specialist_id)
@@ -1229,11 +1270,9 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
 
     # --- client history -------------------------------------------------------
 
-    async def show_client_history(
-        self, callback: CallbackQuery, specialist_id: int
-    ) -> None:
-        _, _, raw_client, raw_page = (callback.data or "").split(":")
-        client_id, page = int(raw_client), int(raw_page)
+    async def _client_history_view(
+        self, specialist_id: int, client_id: int, page: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
         specialist = await self._load_settings(specialist_id)
         tz = specialist.timezone
         async with self._session_factory() as session:
@@ -1259,7 +1298,15 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                     *lines,
                 ]
             )
-        keyboard = _client_history_keyboard(client_id, page_obj)
+        return text, _client_history_keyboard(client_id, page_obj)
+
+    async def show_client_history(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        _, _, raw_client, raw_page = (callback.data or "").split(":")
+        text, keyboard = await self._client_history_view(
+            specialist_id, int(raw_client), int(raw_page)
+        )
         await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
@@ -1451,6 +1498,11 @@ class RecurringHandlers:
         self._sm = messages.schedule
         self._rem = messages.reminder
         self._session_factory = session_factory
+        # Set in build_router once every router's view builders exist.
+        self._navigator: Navigator | None = None
+
+    def set_navigator(self, navigator: Navigator) -> None:
+        self._navigator = navigator
 
     async def _load_settings(self, specialist_id: int) -> Specialist:
         async with self._session_factory() as session:
@@ -1587,7 +1639,7 @@ class RecurringHandlers:
         raw = (callback.data or "").rsplit(":", 1)[1]
         hhmm = f"{raw[:2]}:{raw[2:]}"
         await self._proceed_time(
-            _callback_message(callback), state, specialist_id, hhmm
+            _callback_message(callback), state, specialist_id, hhmm, edit=True
         )
         await callback.answer()
 
@@ -1607,14 +1659,22 @@ class RecurringHandlers:
                 self._m.bad_time, reply_markup=_recur_cancel_keyboard()
             )
             return
-        await self._proceed_time(message, state, specialist_id, hhmm)
+        # A typed time arrives on the user's own message, which the bot cannot edit,
+        # so the move result is sent as a new message (edit=False).
+        await self._proceed_time(message, state, specialist_id, hhmm, edit=False)
 
     async def _proceed_time(
-        self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        hhmm: str,
+        *,
+        edit: bool,
     ) -> None:
         data = await state.get_data()
         if data.get("flow") == "move":
-            await self._do_move(target, state, specialist_id, hhmm)
+            await self._do_move(target, state, specialist_id, hhmm, edit=edit)
             return
         await state.update_data(hhmm=hhmm)
         await state.set_state(Recurring.comment)
@@ -1670,7 +1730,13 @@ class RecurringHandlers:
         )
 
     async def _do_move(
-        self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        hhmm: str,
+        *,
+        edit: bool,
     ) -> None:
         data = await state.get_data()
         origin_date = date.fromisoformat(data["origin_date"])  # the date being moved
@@ -1692,8 +1758,13 @@ class RecurringHandlers:
         if moved is None:
             await target.answer(self._m.not_found)
             return
-        await target.answer(
-            self._m.moved, reply_markup=_deleted_keyboard(self._sm, card or None)
+        await _post_action(
+            self._navigator,
+            target,
+            result_text=self._m.moved,
+            back=card,
+            specialist_id=specialist_id,
+            edit=edit,
         )
         # Moving a single date → notify about that one occurrence (concrete date).
         series = await self._load_series(data["series_id"], specialist_id)
@@ -1714,15 +1785,16 @@ class RecurringHandlers:
             ).list_for_series(series_id)
         return next((e for e in exceptions if e.original_date == origin_date), None)
 
-    async def show_card(self, callback: CallbackQuery, specialist_id: int) -> None:
-        head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
-        series = await self._load_series(series_id, specialist_id)
-        if series is None:
-            await callback.answer(self._m.not_found, show_alert=True)
-            return
+    async def _render_series_card(
+        self,
+        specialist_id: int,
+        series: RecurringAppointment,
+        origin_date: date,
+        back: str,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        assert series.id is not None  # noqa: S101 — loaded series always have an id
         specialist = await self._load_settings(specialist_id)
-        exception = await self._load_exception(series_id, origin_date)
+        exception = await self._load_exception(series.id, origin_date)
         back = back or f"sched:day_view:{origin_date.isoformat()}"
         child = await self._child_name(specialist_id, series.client_id)
         tz = specialist.timezone
@@ -1743,10 +1815,29 @@ class RecurringHandlers:
             )
         if status is ReminderStatus.CONFIRMED:
             text = f"{text}\n{self._rem.card_confirmed}"
-        await _callback_message(callback).edit_text(
-            text,
-            reply_markup=_series_card_keyboard(series_id, origin_date, self._m, back),
+        return text, _series_card_keyboard(series.id, origin_date, self._m, back)
+
+    async def nav_series_card(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        head, inner = _split_back(back)
+        series_id, origin_date = _parse_series_date(head)
+        series = await self._load_series(series_id, specialist_id)
+        # Navigation only targets a series we just acted on, so it still exists.
+        assert series is not None  # noqa: S101
+        return await self._render_series_card(specialist_id, series, origin_date, inner)
+
+    async def show_card(self, callback: CallbackQuery, specialist_id: int) -> None:
+        head, back = _split_back(callback.data)
+        series_id, origin_date = _parse_series_date(head)
+        series = await self._load_series(series_id, specialist_id)
+        if series is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        text, keyboard = await self._render_series_card(
+            specialist_id, series, origin_date, back
         )
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
     async def _send_series_card(
@@ -1806,8 +1897,13 @@ class RecurringHandlers:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         target = _callback_message(callback)
-        await target.edit_text(
-            self._m.stopped, reply_markup=_deleted_keyboard(self._sm, back or None)
+        await _post_action(
+            self._navigator,
+            target,
+            result_text=self._m.stopped,
+            back=back,
+            specialist_id=specialist_id,
+            edit=True,
         )
         # Stopping the whole series → notify with the series ("cancelled") text.
         client = await self._load_client(specialist_id, stopped.client_id)
@@ -1847,8 +1943,13 @@ class RecurringHandlers:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         target = _callback_message(callback)
-        await target.edit_text(
-            self._m.skipped, reply_markup=_deleted_keyboard(self._sm, back or None)
+        await _post_action(
+            self._navigator,
+            target,
+            result_text=self._m.skipped,
+            back=back,
+            specialist_id=specialist_id,
+            edit=True,
         )
         # Cancelling a single date → notify about that one occurrence (rule time).
         specialist = await self._load_settings(specialist_id)
@@ -1859,12 +1960,19 @@ class RecurringHandlers:
         await _ask_notify(target, "x", client, starts_at, specialist.timezone, self._sm)
         await callback.answer()
 
-    async def cancel(self, callback: CallbackQuery, state: FSMContext) -> None:
+    async def cancel(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         data = await state.get_data()
         card = data.get("card") or ""  # the series card this flow started from
         await state.clear()
-        await _callback_message(callback).edit_text(
-            self._m.cancelled, reply_markup=_deleted_keyboard(self._sm, card or None)
+        await _post_action(
+            self._navigator,
+            _callback_message(callback),
+            result_text=self._m.cancelled,
+            back=card,
+            specialist_id=specialist_id,
+            edit=True,
         )
         await callback.answer()
 
@@ -1877,12 +1985,32 @@ def _recur_cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _register_recurring(
-    router: Router,
+def _build_navigator(
     messages: BotMessages,
     session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    r = RecurringHandlers(messages, session_factory)
+    h: ScheduleHandlers,
+    r: RecurringHandlers,
+) -> Navigator:
+    # The clients router owns the client-side targets; reuse its builders here so an
+    # appointment action can re-open a client card without a cross-handler import
+    # cycle (clients never imports schedule).
+    ch = ClientsHandlers(messages, session_factory)
+    return Navigator(
+        builders={
+            _CB_FEED: h.nav_day,
+            "sched:day_view:": h.nav_day,
+            "sched:chist:": h.nav_client_history,
+            "recur:card:": r.nav_series_card,
+            "clients:card:": ch.nav_card,
+            "clients:active:": ch.nav_active,
+            "clients:arch:": ch.nav_archive,
+        },
+        # Unknown/empty target → today's schedule (preserves the old fallback).
+        fallback=h.nav_day,
+    )
+
+
+def _register_recurring(router: Router, r: RecurringHandlers) -> None:
     router.message.register(r.apply_custom_time, Recurring.custom_time)
     router.message.register(r.apply_comment, Recurring.comment)
 
@@ -1911,7 +2039,11 @@ def build_router(
     router.callback_query.middleware(SpecialistMiddleware(session_factory))
 
     h = ScheduleHandlers(messages, session_factory)
-    _register_recurring(router, messages, session_factory)
+    r = RecurringHandlers(messages, session_factory)
+    navigator = _build_navigator(messages, session_factory, h, r)
+    h.set_navigator(navigator)
+    r.set_navigator(navigator)
+    _register_recurring(router, r)
 
     router.message.register(h.show_feed, F.text == messages.schedule.button)
     router.message.register(h.apply_custom_time, Schedule.custom_time)

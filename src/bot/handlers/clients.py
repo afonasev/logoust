@@ -637,8 +637,9 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
 
     # --- listing & card -------------------------------------------------------
 
-    async def show_archive(self, callback: CallbackQuery, specialist_id: int) -> None:
-        page_num = _parse_page(callback.data)
+    async def _archive_view(
+        self, specialist_id: int, page_num: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
         async with self._session_factory() as session:
             page = await list_archived_page(
                 SqlAlchemyClientsRepo(session),
@@ -650,9 +651,13 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             text = self._m.empty_archived
         else:
             text = self._m.archive_title.format(page=page_num + 1)
-        await _callback_message(callback).edit_text(
-            text, reply_markup=_archive_keyboard(page)
+        return text, _archive_keyboard(page)
+
+    async def show_archive(self, callback: CallbackQuery, specialist_id: int) -> None:
+        text, keyboard = await self._archive_view(
+            specialist_id, _parse_page(callback.data)
         )
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer()
 
     async def show_card(self, callback: CallbackQuery, specialist_id: int) -> None:
@@ -735,6 +740,37 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             subscription=subscription,
         )
         return text, keyboard
+
+    async def _card_view_by_id(
+        self, specialist_id: int, client_id: int, back: str | None
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        async with self._session_factory() as session:
+            client = await SqlAlchemyClientsRepo(session).get_for_specialist(
+                client_id, specialist_id
+            )
+        # Navigation only ever targets a client we just acted on, so it still exists.
+        assert client is not None  # noqa: S101
+        return await self._card_view(client, specialist_id, back)
+
+    # --- navigation builders (re-open a target from another router) -----------
+
+    async def nav_card(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        head, _, inner = back.partition("~")
+        return await self._card_view_by_id(
+            specialist_id, int(head.rsplit(":", 1)[1]), inner or None
+        )
+
+    async def nav_active(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        return await self._active_view(specialist_id, _parse_page(back))
+
+    async def nav_archive(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        return await self._archive_view(specialist_id, _parse_page(back))
 
     # --- invite to bot --------------------------------------------------------
 

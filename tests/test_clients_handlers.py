@@ -1004,3 +1004,43 @@ def _user(user_id: int) -> AsyncMock:
     user = AsyncMock()
     user.id = user_id
     return user
+
+
+# --- navigation builders (re-open a target from another router) ---------------
+
+
+async def test_nav_active_renders_active_list(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    text, keyboard = await h.nav_active(_SPECIALIST_ID, "clients:active:0")
+    assert text == messages.clients.list_active_title
+    assert client.child_name in _button_texts(keyboard)
+
+
+async def test_nav_archive_renders_archive_list(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _seed_client(session_factory, status=ClientStatus.ARCHIVED)
+    h = _handlers(messages, session_factory)
+    text, _ = await h.nav_archive(_SPECIALIST_ID, "clients:arch:0")
+    assert text == messages.clients.archive_title.format(page=1)
+
+
+async def test_nav_card_parses_id_and_renders_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory)
+    h = _handlers(messages, session_factory)
+    text, keyboard = await h.nav_card(
+        _SPECIALIST_ID, f"clients:card:{client.id}~clients:active:0"
+    )
+    assert client.child_name in text
+    # The card's own Back honours the inner target threaded through the prefix.
+    assert "clients:active:0" in [
+        b.callback_data for row in keyboard.inline_keyboard for b in row
+    ]

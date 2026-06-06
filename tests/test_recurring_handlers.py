@@ -8,6 +8,7 @@ from src.bot.handlers.clients import ClientsHandlers, SpecialistMiddleware
 from src.bot.handlers.schedule import (
     RecurringHandlers,
     ScheduleHandlers,
+    _build_navigator,
 )
 from src.bot.messages import BotMessages
 from src.domain.recurring import RecurringAppointment
@@ -179,7 +180,10 @@ async def _seed_series(  # noqa: PLR0913
 def _recur(
     messages: BotMessages, factory: async_sessionmaker[AsyncSession]
 ) -> RecurringHandlers:
-    return RecurringHandlers(messages, factory)
+    h = ScheduleHandlers(messages, factory)
+    r = RecurringHandlers(messages, factory)
+    r.set_navigator(_build_navigator(messages, factory, h, r))
+    return r
 
 
 async def _load_series(
@@ -515,7 +519,9 @@ async def test_move_flow_creates_moved_exception(
     await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
     do = _fake_callback("recur:slot:1600")
     await h.pick_slot(do, state, _SP)
-    assert messages.recurring.moved in _texts(do.message.answer)
+    # The slots picker becomes the standalone "moved" result; the series card
+    # re-opens as a fresh message below it.
+    assert messages.recurring.moved in _texts(do.message.edit_text)
     async with session_factory() as session:
         exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
             series_id
@@ -570,10 +576,11 @@ async def test_move_reports_not_found_for_foreign_series(
 async def test_cancel_clears_state(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _recur(messages, session_factory)
     state = _state({"flow": "create"})
     cb = _fake_callback("recur:cancel")
-    await h.cancel(cb, state)
+    await h.cancel(cb, state, _SP)
     assert messages.recurring.cancelled in _texts(cb.message.edit_text)
     assert await state.get_data() == {}
 
@@ -773,3 +780,41 @@ async def test_middleware_settles_once_per_day(
             end=datetime(2100, 1, 1, tzinfo=UTC),
         )
     assert len(rows2) == materialized
+
+
+# --- auto-return / navigation builders --------------------------------------
+
+
+async def test_nav_series_card_parses_composite_prefix(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    back = f"recur:card:{series_id}:2026-06-22~clients:card:{client_id}"
+    _, keyboard = await h.nav_series_card(_SP, back)
+    cbs = _callbacks(keyboard)
+    # The composite key (series_id + origin date) is parsed back into this date's
+    # actions, and the card's Back honours the inner target after "~".
+    assert any(c and c.startswith(f"recur:move:{series_id}:2026-06-22") for c in cbs)
+    assert f"clients:card:{client_id}" in cbs
+
+
+async def test_cancel_returns_to_series_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    series_id = await _seed_series(
+        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "move", "card": f"recur:card:{series_id}:2026-06-22"})
+    cb = _fake_callback("recur:cancel")
+    await h.cancel(cb, state, _SP)
+    assert messages.recurring.cancelled in _texts(cb.message.edit_text)
+    cbs = _callbacks(_markup(cb.message.answer))
+    assert any(c and c.startswith(f"recur:move:{series_id}:") for c in cbs)

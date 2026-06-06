@@ -187,6 +187,12 @@ async def extend_subscription(
         remaining=subscription.remaining + meetings,
     )
     assert updated is not None  # noqa: S101 — just fetched it under the same owner
+    # Продление — единственный путь, переводящий remaining 0 → >0, поэтому
+    # сбрасываем payment_reminded_at именно здесь: при следующем обнулении остатка
+    # напоминание сработает заново (см. design.md, решение 4). «Вычесть» (decrement)
+    # этот признак не меняет.
+    await repo.mark_payment_reminded(subscription_id, None)
+    updated.payment_reminded_at = None
     _log("subscription.extended", updated)
     return updated
 

@@ -9,6 +9,7 @@ from src.services.specialists import (
     SettingsUpdateResult,
     get_settings,
     toggle_digest,
+    toggle_payment_reminder,
     toggle_reminder,
     toggle_working_day,
     update_setting,
@@ -170,3 +171,17 @@ async def test_toggle_digest_flips_and_handles_missing(session: AsyncSession):
     assert again is not None
     assert again.morning_notify_enabled is True
     assert await toggle_digest(repo, specialist_id=404) is None
+
+
+async def test_toggle_payment_reminder_flips_and_handles_missing(
+    session: AsyncSession,
+):
+    specialist_id = await _seed(session)
+    repo = SqlAlchemySpecialistsRepo(session)
+    updated = await toggle_payment_reminder(repo, specialist_id=specialist_id)
+    assert updated is not None
+    assert updated.payment_reminder_enabled is False
+    again = await toggle_payment_reminder(repo, specialist_id=specialist_id)
+    assert again is not None
+    assert again.payment_reminder_enabled is True
+    assert await toggle_payment_reminder(repo, specialist_id=404) is None

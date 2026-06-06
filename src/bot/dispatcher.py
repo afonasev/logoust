@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.audit import build_router as build_audit_router
 from src.bot.handlers.clients import build_router as build_clients_router
+from src.bot.handlers.payment import build_router as build_payment_router
 from src.bot.handlers.reminders import build_router as build_reminders_router
 from src.bot.handlers.schedule import build_router as build_schedule_router
 from src.bot.handlers.settings import build_router as build_settings_router
@@ -27,6 +28,7 @@ def build_dispatcher(
     dp.include_router(build_schedule_router(messages, session_factory))
     dp.include_router(build_settings_router(messages, session_factory))
     dp.include_router(build_subscriptions_router(messages, session_factory))
+    dp.include_router(build_payment_router(messages, session_factory))
     dp.include_router(build_windows_router(messages, session_factory))
     dp.include_router(build_audit_router(messages, session_factory))
     dp.include_router(build_start_router(messages, session_factory))

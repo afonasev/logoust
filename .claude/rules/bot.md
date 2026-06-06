@@ -28,7 +28,8 @@ globs: ["src/bot/**/*.py"]
 
 - `src/bot/handlers/schedule.py::_send_notify` — уведомления о записи (разовой и
   регулярной: создание/перенос/отмена).
-- `src/bot/scheduler.py::_deliver` — авто-напоминания клиенту.
+- `src/bot/scheduler.py::_deliver` — авто-напоминания клиенту (и ручной запуск
+  `src/bot/handlers/settings.py::send_reminders_now` доставляет той же воронкой).
 - `src/bot/handlers/start.py::_link_client_and_reply` — подтверждение привязки.
 
 ### Что НЕ журналируется этим правилом

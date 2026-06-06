@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -12,9 +12,11 @@ from src.bot.handlers.settings import (
     render_settings,
 )
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
+from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.schedule import today_in_tz
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
+from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -72,6 +74,18 @@ def _fake_callback(data: str | None = None) -> AsyncMock:
 
 def _texts(mock: AsyncMock) -> list[str]:
     return [c.args[0] for c in mock.await_args_list]
+
+
+def _button_texts(mock: AsyncMock) -> list[str]:
+    """All inline-button labels across every reply_markup passed to `mock`."""
+    labels: list[str] = []
+    for call in mock.await_args_list:
+        markup = call.kwargs.get("reply_markup")
+        if markup is None:
+            continue
+        for row in markup.inline_keyboard:
+            labels.extend(btn.text for btn in row)
+    return labels
 
 
 async def _seed_specialist(factory: async_sessionmaker[AsyncSession]) -> int:
@@ -161,33 +175,59 @@ async def test_set_timezone_persists_and_returns_menu(
     assert updated.timezone == "Europe/Moscow"
 
 
-async def test_ask_value_sets_state(
+async def test_ask_value_sets_state_shows_current_and_cancel(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:day_start")
     state = _state()
-    await h.ask_value(cb, state)
+    await h.ask_value(cb, state, _SP)
     assert state.state == EditSetting.day_start
-    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_day_start
+    prompt = _texts(cb.message.edit_text)[0]
+    # Prompt keeps the original ask text plus the current value as a suffix.
+    assert prompt.startswith(messages.settings.ask_day_start)
+    assert "09:00" in prompt  # default day_start
+    assert messages.settings.btn_cancel in _button_texts(cb.message.edit_text)
 
 
 async def test_ask_value_day_end_and_slot_prompts(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
 
     end_cb = _fake_callback("settings:day_end")
     end_state = _state()
-    await h.ask_value(end_cb, end_state)
+    await h.ask_value(end_cb, end_state, _SP)
     assert end_state.state == EditSetting.day_end
-    assert _texts(end_cb.message.edit_text)[0] == messages.settings.ask_day_end
+    assert _texts(end_cb.message.edit_text)[0].startswith(messages.settings.ask_day_end)
 
     slot_cb = _fake_callback("settings:slot")
     slot_state = _state()
-    await h.ask_value(slot_cb, slot_state)
+    await h.ask_value(slot_cb, slot_state, _SP)
     assert slot_state.state == EditSetting.slot
-    assert _texts(slot_cb.message.edit_text)[0] == messages.settings.ask_slot
+    slot_prompt = _texts(slot_cb.message.edit_text)[0]
+    assert slot_prompt.startswith(messages.settings.ask_slot)
+    assert "60" in slot_prompt  # default slot_minutes as a string
+
+
+async def test_cancel_input_clears_state_and_keeps_value(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # "Отмена" on an input step routes to open_menu (_CB_MENU): state cleared,
+    # menu re-rendered, the stored value untouched.
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(data="settings:menu")
+    state = _state(state=EditSetting.day_start)
+    await h.open_menu(cb, state, _SP)
+    assert state.state is None
+    assert "Екатеринбург" in _texts(cb.message.edit_text)[0]
+    async with session_factory() as session:
+        unchanged = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert unchanged is not None
+    assert unchanged.day_start == "09:00"
 
 
 async def test_apply_day_start_valid(
@@ -300,12 +340,15 @@ async def test_apply_reminder_time_invalid_reasks(
 async def test_ask_value_reminder_time_prompt(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:reminder_time")
     state = _state()
-    await h.ask_value(cb, state)
+    await h.ask_value(cb, state, _SP)
     assert state.state == EditSetting.reminder_time
-    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_reminder_time
+    assert _texts(cb.message.edit_text)[0].startswith(
+        messages.settings.ask_reminder_time
+    )
 
 
 def test_render_settings_shows_subscription_presets():
@@ -324,12 +367,15 @@ def test_render_settings_shows_subscription_presets():
 async def test_ask_value_subscription_presets_prompt(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:subscription_presets")
     state = _state()
-    await h.ask_value(cb, state)
+    await h.ask_value(cb, state, _SP)
     assert state.state == EditSetting.subscription_presets
-    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_subscription_presets
+    assert _texts(cb.message.edit_text)[0].startswith(
+        messages.settings.ask_subscription_presets
+    )
 
 
 def test_render_settings_shows_deferred_notify_time():
@@ -348,12 +394,15 @@ def test_render_settings_shows_deferred_notify_time():
 async def test_ask_value_deferred_time_prompt(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:deferred_time")
     state = _state()
-    await h.ask_value(cb, state)
+    await h.ask_value(cb, state, _SP)
     assert state.state == EditSetting.deferred_time
-    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_deferred_time
+    assert _texts(cb.message.edit_text)[0].startswith(
+        messages.settings.ask_deferred_time
+    )
 
 
 async def test_apply_deferred_time_valid(
@@ -471,12 +520,13 @@ async def test_toggle_digest_flips_flag(
 async def test_ask_value_digest_time_prompt(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
+    await _seed_specialist(session_factory)
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:digest_time")
     state = _state()
-    await h.ask_value(cb, state)
+    await h.ask_value(cb, state, _SP)
     assert state.state == EditSetting.digest_time
-    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_digest_time
+    assert _texts(cb.message.edit_text)[0].startswith(messages.settings.ask_digest_time)
 
 
 async def test_apply_digest_time_valid(
@@ -755,3 +805,174 @@ async def test_reset_template_without_override_is_noop(
     cb = _fake_callback("tpl:reset:appt_reminder")
     await h.reset_template_action(cb, _SP)
     assert _texts(cb.answer)[0] == messages.templates.reset_noop
+
+
+# --- send reminders now -------------------------------------------------------
+
+
+async def _seed_tomorrow_linked_appointment(
+    factory: async_sessionmaker[AsyncSession], *, chat_id: int, child: str = "Петя"
+) -> int:
+    now = datetime.now(UTC)
+    tomorrow = today_in_tz(now, "Asia/Yekaterinburg") + timedelta(days=1)
+    async with factory() as session:
+        repo = SqlAlchemyClientsRepo(session)
+        client = await add_client(
+            repo,
+            NewClient(
+                specialist_id=_SP,
+                child_name=child,
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+        assert client.id is not None
+        await repo.link_telegram(
+            client.id,
+            telegram_chat_id=chat_id,
+            username=None,
+            linked_at=now,
+            updated_at=now,
+        )
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=_SP,
+            client_id=client.id,
+            day=tomorrow,
+            hhmm="10:00",
+            comment=None,
+            tz="Asia/Yekaterinburg",
+            now=now,
+        )
+    return client.id
+
+
+async def _audit_messages(
+    factory: async_sessionmaker[AsyncSession],
+) -> list[tuple[AuditEvent, DeliveryStatus | None]]:
+    async with factory() as session:
+        rows = await SqlAlchemyAuditRepo(session).list_for_specialist(
+            _SP, limit=50, offset=0
+        )
+    return [(r.event, r.status) for r in rows if r.kind is AuditKind.MESSAGE]
+
+
+async def test_send_reminders_now_sends_and_records_audit(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _seed_tomorrow_linked_appointment(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:reminder_now")
+    await h.send_reminders_now(cb, _SP)
+    cb.bot.send_message.assert_awaited_once()
+    assert cb.bot.send_message.await_args.args[0] == 555
+    # The client gets the confirm/decline keyboard, same as the scheduled pass.
+    assert cb.bot.send_message.await_args.kwargs.get("reply_markup") is not None
+    assert _texts(cb.answer)[0] == messages.settings.reminders_now_done.format(count=1)
+    assert await _audit_messages(session_factory) == [
+        (AuditEvent.REMINDER, DeliveryStatus.SENT)
+    ]
+
+
+async def test_send_reminders_now_empty_alerts(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:reminder_now")
+    await h.send_reminders_now(cb, _SP)
+    cb.bot.send_message.assert_not_awaited()
+    assert _texts(cb.answer)[0] == messages.settings.reminders_now_empty
+
+
+async def test_send_reminders_now_failure_does_not_abort_rest(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _seed_tomorrow_linked_appointment(session_factory, chat_id=111, child="Аня")
+    await _seed_tomorrow_linked_appointment(session_factory, chat_id=222, child="Боря")
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:reminder_now")
+    # First delivery fails; the funnel logs FAILED and the pass continues.
+    cb.bot.send_message.side_effect = [
+        TelegramForbiddenError(method=None, message="blocked"),  # type: ignore[arg-type]
+        None,
+    ]
+    await h.send_reminders_now(cb, _SP)
+    assert cb.bot.send_message.await_count == 2
+    statuses = sorted(s.value for _, s in await _audit_messages(session_factory) if s)
+    assert statuses == ["failed", "sent"]
+    assert _texts(cb.answer)[0] == messages.settings.reminders_now_done.format(count=2)
+
+
+# --- payment reminder settings ------------------------------------------------
+
+
+def test_render_settings_shows_payment_state():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    text = render_settings(specialist, m)
+    assert "Напоминание об оплате" in text  # noqa: RUF001
+    assert "12:00" in text  # default payment_reminder_time
+
+
+async def test_toggle_payment_flips_flag(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:payment")
+    await h.toggle_payment(cb, _state(), _SP)
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.payment_reminder_enabled is False
+
+
+async def test_apply_payment_time_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("9:30")
+    state = _state(state=EditSetting.payment_time)
+    await h.apply_payment_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.payment_reminder_time == "09:30"
+
+
+async def test_apply_payment_time_invalid_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("99:99")
+    state = _state(state=EditSetting.payment_time)
+    await h.apply_payment_time(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.bad_time
+    assert state.state == EditSetting.payment_time
+
+
+async def test_ask_value_payment_time_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:payment_time")
+    state = _state()
+    await h.ask_value(cb, state, _SP)
+    assert state.state == EditSetting.payment_time
+    assert _texts(cb.message.edit_text)[0].startswith(
+        messages.settings.ask_payment_time
+    )

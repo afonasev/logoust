@@ -5,18 +5,25 @@ from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
-from src.bot.scheduler import run_digest_pass, run_outbox_pass, run_reminder_pass
+from src.bot.scheduler import (
+    run_digest_pass,
+    run_outbox_pass,
+    run_payment_reminder_pass,
+    run_reminder_pass,
+)
 from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.scheduled_message import (
     ScheduledClientMessage,
     ScheduledMessageStatus,
 )
+from src.domain.subscription import Subscription, SubscriptionStatus
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
@@ -380,3 +387,100 @@ async def test_digest_pass_logs_failure(
         specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
     assert specialist is not None
     assert specialist.morning_notify_last_run_on == _TODAY
+
+
+# --- subscription payment reminder pass ---------------------------------------
+
+
+async def _seed_unlinked_client(
+    factory: async_sessionmaker[AsyncSession], child: str = "Петя"
+) -> int:
+    async with factory() as session:
+        client = await add_client(
+            SqlAlchemyClientsRepo(session),
+            NewClient(
+                specialist_id=_SP,
+                child_name=child,
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+    assert client.id is not None
+    return client.id
+
+
+async def _seed_empty_subscription(
+    factory: async_sessionmaker[AsyncSession], client_id: int
+) -> None:
+    async with factory() as session:
+        await SqlAlchemySubscriptionsRepo(session).add(
+            Subscription(
+                id=None,
+                client_id=client_id,
+                specialist_id=_SP,
+                purchased=4,
+                remaining=0,
+                status=SubscriptionStatus.ACTIVE,
+                created_at=_NOW,
+            )
+        )
+
+
+def _callbacks(markup: object) -> list[str | None]:
+    return [b.callback_data for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+
+
+async def test_payment_pass_alerts_specialist_with_send_button(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_empty_subscription(session_factory, client_id)
+    await _seed_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_payment_reminder_pass(bot, session_factory, _messages(), _NOW)
+    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_args.args[0] == 900  # the specialist's chat
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert _callbacks(markup) == [f"pay:send:{client_id}"]
+    # Marked reminded + day stamped so a repeat tick / next day won't re-alert.
+    async with session_factory() as session:
+        sub = await SqlAlchemySubscriptionsRepo(session).get_active(client_id, _SP)
+        specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert sub is not None
+    assert sub.payment_reminded_at is not None
+    assert specialist is not None
+    assert specialist.payment_reminder_last_run_on == _TODAY
+
+
+async def test_payment_pass_unlinked_client_alert_without_button(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_unlinked_client(session_factory)
+    await _seed_empty_subscription(session_factory, client_id)
+    await _seed_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_payment_reminder_pass(bot, session_factory, _messages(), _NOW)
+    bot.send_message.assert_awaited_once()
+    # No telegram link → no "send" button (nowhere to send).
+    assert bot.send_message.await_args.kwargs["reply_markup"] is None
+
+
+async def test_payment_pass_skips_disabled_specialist(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_empty_subscription(session_factory, client_id)
+    await _seed_appointment(session_factory, client_id, "10:00")
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            _SP, {"payment_reminder_enabled": False}
+        )
+    bot = AsyncMock()
+    await run_payment_reminder_pass(bot, session_factory, _messages(), _NOW)
+    bot.send_message.assert_not_awaited()

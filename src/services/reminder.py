@@ -84,6 +84,74 @@ async def run_reminders_if_due(  # noqa: PLR0913
     if not is_reminder_due(specialist, now):
         return []
     assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    to_send = await _collect_reminders(
+        specialist,
+        now,
+        appointments_repo=appointments_repo,
+        reminders_repo=reminders_repo,
+        schedule_repo=schedule_repo,
+        slot_repo=slot_repo,
+        override_repo=override_repo,
+        clients_repo=clients_repo,
+        messages=messages,
+    )
+    # Mark the day done regardless of send outcomes — the journal prevents re-sends.
+    today = today_in_tz(now, specialist.timezone)
+    await specialists_repo.mark_reminder_run(specialist.id, today)
+    return to_send
+
+
+async def run_reminders_now(  # noqa: PLR0913
+    specialist: Specialist,
+    now: datetime,
+    *,
+    appointments_repo: AppointmentsRepo,
+    reminders_repo: RemindersRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
+    clients_repo: ClientsRepo,
+    messages: ReminderMessages,
+) -> list[ReminderToSend]:
+    """Manual pass: same collection as the gated pass, без гейта и без stamp.
+
+    Explicit specialist action — игнорирует `is_reminder_due` (время/дневной флаг/
+    вкл-выкл) и не вызывает `mark_reminder_run`, поэтому боевой дневной проход за этот
+    день отрабатывает как обычно. Per-occurrence дедуп держит журнал (`insert_pending`),
+    не дневной флаг, так что уже напомненные сегодня клиенты повторно ничего не получают.
+    """
+    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    return await _collect_reminders(
+        specialist,
+        now,
+        appointments_repo=appointments_repo,
+        reminders_repo=reminders_repo,
+        schedule_repo=schedule_repo,
+        slot_repo=slot_repo,
+        override_repo=override_repo,
+        clients_repo=clients_repo,
+        messages=messages,
+    )
+
+
+async def _collect_reminders(  # noqa: PLR0913
+    specialist: Specialist,
+    now: datetime,
+    *,
+    appointments_repo: AppointmentsRepo,
+    reminders_repo: RemindersRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
+    clients_repo: ClientsRepo,
+    messages: ReminderMessages,
+) -> list[ReminderToSend]:
+    """Non-mutating core: build tomorrow's occurrences, journal each, collect to-send.
+
+    Shared by the gated daily pass and the manual run — it touches only the journal
+    (`insert_pending` for per-occurrence dedup) and never `reminder_last_run_on`.
+    """
+    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     series = await load_series_context(
@@ -106,12 +174,9 @@ async def run_reminders_if_due(  # noqa: PLR0913
         for c in await clients_repo.list_by_status(specialist.id, ClientStatus.ACTIVE)
         if c.id is not None
     }
-    to_send = await _journal_and_collect(
+    return await _journal_and_collect(
         occurrences, clients, specialist, now, tz, reminders_repo, messages
     )
-    # Mark the day done regardless of send outcomes — the journal prevents re-sends.
-    await specialists_repo.mark_reminder_run(specialist.id, today)
-    return to_send
 
 
 async def _journal_and_collect(  # noqa: PLR0913, PLR0917

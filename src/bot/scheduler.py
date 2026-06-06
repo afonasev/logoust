@@ -8,18 +8,23 @@ and logged; it never aborts the rest of the pass.
 
 from contextlib import suppress
 from datetime import datetime
+from functools import partial
 import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.client_audit import record_client_message
+from src.bot.client_templates import template_default
 from src.bot.handlers.reminders import build_reminder_keyboard
 from src.bot.messages import BotMessages
 from src.domain.audit import AuditEvent, DeliveryStatus
 from src.domain.client import Client
+from src.domain.schedule import utc_to_wall
 from src.domain.scheduled_message import ScheduledClientMessage
+from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
@@ -31,8 +36,13 @@ from src.infrastructure.recurring_repo import (
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.digest import send_digest_if_due
 from src.services.message_templates import resolve_template
+from src.services.payment_reminder import (
+    PaymentReminderAlert,
+    run_payment_reminders_if_due,
+)
 from src.services.reminder import (
     ReminderMessages,
     ReminderToSend,
@@ -75,7 +85,7 @@ async def run_reminder_pass(
                 messages=ReminderMessages(client_text=client_text),
             )
         for item in to_send:
-            await _deliver(bot, messages, item, session_factory)
+            await deliver_reminder(bot, messages, item, session_factory)
 
 
 async def run_digest_pass(
@@ -110,6 +120,98 @@ async def run_digest_pass(
                     "specialist.digest_failed",
                     extra={"specialist_id": specialist.id},
                 )
+
+
+async def run_payment_reminder_pass(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    messages: BotMessages,
+    now: datetime,
+) -> None:
+    """One subscription-payment-reminder pass over all enabled specialists.
+
+    For each specialist due today, the service alerts about clients whose
+    subscription ran out and who have an appointment tomorrow. The alert (a
+    specialist-facing message with an optional "send" button) is delivered here,
+    keeping aiogram out of the service.
+    """
+    async with session_factory() as session:
+        candidates = await SqlAlchemySpecialistsRepo(
+            session
+        ).list_payment_reminder_candidates()
+    for specialist in candidates:
+        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        await _run_payment_for_specialist(
+            bot, session_factory, messages, specialist, now
+        )
+
+
+async def _run_payment_for_specialist(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    messages: BotMessages,
+    specialist: Specialist,
+    now: datetime,
+) -> None:
+    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    async with session_factory() as session:
+        # Preview is the same fixed client text for every alert of this specialist.
+        preview = await resolve_template(
+            SqlAlchemyMessageTemplatesRepo(session),
+            specialist_id=specialist.id,
+            key="payment_reminder",
+            default=template_default(messages, "payment_reminder"),
+        )
+        await run_payment_reminders_if_due(
+            specialist,
+            now,
+            appointments_repo=SqlAlchemyAppointmentsRepo(session),
+            subscriptions_repo=SqlAlchemySubscriptionsRepo(session),
+            clients_repo=SqlAlchemyClientsRepo(session),
+            schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+            slot_repo=SqlAlchemyRecurringSlotRepo(session),
+            override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
+            specialists_repo=SqlAlchemySpecialistsRepo(session),
+            alert=partial(_deliver_payment_alert, bot, messages, specialist, preview),
+        )
+
+
+def _payment_keyboard(messages: BotMessages, client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=messages.payment.btn_send,
+                    callback_data=f"pay:send:{client_id}",
+                )
+            ]
+        ]
+    )
+
+
+async def _deliver_payment_alert(
+    bot: Bot,
+    messages: BotMessages,
+    specialist: Specialist,
+    preview: str,
+    alert: PaymentReminderAlert,
+) -> None:
+    if specialist.telegram_chat_id is None:  # pragma: no cover — candidates welcomed
+        return
+    wall = utc_to_wall(alert.starts_at, specialist.timezone)
+    text = messages.payment.alert.format(
+        child=alert.child_name, time=f"{wall:%H:%M}", preview=preview
+    )
+    # The "send" button only appears for a linked client — otherwise there is
+    # nowhere to send, and the specialist reminds them by hand. Telling the
+    # specialist may itself fail (they blocked the bot); swallow that.
+    markup = (
+        _payment_keyboard(messages, alert.client_id)
+        if alert.chat_id is not None
+        else None
+    )
+    with suppress(TelegramForbiddenError, TelegramBadRequest):
+        await bot.send_message(specialist.telegram_chat_id, text, reply_markup=markup)
 
 
 async def run_outbox_pass(
@@ -213,12 +315,17 @@ async def _notify_specialist_failure(
         await bot.send_message(specialist.telegram_chat_id, text)
 
 
-async def _deliver(
+async def deliver_reminder(
     bot: Bot,
     messages: BotMessages,
     item: ReminderToSend,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Send one reminder to a client and journal it (SENT/FAILED).
+
+    Shared by the scheduled pass and the manual "send reminders now" settings
+    action so both deliver and audit through the same funnel.
+    """
     extra = {"specialist_id": item.specialist_id, "client_id": item.client_id}
     try:
         await bot.send_message(

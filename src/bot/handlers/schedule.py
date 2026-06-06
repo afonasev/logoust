@@ -592,6 +592,7 @@ _CB_NOTIFY_WHEN = "sched:ntfwhen"  # "Yes" → reveal the moment choice
 _CB_NOTIFY_NOW = "sched:ntfnow"  # send immediately (the old behaviour)
 _CB_NOTIFY_PRESET = "sched:ntfpreset"  # defer to deferred_notify_time
 _CB_NOTIFY_CUSTOM = "sched:ntfcustom"  # defer to a typed time
+_CB_NOTIFY_CUSTOM_CANCEL = "sched:ntfcancel"  # back from typed time to moment choice
 # FSM-data key holding the pending notification context between the preview and the
 # moment choice.
 _NOTIFY_DATA_KEY = "notify"
@@ -692,6 +693,21 @@ def _notify_when_keyboard(
                     text=m.notify_when_custom, callback_data=_CB_NOTIFY_CUSTOM
                 )
             ],
+        ]
+    )
+
+
+def _notify_custom_cancel_keyboard(m: ScheduleMessages) -> InlineKeyboardMarkup:
+    # "Отмена" on the typed-time step goes back to the moment choice, not the card —
+    # the user already chose to notify, only the "how" is being reconsidered.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=m.notify_custom_cancel,
+                    callback_data=_CB_NOTIFY_CUSTOM_CANCEL,
+                )
+            ]
         ]
     )
 
@@ -1359,8 +1375,19 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             await self._notify_stale(callback)
             return
         await state.set_state(Schedule.notify_custom_time)
-        await _callback_message(callback).edit_text(self._m.notify_custom_time_ask)
+        await _callback_message(callback).edit_text(
+            self._m.notify_custom_time_ask,
+            reply_markup=_notify_custom_cancel_keyboard(self._m),
+        )
         await callback.answer()
+
+    async def notify_custom_cancel(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # Back to the moment choice: drop only the input FSM state, keep the notify
+        # context in FSM data so the user can pick another moment.
+        await state.set_state(None)
+        await self.ask_when(callback, state, specialist_id)
 
     async def apply_notify_custom_time(
         self, message: Message, state: FSMContext, specialist_id: int
@@ -2945,4 +2972,7 @@ def build_router(
     router.callback_query.register(h.notify_now, F.data == _CB_NOTIFY_NOW)
     router.callback_query.register(h.notify_preset, F.data == _CB_NOTIFY_PRESET)
     router.callback_query.register(h.notify_custom, F.data == _CB_NOTIFY_CUSTOM)
+    router.callback_query.register(
+        h.notify_custom_cancel, F.data == _CB_NOTIFY_CUSTOM_CANCEL
+    )
     return router

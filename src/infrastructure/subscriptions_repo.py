@@ -29,6 +29,10 @@ class SubscriptionORM(Base):
         DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Anti-duplicate напоминания (payment reminder); см. design.md, решение 3.
+    payment_reminded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:
         return (
@@ -47,6 +51,7 @@ def to_domain(orm: SubscriptionORM) -> Subscription:
         status=SubscriptionStatus(orm.status),
         created_at=orm.created_at,
         closed_at=orm.closed_at,
+        payment_reminded_at=orm.payment_reminded_at,
     )
 
 
@@ -63,6 +68,7 @@ class SqlAlchemySubscriptionsRepo:
             status=subscription.status.value,
             created_at=subscription.created_at,
             closed_at=subscription.closed_at,
+            payment_reminded_at=subscription.payment_reminded_at,
         )
         self._session.add(orm)
         await self._session.flush()
@@ -145,6 +151,15 @@ class SqlAlchemySubscriptionsRepo:
         orm.closed_at = closed_at
         await self._session.commit()
         return to_domain(orm)
+
+    async def mark_payment_reminded(
+        self, subscription_id: int, at: datetime | None
+    ) -> None:
+        orm = await self._session.get(SubscriptionORM, subscription_id)
+        if orm is None:  # pragma: no cover - callers hold a freshly fetched row
+            return
+        orm.payment_reminded_at = at
+        await self._session.commit()
 
     async def _get_owned(
         self, subscription_id: int, specialist_id: int

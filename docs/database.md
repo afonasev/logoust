@@ -25,6 +25,9 @@
 | `morning_notify_enabled` | BOOLEAN | нет | Включена ли утренняя сводка специалисту. Server-default `1` (opt-out). |
 | `morning_notify_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` ежедневной утренней сводки. Server-default `10:00`. |
 | `morning_notify_last_run_on` | DATE | да  | Дата (в tz) последнего «решения за день» по сводке; антидубль/догон. `NULL` — ещё не выполнялся. |
+| `payment_reminder_enabled` | BOOLEAN | нет | Включено ли напоминание об оплате абонемента. Server-default `1` (opt-out). |
+| `payment_reminder_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` ежедневного прохода напоминаний об оплате. Server-default `12:00`. |
+| `payment_reminder_last_run_on` | DATE | да  | Дата (в tz) последнего «решения за день» по оплате; антидубль/догон. `NULL` — ещё не выполнялся. |
 | `subscription_presets` | VARCHAR(64) | нет | Варианты числа встреч (кнопки) при создании/продлении абонемента — список через запятую, канонизированный (по возрастанию, без повторов). Server-default `4,8,12`. |
 | `deferred_notify_time` | VARCHAR(5) | нет | Настенное `ЧЧ:ММ` кнопки-пресета при откладывании уведомления клиенту. Server-default `20:00`. |
 
@@ -196,6 +199,7 @@
 | `status`        | VARCHAR(16) | нет  | `active` \| `closed` (enum строкой).                           |
 | `created_at`    | DATETIME    | нет  | Момент создания (aware UTC).                                   |
 | `closed_at`     | DATETIME    | да   | Момент закрытия; `NULL` у активного.                           |
+| `payment_reminded_at` | DATETIME | да  | Момент показа алерта об оплате (per-subscription антидубль: «уже напоминали, пока остаток 0»). Сбрасывается в `NULL` при продлении. `NULL` — ещё не напоминали в текущем пустом цикле. |
 
 Индексы:
 
@@ -206,6 +210,7 @@
 - `purchased` и `remaining` — оба кумулятивные счётчики, без отдельной таблицы движений (YAGNI): карточка отвечает на «сколько куплено / сколько осталось» без журнала.
 - Инвариант «один активный» держится запросом `client_id = ? AND status = 'active'` в сервисе; partial unique index оставлен на будущее (поток ввода последовательный, гонка двойного создания практически нулевая).
 - Абонемент не связан со встречами/расписанием: остаток меняется только ручными действиями.
+- `payment_reminded_at` — второй слой антидубля напоминания об оплате (первый — `specialists.payment_reminder_last_run_on`, «решение за день»). Ставится по факту показа алерта специалисту (а не отправки клиенту), поэтому даже непривязанный клиент не порождает повторов; продление обнуляет его, чтобы следующее обнуление остатка снова дало алерт.
 
 ### `message_templates`
 
@@ -301,6 +306,7 @@
 - `0012_audit_log.py` — создаёт таблицу `audit_log` (FK на `specialists` и `clients`, индекс `ix_audit_specialist_created`). Только структура, бэкфилла нет (истории событий не было). Down-ревизия удаляет индекс и таблицу.
 - `0013_deferred_client_notify.py` — добавляет в `specialists` колонку `deferred_notify_time` (server-default `20:00`); создаёт таблицу `scheduled_client_messages` (FK на `specialists` и `clients`, три индекса). Существующие специалисты → пресет 20:00. Down-ревизия удаляет таблицу и колонку.
 - `0014_multi_slot_recurring.py` — заменяет однопроходную регулярную схему на «расписание → слоты → исключения». Удаляет таблицы `recurring_exceptions` и `recurring_appointments` (с индексом `ix_recurring_specialist_active`) и затирает материализованные регулярные строки в `appointments`/`appointment_reminders` (`WHERE series_id IS NOT NULL`; прод пуст, разовые записи с `series_id IS NULL` сохраняются). Переименовывает колонку `series_id` → `slot_id` в обоих журналах; индекс `uq_appointments_series_origin` → `uq_appointments_slot_origin` по `(slot_id, origin_date)`. Создаёт три таблицы: `recurring_schedules` (индекс `ix_recurring_schedules_specialist_active`), `recurring_slots` (индекс `ix_recurring_slots_schedule_active`), `recurring_slot_overrides` (`UNIQUE(slot_id, original_date)` = `uq_override_slot_date`). Down-ревизия полностью восстанавливает прежнюю схему (без данных — прод пуст).
+- `0015_subscription_payment_reminder.py` — добавляет в `specialists` колонки `payment_reminder_enabled` (server-default `1`), `payment_reminder_time` (server-default `12:00`), `payment_reminder_last_run_on` (nullable) и в `subscriptions` колонку `payment_reminded_at` (DateTime tz, nullable). Существующие специалисты → напоминание об оплате включено на 12:00; существующие абонементы → `payment_reminded_at = NULL`. Down-ревизия удаляет все четыре колонки.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

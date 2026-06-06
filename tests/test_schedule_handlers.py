@@ -1418,6 +1418,36 @@ async def test_notify_custom_stale(
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_session_stale
 
 
+async def test_notify_custom_shows_cancel_button(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfcustom")
+    await h.notify_custom(cb, _state(data=_notify_data(client_id=client_id)))
+    assert "sched:ntfcancel" in _callbacks(_markup(cb.message.edit_text))
+
+
+async def test_notify_custom_cancel_returns_to_moment_choice(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:ntfcancel")
+    state = _state(
+        data=_notify_data(client_id=client_id), state=Schedule.notify_custom_time
+    )
+    await h.notify_custom_cancel(cb, state, _SP)
+    # Input state dropped, moment choice shown again, notify context preserved,
+    # nothing queued.
+    assert state.state is None
+    assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_when_ask
+    assert "notify" in state.store
+    assert await _queued(session_factory, client_id) == []
+
+
 async def test_notify_skip_declines_and_returns_card(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

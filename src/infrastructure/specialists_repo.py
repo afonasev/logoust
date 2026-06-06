@@ -12,6 +12,8 @@ from src.domain.specialist import (
     DEFAULT_DEFERRED_NOTIFY_TIME,
     DEFAULT_MORNING_NOTIFY_ENABLED,
     DEFAULT_MORNING_NOTIFY_TIME,
+    DEFAULT_PAYMENT_REMINDER_ENABLED,
+    DEFAULT_PAYMENT_REMINDER_TIME,
     DEFAULT_REMINDER_ENABLED,
     DEFAULT_REMINDER_TIME,
     DEFAULT_SLOT_MINUTES,
@@ -66,6 +68,15 @@ class SpecialistORM(Base):
         String(5), nullable=False, default=DEFAULT_MORNING_NOTIFY_TIME
     )
     morning_notify_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    payment_reminder_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=DEFAULT_PAYMENT_REMINDER_ENABLED
+    )
+    payment_reminder_time: Mapped[str] = mapped_column(
+        String(5), nullable=False, default=DEFAULT_PAYMENT_REMINDER_TIME
+    )
+    payment_reminder_last_run_on: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
     subscription_presets: Mapped[str] = mapped_column(
         String(64), nullable=False, default=DEFAULT_SUBSCRIPTION_PRESETS
     )
@@ -96,6 +107,9 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         morning_notify_enabled=bool(orm.morning_notify_enabled),
         morning_notify_time=orm.morning_notify_time,
         morning_notify_last_run_on=orm.morning_notify_last_run_on,
+        payment_reminder_enabled=bool(orm.payment_reminder_enabled),
+        payment_reminder_time=orm.payment_reminder_time,
+        payment_reminder_last_run_on=orm.payment_reminder_last_run_on,
         subscription_presets=orm.subscription_presets,
         deferred_notify_time=orm.deferred_notify_time,
     )
@@ -176,6 +190,20 @@ class SqlAlchemySpecialistsRepo:
         if orm is None:  # pragma: no cover - pass only marks loaded candidates
             return
         orm.morning_notify_last_run_on = run_on
+        await self._session.commit()
+
+    async def list_payment_reminder_candidates(self) -> list[Specialist]:
+        stmt = select(SpecialistORM).where(
+            SpecialistORM.payment_reminder_enabled.is_(True)
+        )
+        result = await self._session.execute(stmt)
+        return [to_domain(orm) for orm in result.scalars().all()]
+
+    async def mark_payment_reminder_run(self, specialist_id: int, run_on: date) -> None:
+        orm = await self._session.get(SpecialistORM, specialist_id)
+        if orm is None:  # pragma: no cover - pass only marks loaded candidates
+            return
+        orm.payment_reminder_last_run_on = run_on
         await self._session.commit()
 
     async def mark_welcomed(

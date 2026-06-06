@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.subscription import SubscriptionStatus
@@ -115,6 +117,41 @@ async def test_extend_adds_to_both_counters(session: AsyncSession):
     assert extended is not None
     assert extended.purchased == 16
     assert extended.remaining == 11
+
+
+async def test_extend_clears_payment_reminded_flag(session: AsyncSession):
+    created = await create_subscription(
+        _repo(session), client_id=_CLIENT, specialist_id=_SP, meetings=4
+    )
+    assert created is not None
+    assert created.id is not None
+    await _repo(session).mark_payment_reminded(
+        created.id, datetime(2026, 6, 6, 12, 0, tzinfo=UTC)
+    )
+    extended = await extend_subscription(
+        _repo(session), subscription_id=created.id, specialist_id=_SP, meetings=4
+    )
+    assert extended is not None
+    assert extended.payment_reminded_at is None
+    reloaded = await get_active(_repo(session), client_id=_CLIENT, specialist_id=_SP)
+    assert reloaded is not None
+    assert reloaded.payment_reminded_at is None
+
+
+async def test_decrement_does_not_touch_payment_reminded_flag(session: AsyncSession):
+    created = await create_subscription(
+        _repo(session), client_id=_CLIENT, specialist_id=_SP, meetings=2
+    )
+    assert created is not None
+    assert created.id is not None
+    at = datetime(2026, 6, 6, 12, 0, tzinfo=UTC)
+    await _repo(session).mark_payment_reminded(created.id, at)
+    updated = await decrement_meeting(
+        _repo(session), subscription_id=created.id, specialist_id=_SP
+    )
+    assert updated is not None
+    # Decrement leaves the flag untouched.
+    assert updated.payment_reminded_at is not None
 
 
 async def test_extend_unknown_returns_none(session: AsyncSession):

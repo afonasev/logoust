@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 import logging
 from typing import cast
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.client_templates import template_default
 from src.bot.handlers.clients import SpecialistMiddleware
 from src.bot.messages import BotMessages, SettingsMessages, TemplatesMessages
+from src.bot.scheduler import deliver_reminder
 from src.domain.message_template import (
     CLIENT_TEMPLATES,
     TemplateSpec,
@@ -37,6 +39,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringSlotOverrideRepo,
     SqlAlchemyRecurringSlotRepo,
 )
+from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.digest import collect_today_digest
 from src.services.message_templates import (
@@ -44,11 +47,13 @@ from src.services.message_templates import (
     resolve_template,
     save_template_override,
 )
+from src.services.reminder import ReminderMessages, run_reminders_now
 from src.services.specialists import (
     SettingField,
     SettingsUpdateResult,
     get_settings,
     toggle_digest,
+    toggle_payment_reminder,
     toggle_reminder,
     toggle_working_day,
     update_setting,
@@ -70,9 +75,12 @@ _CB_WORKDAYS = "settings:workdays"
 _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 _CB_REMINDER_TOGGLE = "settings:reminder"
 _CB_REMINDER_TIME = "settings:reminder_time"
+_CB_REMINDER_NOW = "settings:reminder_now"
 _CB_DIGEST_TOGGLE = "settings:digest"
 _CB_DIGEST_TIME = "settings:digest_time"
 _CB_DIGEST_NOW = "settings:digest_now"
+_CB_PAYMENT_TOGGLE = "settings:payment"
+_CB_PAYMENT_TIME = "settings:payment_time"
 _CB_SUBSCRIPTION = "settings:subscription_presets"
 _CB_DEFERRED_TIME = "settings:deferred_time"
 _CB_TEMPLATES = "settings:templates"
@@ -86,6 +94,7 @@ _FIELD_BY_CALLBACK = {
     _CB_SLOT: SettingField.SLOT_MINUTES,
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
     _CB_DIGEST_TIME: SettingField.DIGEST_TIME,
+    _CB_PAYMENT_TIME: SettingField.PAYMENT_REMINDER_TIME,
     _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_PRESETS,
     _CB_DEFERRED_TIME: SettingField.DEFERRED_NOTIFY_TIME,
 }
@@ -97,6 +106,7 @@ class EditSetting(StatesGroup):
     slot = State()
     reminder_time = State()
     digest_time = State()
+    payment_time = State()
     subscription_presets = State()
     deferred_time = State()
 
@@ -163,9 +173,33 @@ _STATE_BY_FIELD = {
     SettingField.SLOT_MINUTES: EditSetting.slot,
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
     SettingField.DIGEST_TIME: EditSetting.digest_time,
+    SettingField.PAYMENT_REMINDER_TIME: EditSetting.payment_time,
     SettingField.SUBSCRIPTION_PRESETS: EditSetting.subscription_presets,
     SettingField.DEFERRED_NOTIFY_TIME: EditSetting.deferred_time,
 }
+
+# Current stored value of each editable field, shown under the input prompt as a
+# reminder. The digest time lives on `morning_notify_time`; the rest map 1:1.
+_CURRENT_BY_FIELD: dict[SettingField, Callable[[Specialist], str]] = {
+    SettingField.DAY_START: lambda s: s.day_start,
+    SettingField.DAY_END: lambda s: s.day_end,
+    SettingField.SLOT_MINUTES: lambda s: str(s.slot_minutes),
+    SettingField.REMINDER_TIME: lambda s: s.reminder_time,
+    SettingField.DIGEST_TIME: lambda s: s.morning_notify_time,
+    SettingField.PAYMENT_REMINDER_TIME: lambda s: s.payment_reminder_time,
+    SettingField.SUBSCRIPTION_PRESETS: lambda s: s.subscription_presets,
+    SettingField.DEFERRED_NOTIFY_TIME: lambda s: s.deferred_notify_time,
+}
+
+
+def _cancel_keyboard(m: SettingsMessages) -> InlineKeyboardMarkup:
+    # A single "Отмена" on each input step → existing _CB_MENU (clears state +
+    # renders the menu), so no extra handler is needed.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=m.btn_cancel, callback_data=_CB_MENU)]
+        ]
+    )
 
 
 def _menu_keyboard(
@@ -176,6 +210,9 @@ def _menu_keyboard(
     )
     digest_toggle = (
         m.btn_digest_on if specialist.morning_notify_enabled else m.btn_digest_off
+    )
+    payment_toggle = (
+        m.btn_payment_on if specialist.payment_reminder_enabled else m.btn_payment_off
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -199,6 +236,9 @@ def _menu_keyboard(
                 InlineKeyboardButton(
                     text=m.btn_reminder_time, callback_data=_CB_REMINDER_TIME
                 ),
+                InlineKeyboardButton(
+                    text=m.btn_reminder_now, callback_data=_CB_REMINDER_NOW
+                ),
             ],
             [InlineKeyboardButton(text=m.btn_digest, callback_data=_CB_NOOP)],
             [
@@ -210,6 +250,15 @@ def _menu_keyboard(
                 ),
                 InlineKeyboardButton(
                     text=m.btn_digest_now, callback_data=_CB_DIGEST_NOW
+                ),
+            ],
+            [InlineKeyboardButton(text=m.btn_payment, callback_data=_CB_NOOP)],
+            [
+                InlineKeyboardButton(
+                    text=payment_toggle, callback_data=_CB_PAYMENT_TOGGLE
+                ),
+                InlineKeyboardButton(
+                    text=m.btn_payment_time, callback_data=_CB_PAYMENT_TIME
                 ),
             ],
             [
@@ -271,6 +320,8 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         reminder_time=specialist.reminder_time,
         digest=m.state_on if specialist.morning_notify_enabled else m.state_off,
         digest_time=specialist.morning_notify_time,
+        payment=m.state_on if specialist.payment_reminder_enabled else m.state_off,
+        payment_time=specialist.payment_reminder_time,
         deferred_notify_time=specialist.deferred_notify_time,
         subscription_presets=specialist.subscription_presets,
     )
@@ -346,6 +397,15 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             )
         await self.open_menu(callback, state, specialist_id)
 
+    async def toggle_payment(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        async with self._session_factory() as session:
+            await toggle_payment_reminder(
+                SqlAlchemySpecialistsRepo(session), specialist_id=specialist_id
+            )
+        await self.open_menu(callback, state, specialist_id)
+
     async def send_digest_now(
         self, callback: CallbackQuery, specialist_id: int
     ) -> None:
@@ -381,6 +441,47 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             await callback.answer(self._m.digest_now_failed, show_alert=True)
             return
         await callback.answer()
+
+    async def send_reminders_now(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        # Manual/debug run: remind tomorrow's clients immediately, bypassing the
+        # time gate, the daily stamp and the enabled flag. The journal still dedups
+        # per occurrence, so clients already reminded today get nothing again, and
+        # the day is NOT stamped — the real daily pass keeps working.
+        specialist = await self._load(specialist_id)
+        if specialist is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        async with self._session_factory() as session:
+            client_text = await resolve_template(
+                SqlAlchemyMessageTemplatesRepo(session),
+                specialist_id=specialist_id,
+                key="appt_reminder",
+                default=self._messages.reminder.client_text,
+            )
+            to_send = await run_reminders_now(
+                specialist,
+                datetime.now(UTC),
+                appointments_repo=SqlAlchemyAppointmentsRepo(session),
+                reminders_repo=SqlAlchemyRemindersRepo(session),
+                schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+                slot_repo=SqlAlchemyRecurringSlotRepo(session),
+                override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
+                clients_repo=SqlAlchemyClientsRepo(session),
+                messages=ReminderMessages(client_text=client_text),
+            )
+        if not to_send:
+            await callback.answer(self._m.reminders_now_empty, show_alert=True)
+            return
+        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        for item in to_send:
+            await deliver_reminder(
+                callback.bot, self._messages, item, self._session_factory
+            )
+        await callback.answer(
+            self._m.reminders_now_done.format(count=len(to_send)), show_alert=True
+        )
 
     @staticmethod
     async def noop(callback: CallbackQuery) -> None:
@@ -435,10 +536,21 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         )
         await callback.answer()
 
-    async def ask_value(self, callback: CallbackQuery, state: FSMContext) -> None:
+    async def ask_value(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
         field = _FIELD_BY_CALLBACK[callback.data or ""]
+        specialist = await self._load(specialist_id)
+        if specialist is None:  # pragma: no cover - middleware guarantees existence
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
         await state.set_state(_STATE_BY_FIELD[field])
-        await _callback_message(callback).edit_text(self._prompt(field))
+        prompt = self._prompt(field) + self._m.value_now.format(
+            current=_CURRENT_BY_FIELD[field](specialist)
+        )
+        await _callback_message(callback).edit_text(
+            prompt, reply_markup=_cancel_keyboard(self._m)
+        )
         await callback.answer()
 
     def _prompt(self, field: SettingField) -> str:
@@ -447,6 +559,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
             SettingField.DAY_END: self._m.ask_day_end,
             SettingField.REMINDER_TIME: self._m.ask_reminder_time,
             SettingField.DIGEST_TIME: self._m.ask_digest_time,
+            SettingField.PAYMENT_REMINDER_TIME: self._m.ask_payment_time,
             SettingField.SUBSCRIPTION_PRESETS: self._m.ask_subscription_presets,
             SettingField.DEFERRED_NOTIFY_TIME: self._m.ask_deferred_time,
         }
@@ -503,6 +616,13 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         self, message: Message, state: FSMContext, specialist_id: int
     ) -> None:
         await self.apply_value(message, state, specialist_id, SettingField.DIGEST_TIME)
+
+    async def apply_payment_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(
+            message, state, specialist_id, SettingField.PAYMENT_REMINDER_TIME
+        )
 
     async def apply_day_end(
         self, message: Message, state: FSMContext, specialist_id: int
@@ -617,6 +737,7 @@ def build_router(
     router.message.register(h.apply_slot, EditSetting.slot)
     router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
     router.message.register(h.apply_digest_time, EditSetting.digest_time)
+    router.message.register(h.apply_payment_time, EditSetting.payment_time)
     router.message.register(
         h.apply_subscription_presets, EditSetting.subscription_presets
     )
@@ -637,11 +758,14 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_SLOT)
     router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_DIGEST_TIME)
+    router.callback_query.register(h.ask_value, F.data == _CB_PAYMENT_TIME)
     router.callback_query.register(h.ask_value, F.data == _CB_SUBSCRIPTION)
     router.callback_query.register(h.ask_value, F.data == _CB_DEFERRED_TIME)
     router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
+    router.callback_query.register(h.send_reminders_now, F.data == _CB_REMINDER_NOW)
     router.callback_query.register(h.toggle_digest, F.data == _CB_DIGEST_TOGGLE)
     router.callback_query.register(h.send_digest_now, F.data == _CB_DIGEST_NOW)
+    router.callback_query.register(h.toggle_payment, F.data == _CB_PAYMENT_TOGGLE)
     router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
     router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))
     return router

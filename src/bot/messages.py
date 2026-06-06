@@ -114,6 +114,7 @@ class ScheduleMessages:
     notify_when_preset: str
     notify_when_custom: str
     notify_custom_time_ask: str
+    notify_custom_cancel: str
     notify_deferred_queued: str
     notify_deferred_superseded: str
     notify_session_stale: str
@@ -213,16 +214,23 @@ class SettingsMessages:
     btn_reminder_on: str
     btn_reminder_off: str
     btn_reminder_time: str
+    btn_reminder_now: str
     btn_digest: str
     btn_digest_on: str
     btn_digest_off: str
     btn_digest_time: str
     btn_digest_now: str
+    btn_payment: str
+    btn_payment_on: str
+    btn_payment_off: str
+    btn_payment_time: str
     btn_subscription_presets: str
     btn_deferred_time: str
     state_on: str
     state_off: str
     btn_back: str
+    btn_cancel: str
+    value_now: str
     pick_timezone: str
     pick_working_days: str
     ask_day_start: str
@@ -230,6 +238,7 @@ class SettingsMessages:
     ask_slot: str
     ask_reminder_time: str
     ask_digest_time: str
+    ask_payment_time: str
     ask_subscription_presets: str
     ask_deferred_time: str
     no_working_days: str
@@ -238,8 +247,19 @@ class SettingsMessages:
     bad_subscription_presets: str
     digest_now_empty: str
     digest_now_failed: str
+    reminders_now_empty: str
+    reminders_now_done: str
     saved: str
     not_found: str
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentMessages:
+    alert: str
+    btn_send: str
+    sent: str
+    not_delivered: str
+    not_linked: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +349,7 @@ class BotMessages:
     recurring: RecurringMessages
     reminder: ReminderMessages
     settings: SettingsMessages
+    payment: PaymentMessages
     digest: DigestMessages
     subscriptions: SubscriptionsMessages
     windows: WindowsMessages
@@ -453,6 +474,7 @@ def load_messages(path: Path) -> BotMessages:
             notify_when_preset=_require(data, "schedule.notify_when_preset"),
             notify_when_custom=_require(data, "schedule.notify_when_custom"),
             notify_custom_time_ask=_require(data, "schedule.notify_custom_time_ask"),
+            notify_custom_cancel=_require(data, "schedule.notify_custom_cancel"),
             notify_deferred_queued=_require(data, "schedule.notify_deferred_queued"),
             notify_deferred_superseded=_require(
                 data, "schedule.notify_deferred_superseded"
@@ -530,11 +552,16 @@ def load_messages(path: Path) -> BotMessages:
             btn_reminder_on=_require(data, "settings.btn_reminder_on"),
             btn_reminder_off=_require(data, "settings.btn_reminder_off"),
             btn_reminder_time=_require(data, "settings.btn_reminder_time"),
+            btn_reminder_now=_require(data, "settings.btn_reminder_now"),
             btn_digest=_require(data, "settings.btn_digest"),
             btn_digest_on=_require(data, "settings.btn_digest_on"),
             btn_digest_off=_require(data, "settings.btn_digest_off"),
             btn_digest_time=_require(data, "settings.btn_digest_time"),
             btn_digest_now=_require(data, "settings.btn_digest_now"),
+            btn_payment=_require(data, "settings.btn_payment"),
+            btn_payment_on=_require(data, "settings.btn_payment_on"),
+            btn_payment_off=_require(data, "settings.btn_payment_off"),
+            btn_payment_time=_require(data, "settings.btn_payment_time"),
             btn_subscription_presets=_require(
                 data, "settings.btn_subscription_presets"
             ),
@@ -542,6 +569,8 @@ def load_messages(path: Path) -> BotMessages:
             state_on=_require(data, "settings.state_on"),
             state_off=_require(data, "settings.state_off"),
             btn_back=_require(data, "settings.btn_back"),
+            btn_cancel=_require(data, "settings.btn_cancel"),
+            value_now=_require(data, "settings.value_now"),
             pick_timezone=_require(data, "settings.pick_timezone"),
             pick_working_days=_require(data, "settings.pick_working_days"),
             ask_day_start=_require(data, "settings.ask_day_start"),
@@ -549,6 +578,7 @@ def load_messages(path: Path) -> BotMessages:
             ask_slot=_require(data, "settings.ask_slot"),
             ask_reminder_time=_require(data, "settings.ask_reminder_time"),
             ask_digest_time=_require(data, "settings.ask_digest_time"),
+            ask_payment_time=_require(data, "settings.ask_payment_time"),
             ask_subscription_presets=_require(
                 data, "settings.ask_subscription_presets"
             ),
@@ -561,8 +591,17 @@ def load_messages(path: Path) -> BotMessages:
             ),
             digest_now_empty=_require(data, "settings.digest_now_empty"),
             digest_now_failed=_require(data, "settings.digest_now_failed"),
+            reminders_now_empty=_require(data, "settings.reminders_now_empty"),
+            reminders_now_done=_require(data, "settings.reminders_now_done"),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
+        ),
+        payment=PaymentMessages(
+            alert=_require(data, "payment.alert").strip(),
+            btn_send=_require(data, "payment.btn_send"),
+            sent=_require(data, "payment.sent"),
+            not_delivered=_require(data, "payment.not_delivered"),
+            not_linked=_require(data, "payment.not_linked"),
         ),
         digest=DigestMessages(
             title=_require(data, "digest.title"),

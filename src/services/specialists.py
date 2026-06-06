@@ -22,6 +22,7 @@ class SettingField(enum.Enum):
     SLOT_MINUTES = "slot_minutes"
     REMINDER_TIME = "reminder_time"
     DIGEST_TIME = "morning_notify_time"
+    PAYMENT_REMINDER_TIME = "payment_reminder_time"
     SUBSCRIPTION_PRESETS = "subscription_presets"
     DEFERRED_NOTIFY_TIME = "deferred_notify_time"
 
@@ -46,6 +47,7 @@ def _normalize(field: SettingField, raw: str) -> object | None:
         SettingField.DAY_END,
         SettingField.REMINDER_TIME,
         SettingField.DIGEST_TIME,
+        SettingField.PAYMENT_REMINDER_TIME,
         SettingField.DEFERRED_NOTIFY_TIME,
     }:
         return parse_hhmm(value)
@@ -120,6 +122,27 @@ async def toggle_digest(
     logger.info(
         "specialist.setting_updated",
         extra={"specialist_id": specialist_id, "field": "morning_notify_enabled"},
+    )
+    return updated
+
+
+async def toggle_payment_reminder(
+    repo: SpecialistsRepo, *, specialist_id: int
+) -> Specialist | None:
+    """Flip the subscription-payment-reminder on/off flag and persist it.
+
+    Returns the updated specialist, or None if it does not exist.
+    """
+    specialist = await repo.get(specialist_id)
+    if specialist is None:
+        return None
+    updated = await repo.update_settings(
+        specialist_id,
+        {"payment_reminder_enabled": not specialist.payment_reminder_enabled},
+    )
+    logger.info(
+        "specialist.setting_updated",
+        extra={"specialist_id": specialist_id, "field": "payment_reminder_enabled"},
     )
     return updated
 

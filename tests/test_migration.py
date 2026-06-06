@@ -57,6 +57,10 @@ def test_initial_migration_creates_specialists_table(
         "subscription_presets",
         # Added by 0013 (deferred client notify preset time).
         "deferred_notify_time",
+        # Added by 0015 (payment reminder settings).
+        "payment_reminder_enabled",
+        "payment_reminder_time",
+        "payment_reminder_last_run_on",
     }
     assert set(columns) == expected
 
@@ -720,6 +724,79 @@ def test_multi_slot_recurring_migration_replaces_schema_and_wipes_recurring(
     appt_columns = {c["name"] for c in insp.get_columns("appointments")}
     assert "series_id" in appt_columns
     assert "slot_id" not in appt_columns
+    engine.dispose()
+
+
+def test_payment_reminder_migration_adds_columns_and_backfills(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0015 and seed a specialist + subscription predating the columns.
+    command.upgrade(cfg, "0014")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO clients "
+                "(specialist_id, child_name, contact_name, status, "
+                "created_at, updated_at) "
+                "VALUES (1, 'Маша', 'Мама', 'active', '2026-05-01', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO subscriptions "
+                "(client_id, specialist_id, purchased, remaining, status, created_at) "
+                "VALUES (1, 1, 8, 0, 'active', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert {
+        "payment_reminder_enabled",
+        "payment_reminder_time",
+        "payment_reminder_last_run_on",
+    } <= specialist_columns
+    sub_columns = {c["name"] for c in insp.get_columns("subscriptions")}
+    assert "payment_reminded_at" in sub_columns
+
+    # The pre-existing specialist backfills to enabled at noon (opt-out default).
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT payment_reminder_enabled, payment_reminder_time, "
+                "payment_reminder_last_run_on "
+                "FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).one()
+        sub_flag = conn.execute(
+            text("SELECT payment_reminded_at FROM subscriptions")
+        ).scalar_one()
+    assert row == (1, "12:00", None)
+    assert sub_flag is None
+
+    command.downgrade(cfg, "0014")
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "payment_reminder_enabled" not in specialist_columns
+    sub_columns = {c["name"] for c in insp.get_columns("subscriptions")}
+    assert "payment_reminded_at" not in sub_columns
     engine.dispose()
 
 

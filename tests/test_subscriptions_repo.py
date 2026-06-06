@@ -122,6 +122,22 @@ async def test_list_closed_for_specialist(session: AsyncSession):
     assert [s.id for s in closed] == [saved.id]
 
 
+async def test_mark_payment_reminded_sets_and_clears(session: AsyncSession):
+    repo = SqlAlchemySubscriptionsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    at = datetime(2026, 6, 6, 12, 0, tzinfo=UTC)
+    await repo.mark_payment_reminded(saved.id, at)
+    reloaded = await repo.get_active(_CLIENT, _SP)
+    assert reloaded is not None
+    assert reloaded.payment_reminded_at is not None
+    # Resetting back to None clears the flag (used on extend).
+    await repo.mark_payment_reminded(saved.id, None)
+    reloaded = await repo.get_active(_CLIENT, _SP)
+    assert reloaded is not None
+    assert reloaded.payment_reminded_at is None
+
+
 def test_to_domain_maps_fields():
     orm = SubscriptionORM(
         id=3,

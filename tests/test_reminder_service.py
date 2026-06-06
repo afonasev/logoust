@@ -21,6 +21,7 @@ from src.services.reminder import (
     ReminderMessages,
     apply_reminder_response,
     run_reminders_if_due,
+    run_reminders_now,
     status_for_occurrence,
     statuses_for_appointments,
 )
@@ -204,6 +205,75 @@ async def test_idempotent_no_resend_for_same_occurrence(
         )
     specialist.reminder_last_run_on = None
     assert await _run(session_factory, specialist) == []
+
+
+# --- manual run (run_reminders_now) ------------------------------------------
+
+
+async def _run_now(factory: async_sessionmaker[AsyncSession], specialist, now=_NOW):
+    async with factory() as session:
+        return await run_reminders_now(
+            specialist,
+            now,
+            appointments_repo=SqlAlchemyAppointmentsRepo(session),
+            reminders_repo=SqlAlchemyRemindersRepo(session),
+            schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+            slot_repo=SqlAlchemyRecurringSlotRepo(session),
+            override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
+            clients_repo=SqlAlchemyClientsRepo(session),
+            messages=_MESSAGES,
+        )
+
+
+async def test_manual_run_sends_for_new_occurrence(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    specialist = await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    await _seed_appointment(session_factory, client_id)
+    to_send = await _run_now(session_factory, specialist)
+    assert len(to_send) == 1
+    assert to_send[0].chat_id == _CHAT
+
+
+async def test_manual_run_does_not_resend_journalled_occurrence(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    specialist = await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    await _seed_appointment(session_factory, client_id)
+    assert len(await _run_now(session_factory, specialist)) == 1
+    # The journal blocks a repeat send for the same occurrence (insert_pending False).
+    assert await _run_now(session_factory, specialist) == []
+
+
+async def test_manual_run_does_not_stamp_last_run_on(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    specialist = await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    await _seed_appointment(session_factory, client_id)
+    await _run_now(session_factory, specialist)
+    async with session_factory() as session:
+        reloaded = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert reloaded is not None
+    assert reloaded.reminder_last_run_on is None
+
+
+async def test_manual_run_works_when_reminders_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    specialist = await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    await _seed_appointment(session_factory, client_id)
+    async with session_factory() as session:
+        assert specialist.id is not None
+        await SqlAlchemySpecialistsRepo(session).update_settings(
+            specialist.id, {"reminder_enabled": False}
+        )
+    specialist.reminder_enabled = False
+    to_send = await _run_now(session_factory, specialist)
+    assert len(to_send) == 1
 
 
 # --- responses ---------------------------------------------------------------

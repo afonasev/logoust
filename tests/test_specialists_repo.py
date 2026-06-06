@@ -226,6 +226,36 @@ async def test_mark_digest_run_sets_last_run_on(session: AsyncSession):
     assert fetched.morning_notify_last_run_on == run_on
 
 
+async def test_add_applies_payment_reminder_defaults(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-payment"))
+    assert saved.payment_reminder_enabled is True
+    assert saved.payment_reminder_time == "12:00"
+    assert saved.payment_reminder_last_run_on is None
+
+
+async def test_list_payment_reminder_candidates_only_enabled(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    on = await repo.add(_make("token-pay-on"))
+    assert on.id is not None
+    off = await repo.add(_make("token-pay-off"))
+    assert off.id is not None
+    await repo.update_settings(off.id, {"payment_reminder_enabled": False})
+    candidates = await repo.list_payment_reminder_candidates()
+    assert [c.id for c in candidates] == [on.id]
+
+
+async def test_mark_payment_reminder_run_sets_last_run_on(session: AsyncSession):
+    repo = SqlAlchemySpecialistsRepo(session)
+    saved = await repo.add(_make("token-pay-mark"))
+    assert saved.id is not None
+    run_on = date(2026, 6, 15)
+    await repo.mark_payment_reminder_run(saved.id, run_on)
+    fetched = await repo.get(saved.id)
+    assert fetched is not None
+    assert fetched.payment_reminder_last_run_on == run_on
+
+
 def test_orm_repr_includes_token_prefix():
     orm = SpecialistORM(
         id=1,

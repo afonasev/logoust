@@ -21,6 +21,23 @@ class Subscription:
     status: SubscriptionStatus
     created_at: datetime
     closed_at: datetime | None = None
+    # Anti-duplicate: момент, когда по абонементу уже сформировали напоминание в
+    # текущем пустом цикле. Сбрасывается при продлении (remaining 0 → >0).
+    # См. design.md, решение 3.
+    payment_reminded_at: datetime | None = None
+
+
+def subscription_needs_payment_reminder(sub: Subscription) -> bool:
+    """Нужно ли по абонементу напоминание (payment reminder).
+
+    True, когда абонемент активен, остаток исчерпан и в текущем пустом цикле
+    напоминание ещё не формировалось (см. design.md, решение 3).
+    """
+    return (
+        sub.status is SubscriptionStatus.ACTIVE
+        and sub.remaining == 0
+        and sub.payment_reminded_at is None
+    )
 
 
 class SubscriptionsRepo(Protocol):
@@ -57,3 +74,7 @@ class SubscriptionsRepo(Protocol):
     async def close(  # pragma: no cover
         self, subscription_id: int, specialist_id: int, *, closed_at: datetime
     ) -> Subscription | None: ...
+
+    async def mark_payment_reminded(  # pragma: no cover
+        self, subscription_id: int, at: datetime | None
+    ) -> None: ...

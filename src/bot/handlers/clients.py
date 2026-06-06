@@ -28,6 +28,7 @@ from src.bot.messages import (
 from src.domain.appointment import Appointment
 from src.domain.client import Client, ClientStatus, ClientValidationError
 from src.domain.schedule import format_ru_short, utc_to_wall
+from src.domain.subscription import Subscription
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
@@ -35,6 +36,7 @@ from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringRepo,
 )
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import list_client_future, nearest_future_by_client
 from src.services.clients import (
     ClientsPage,
@@ -49,6 +51,7 @@ from src.services.clients import (
     restore_client,
 )
 from src.services.recurring import SeriesContext, load_series_context, settle
+from src.services.subscriptions import get_active
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +100,8 @@ class EditClient(StatesGroup):
 
 
 def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура специалиста: клиенты, расписание, окна, настройки."""
+    """Постоянная клавиатура специалиста: клиенты, расписание, окна, абонементы,
+    настройки."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -105,7 +109,10 @@ def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=messages.schedule.button),
                 KeyboardButton(text=messages.windows.button),
             ],
-            [KeyboardButton(text=messages.settings.button)],
+            [
+                KeyboardButton(text=messages.subscriptions.button),
+                KeyboardButton(text=messages.settings.button),
+            ],
         ],
         resize_keyboard=True,
     )
@@ -258,6 +265,21 @@ def _future_button(
     ]
 
 
+def _subscription_button(
+    client: Client, subscription: Subscription | None, cm: ClientsMessages
+) -> InlineKeyboardButton:
+    # No active subscription → create; otherwise jump to its card with the remaining
+    # count on the label. Only rendered on active cards (see _card_keyboard).
+    if subscription is None:
+        return InlineKeyboardButton(
+            text=cm.btn_subscription_create, callback_data=f"subs:create:{client.id}"
+        )
+    return InlineKeyboardButton(
+        text=cm.btn_subscription_open.format(remaining=subscription.remaining),
+        callback_data=f"subs:card:{subscription.id}",
+    )
+
+
 def _invite_button(client: Client, cm: ClientsMessages) -> InlineKeyboardButton:
     # Label reflects whether the client already bound their Telegram. Re-tapping
     # reuses the same token, so the action is safe to repeat after linking.
@@ -278,6 +300,7 @@ def _card_keyboard(  # noqa: PLR0913
     cm: ClientsMessages,
     rm: RecurringMessages,
     back: str,
+    subscription: Subscription | None = None,
 ) -> InlineKeyboardMarkup:
     if client.status is ClientStatus.ARCHIVED:
         status_btn = InlineKeyboardButton(
@@ -292,11 +315,16 @@ def _card_keyboard(  # noqa: PLR0913
     rows.append(
         [InlineKeyboardButton(text=m.btn_add, callback_data=f"sched:new:{client.id}")]
     )
-    # Inviting to the bot is only offered on active cards. A recurring series is
-    # created from the normal "записать" flow (a question before the comment), not
-    # a separate button here.
+    # The subscription button and bot invite are only offered on active cards. A
+    # recurring series is created from the normal "записать" flow (a question before
+    # the comment), not a separate button here.
     if client.status is ClientStatus.ACTIVE:
-        rows.append([_invite_button(client, cm)])
+        rows.extend(
+            (
+                [_subscription_button(client, subscription, cm)],
+                [_invite_button(client, cm)],
+            )
+        )
     rows.extend(
         [
             [
@@ -615,6 +643,17 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 now=datetime.now(UTC),
                 series=series,
             )
+            # Active subscription drives the card button (create vs open); only
+            # relevant for active clients, where the button is shown.
+            subscription = (
+                await get_active(
+                    SqlAlchemySubscriptionsRepo(session),
+                    client_id=client.id,
+                    specialist_id=specialist_id,
+                )
+                if client.status is ClientStatus.ACTIVE
+                else None
+            )
         sm = self._messages.schedule
         # Future appointments are buttons below; no header needed. Note only when
         # there are none. Back defaults to the active list / archive by status.
@@ -629,6 +668,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
             cm=self._m,
             rm=self._messages.recurring,
             back=back or _back_target(client.status),
+            subscription=subscription,
         )
         return text, keyboard
 

@@ -1,0 +1,179 @@
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import logging
+
+from src.domain.subscription import (
+    Subscription,
+    SubscriptionsRepo,
+    SubscriptionStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class SubscriptionsPage:
+    items: list[Subscription]
+    page: int
+    has_prev: bool
+    has_next: bool
+
+
+# Верхний порог числа встреч — защита от абсурдного ввода, не жёсткое правило
+# (тот же подход, что и _MAX_SLOT_MINUTES в services/specialists.py).
+_MAX_MEETINGS = 200
+
+
+def parse_meetings(raw: str) -> int | None:
+    """Проверить число встреч: положительное целое в разумных пределах.
+
+    Возвращает число либо None для некорректного ввода (ноль, отрицательное,
+    нечисловое, чрезмерно большое).
+    """
+    value = raw.strip()
+    if not value.isdigit():
+        return None
+    meetings = int(value)
+    if meetings <= 0 or meetings > _MAX_MEETINGS:
+        return None
+    return meetings
+
+
+def _log(event: str, subscription: Subscription) -> None:
+    logger.info(
+        event,
+        extra={
+            "specialist_id": subscription.specialist_id,
+            "client_id": subscription.client_id,
+            "subscription_id": subscription.id,
+        },
+    )
+
+
+async def get_active(
+    repo: SubscriptionsRepo, *, client_id: int, specialist_id: int
+) -> Subscription | None:
+    return await repo.get_active(client_id, specialist_id)
+
+
+async def get_card(
+    repo: SubscriptionsRepo, *, subscription_id: int, specialist_id: int
+) -> Subscription | None:
+    return await repo.get_for_specialist(subscription_id, specialist_id)
+
+
+def _to_page(
+    rows: list[Subscription], *, page: int, page_size: int
+) -> SubscriptionsPage:
+    # Fetch one extra row to detect a next page without a separate COUNT query.
+    return SubscriptionsPage(
+        items=rows[:page_size],
+        page=page,
+        has_prev=page > 0,
+        has_next=len(rows) > page_size,
+    )
+
+
+async def list_active_page(
+    repo: SubscriptionsRepo, *, specialist_id: int, page: int, page_size: int
+) -> SubscriptionsPage:
+    rows = await repo.list_active_for_specialist(
+        specialist_id, limit=page_size + 1, offset=page * page_size
+    )
+    return _to_page(rows, page=page, page_size=page_size)
+
+
+async def list_closed_page(
+    repo: SubscriptionsRepo, *, specialist_id: int, page: int, page_size: int
+) -> SubscriptionsPage:
+    rows = await repo.list_closed_for_specialist(
+        specialist_id, limit=page_size + 1, offset=page * page_size
+    )
+    return _to_page(rows, page=page, page_size=page_size)
+
+
+async def create_subscription(
+    repo: SubscriptionsRepo,
+    *,
+    client_id: int,
+    specialist_id: int,
+    meetings: int,
+) -> Subscription | None:
+    """Создать активный абонемент. None — когда активный абонемент уже есть.
+
+    Инвариант «один активный на клиента» держим здесь: создание идёт строго из
+    одной точки UI (см. design.md, решение 3).
+    """
+    existing = await repo.get_active(client_id, specialist_id)
+    if existing is not None:
+        return None
+    subscription = Subscription(
+        id=None,
+        client_id=client_id,
+        specialist_id=specialist_id,
+        purchased=meetings,
+        remaining=meetings,
+        status=SubscriptionStatus.ACTIVE,
+        created_at=datetime.now(UTC),
+    )
+    saved = await repo.add(subscription)
+    _log("subscription.created", saved)
+    return saved
+
+
+async def decrement_meeting(
+    repo: SubscriptionsRepo, *, subscription_id: int, specialist_id: int
+) -> Subscription | None:
+    """Списать одну встречу. None — если абонемент не найден.
+
+    Остаток не уходит ниже 0: при remaining == 0 возвращается без изменений.
+    """
+    subscription = await repo.get_for_specialist(subscription_id, specialist_id)
+    if subscription is None:
+        return None
+    if subscription.remaining <= 0:
+        return subscription
+    updated = await repo.update_counters(
+        subscription_id,
+        specialist_id,
+        purchased=subscription.purchased,
+        remaining=subscription.remaining - 1,
+    )
+    assert updated is not None  # noqa: S101 — just fetched it under the same owner
+    _log("subscription.decremented", updated)
+    return updated
+
+
+async def extend_subscription(
+    repo: SubscriptionsRepo,
+    *,
+    subscription_id: int,
+    specialist_id: int,
+    meetings: int,
+) -> Subscription | None:
+    """Продлить абонемент: purchased и remaining += meetings (кумулятивно)."""
+    subscription = await repo.get_for_specialist(subscription_id, specialist_id)
+    if subscription is None:
+        return None
+    updated = await repo.update_counters(
+        subscription_id,
+        specialist_id,
+        purchased=subscription.purchased + meetings,
+        remaining=subscription.remaining + meetings,
+    )
+    assert updated is not None  # noqa: S101 — just fetched it under the same owner
+    _log("subscription.extended", updated)
+    return updated
+
+
+async def close_subscription(
+    repo: SubscriptionsRepo, *, subscription_id: int, specialist_id: int
+) -> Subscription | None:
+    """Закрыть абонемент (status=closed, closed_at). None — если не найден."""
+    updated = await repo.close(
+        subscription_id, specialist_id, closed_at=datetime.now(UTC)
+    )
+    if updated is None:
+        return None
+    _log("subscription.closed", updated)
+    return updated

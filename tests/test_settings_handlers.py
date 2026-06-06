@@ -293,6 +293,57 @@ async def test_ask_value_reminder_time_prompt(
     assert _texts(cb.message.edit_text)[0] == messages.settings.ask_reminder_time
 
 
+def test_render_settings_shows_subscription_default():
+    specialist = Specialist(
+        id=1,
+        invite_token="t",
+        telegram_chat_id=None,
+        telegram_username=None,
+        welcomed_at=None,
+        created_at=datetime.now(UTC),
+    )
+    m = load_messages(DEFAULT_MESSAGES_PATH).settings
+    assert "🎫 Встреч в абонементе: 8" in render_settings(specialist, m)
+
+
+async def test_ask_value_subscription_default_prompt(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("settings:subscription_default")
+    state = _state()
+    await h.ask_value(cb, state)
+    assert state.state == EditSetting.subscription_default
+    assert _texts(cb.message.edit_text)[0] == messages.settings.ask_subscription_default
+
+
+async def test_apply_subscription_default_valid(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("10")
+    state = _state(state=EditSetting.subscription_default)
+    await h.apply_subscription_default(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.saved
+    async with session_factory() as session:
+        updated = await get_settings(SqlAlchemySpecialistsRepo(session), _SP)
+    assert updated is not None
+    assert updated.subscription_default == 10
+
+
+async def test_apply_subscription_default_invalid_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _handlers(messages, session_factory)
+    msg = _fake_message("abc")
+    state = _state(state=EditSetting.subscription_default)
+    await h.apply_subscription_default(msg, state, _SP)
+    assert _texts(msg.answer)[0] == messages.settings.bad_subscription_default
+    assert state.state == EditSetting.subscription_default
+
+
 async def test_apply_slot_invalid_then_valid(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

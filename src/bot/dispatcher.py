@@ -6,6 +6,7 @@ from src.bot.handlers.reminders import build_router as build_reminders_router
 from src.bot.handlers.schedule import build_router as build_schedule_router
 from src.bot.handlers.settings import build_router as build_settings_router
 from src.bot.handlers.start import build_router as build_start_router
+from src.bot.handlers.subscriptions import build_router as build_subscriptions_router
 from src.bot.handlers.windows import build_router as build_windows_router
 from src.bot.messages import BotMessages
 
@@ -24,6 +25,7 @@ def build_dispatcher(
     dp.include_router(build_reminders_router(messages, session_factory))
     dp.include_router(build_schedule_router(messages, session_factory))
     dp.include_router(build_settings_router(messages, session_factory))
+    dp.include_router(build_subscriptions_router(messages, session_factory))
     dp.include_router(build_windows_router(messages, session_factory))
     dp.include_router(build_start_router(messages, session_factory))
     return dp

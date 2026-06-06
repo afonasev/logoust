@@ -49,6 +49,8 @@ def test_initial_migration_creates_specialists_table(
         "reminder_enabled",
         "reminder_time",
         "reminder_last_run_on",
+        # Added by 0008.
+        "subscription_default",
     }
     assert set(columns) == expected
 
@@ -360,6 +362,65 @@ def test_appointment_reminders_migration_adds_table_and_columns(
     assert "appointment_reminders" not in insp.get_table_names()
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "reminder_enabled" not in specialist_columns
+    engine.dispose()
+
+
+def test_subscriptions_migration_adds_table_and_backfills_default(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0008 and seed a specialist that predates subscription_default.
+    command.upgrade(cfg, "0007")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    assert "subscriptions" in insp.get_table_names()
+    sub_columns = {c["name"] for c in insp.get_columns("subscriptions")}
+    assert sub_columns == {
+        "id",
+        "client_id",
+        "specialist_id",
+        "purchased",
+        "remaining",
+        "status",
+        "created_at",
+        "closed_at",
+    }
+    index_names = {i["name"] for i in insp.get_indexes("subscriptions")}
+    assert "ix_subscriptions_client_status" in index_names
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "subscription_default" in specialist_columns
+
+    # The pre-existing specialist backfills to the start default of 8.
+    with engine.connect() as conn:
+        value = conn.execute(
+            text(
+                "SELECT subscription_default FROM specialists WHERE invite_token = 'tok'"
+            )
+        ).scalar_one()
+    assert value == 8
+
+    command.downgrade(cfg, "0007")
+    insp = inspect(engine)
+    assert "subscriptions" not in insp.get_table_names()
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "subscription_default" not in specialist_columns
     engine.dispose()
 
 

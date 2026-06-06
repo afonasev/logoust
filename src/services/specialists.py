@@ -8,6 +8,7 @@ from src.domain.schedule import (
     parse_working_days,
 )
 from src.domain.specialist import Specialist, SpecialistsRepo
+from src.services.subscriptions import parse_meetings
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class SettingField(enum.Enum):
     DAY_END = "day_end"
     SLOT_MINUTES = "slot_minutes"
     REMINDER_TIME = "reminder_time"
+    SUBSCRIPTION_DEFAULT = "subscription_default"
 
 
 class SettingsUpdateResult(enum.Enum):
@@ -43,6 +45,8 @@ def _normalize(field: SettingField, raw: str) -> object | None:
         SettingField.REMINDER_TIME,
     }:
         return parse_hhmm(value)
+    if field is SettingField.SUBSCRIPTION_DEFAULT:
+        return parse_meetings(value)
     return _parse_slot_minutes(value)
 
 

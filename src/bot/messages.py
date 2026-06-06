@@ -25,6 +25,8 @@ class ClientsMessages:
     status_archived: str
     dash: str
     card: str
+    btn_subscription_create: str
+    btn_subscription_open: str
     ask_child_name: str
     ask_contact_name: str
     ask_phone: str
@@ -142,6 +144,7 @@ class SettingsMessages:
     btn_working_days: str
     btn_reminder: str
     btn_reminder_time: str
+    btn_subscription_default: str
     state_on: str
     state_off: str
     btn_back: str
@@ -151,11 +154,46 @@ class SettingsMessages:
     ask_day_end: str
     ask_slot: str
     ask_reminder_time: str
+    ask_subscription_default: str
     no_working_days: str
     bad_time: str
     bad_slot: str
+    bad_subscription_default: str
     saved: str
     not_found: str
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionsMessages:
+    button: str
+    list_active_title: str
+    list_active_empty: str
+    list_closed_title: str
+    list_closed_empty: str
+    list_row_active: str
+    list_row_closed: str
+    btn_closed: str
+    btn_active: str
+    closed_note: str
+    card: str
+    create_prompt: str
+    extend_prompt: str
+    bad_meetings: str
+    created: str
+    extended: str
+    decremented: str
+    nothing_to_decrement: str
+    close_confirm: str
+    closed: str
+    not_found: str
+    cancelled: str
+    btn_default: str
+    btn_decrement: str
+    btn_extend: str
+    btn_close: str
+    btn_confirm_close: str
+    btn_cancel: str
+    btn_back_client: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +213,7 @@ class BotMessages:
     recurring: RecurringMessages
     reminder: ReminderMessages
     settings: SettingsMessages
+    subscriptions: SubscriptionsMessages
     windows: WindowsMessages
 
 
@@ -211,6 +250,8 @@ def load_messages(path: Path) -> BotMessages:
             status_archived=_require(data, "clients.status_archived"),
             dash=_require(data, "clients.dash"),
             card=_require(data, "clients.card").strip(),
+            btn_subscription_create=_require(data, "clients.btn_subscription_create"),
+            btn_subscription_open=_require(data, "clients.btn_subscription_open"),
             ask_child_name=_require(data, "clients.ask_child_name"),
             ask_contact_name=_require(data, "clients.ask_contact_name"),
             ask_phone=_require(data, "clients.ask_phone"),
@@ -320,6 +361,9 @@ def load_messages(path: Path) -> BotMessages:
             btn_working_days=_require(data, "settings.btn_working_days"),
             btn_reminder=_require(data, "settings.btn_reminder"),
             btn_reminder_time=_require(data, "settings.btn_reminder_time"),
+            btn_subscription_default=_require(
+                data, "settings.btn_subscription_default"
+            ),
             state_on=_require(data, "settings.state_on"),
             state_off=_require(data, "settings.state_off"),
             btn_back=_require(data, "settings.btn_back"),
@@ -329,11 +373,48 @@ def load_messages(path: Path) -> BotMessages:
             ask_day_end=_require(data, "settings.ask_day_end"),
             ask_slot=_require(data, "settings.ask_slot"),
             ask_reminder_time=_require(data, "settings.ask_reminder_time"),
+            ask_subscription_default=_require(
+                data, "settings.ask_subscription_default"
+            ),
             no_working_days=_require(data, "settings.no_working_days"),
             bad_time=_require(data, "settings.bad_time"),
             bad_slot=_require(data, "settings.bad_slot"),
+            bad_subscription_default=_require(
+                data, "settings.bad_subscription_default"
+            ),
             saved=_require(data, "settings.saved"),
             not_found=_require(data, "settings.not_found"),
+        ),
+        subscriptions=SubscriptionsMessages(
+            button=_require(data, "subscriptions.button"),
+            list_active_title=_require(data, "subscriptions.list_active_title"),
+            list_active_empty=_require(data, "subscriptions.list_active_empty"),
+            list_closed_title=_require(data, "subscriptions.list_closed_title"),
+            list_closed_empty=_require(data, "subscriptions.list_closed_empty"),
+            list_row_active=_require(data, "subscriptions.list_row_active"),
+            list_row_closed=_require(data, "subscriptions.list_row_closed"),
+            btn_closed=_require(data, "subscriptions.btn_closed"),
+            btn_active=_require(data, "subscriptions.btn_active"),
+            closed_note=_require(data, "subscriptions.closed_note"),
+            card=_require(data, "subscriptions.card").strip(),
+            create_prompt=_require(data, "subscriptions.create_prompt"),
+            extend_prompt=_require(data, "subscriptions.extend_prompt"),
+            bad_meetings=_require(data, "subscriptions.bad_meetings"),
+            created=_require(data, "subscriptions.created"),
+            extended=_require(data, "subscriptions.extended"),
+            decremented=_require(data, "subscriptions.decremented"),
+            nothing_to_decrement=_require(data, "subscriptions.nothing_to_decrement"),
+            close_confirm=_require(data, "subscriptions.close_confirm"),
+            closed=_require(data, "subscriptions.closed"),
+            not_found=_require(data, "subscriptions.not_found"),
+            cancelled=_require(data, "subscriptions.cancelled"),
+            btn_default=_require(data, "subscriptions.btn_default"),
+            btn_decrement=_require(data, "subscriptions.btn_decrement"),
+            btn_extend=_require(data, "subscriptions.btn_extend"),
+            btn_close=_require(data, "subscriptions.btn_close"),
+            btn_confirm_close=_require(data, "subscriptions.btn_confirm_close"),
+            btn_cancel=_require(data, "subscriptions.btn_cancel"),
+            btn_back_client=_require(data, "subscriptions.btn_back_client"),
         ),
         windows=WindowsMessages(
             button=_require(data, "windows.button"),

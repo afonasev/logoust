@@ -12,6 +12,7 @@ from src.domain.specialist import (
     DEFAULT_REMINDER_ENABLED,
     DEFAULT_REMINDER_TIME,
     DEFAULT_SLOT_MINUTES,
+    DEFAULT_SUBSCRIPTION_DEFAULT,
     DEFAULT_TIMEZONE,
     DEFAULT_WORKING_DAYS,
     ChatIdConflictError,
@@ -55,6 +56,9 @@ class SpecialistORM(Base):
         String(5), nullable=False, default=DEFAULT_REMINDER_TIME
     )
     reminder_last_run_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    subscription_default: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=DEFAULT_SUBSCRIPTION_DEFAULT
+    )
 
     def __repr__(self) -> str:
         return f"<SpecialistORM id={self.id} token={self.invite_token[:6]}…>"
@@ -76,6 +80,7 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         reminder_enabled=bool(orm.reminder_enabled),
         reminder_time=orm.reminder_time,
         reminder_last_run_on=orm.reminder_last_run_on,
+        subscription_default=orm.subscription_default,
     )
 
 

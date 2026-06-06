@@ -22,6 +22,7 @@
 | `reminder_enabled`  | BOOLEAN     | нет | Включены ли авто-напоминания клиентам. Server-default `1` (opt-out). |
 | `reminder_time`     | VARCHAR(5)  | нет | Настенное `ЧЧ:ММ` ежедневного прохода напоминаний. Server-default `12:00`. |
 | `reminder_last_run_on` | DATE     | да  | Дата (в tz) последнего выполненного прохода напоминаний; антидубль/догон. `NULL` — ещё не выполнялся. |
+| `subscription_default` | INTEGER  | нет | Дефолтное число встреч, подставляемое в подсказку создания/продления абонемента. Server-default `8`. |
 
 Индексы:
 
@@ -159,6 +160,31 @@
 - Минимум при создании валидируется в `services` (имя ребёнка + имя контакта + хотя бы один из `contact_phone`/`contact_telegram`), а не в БД — правило не зависит от способа ввода.
 - `telegram_chat_id` намеренно **не** уникален (в отличие от `specialists`): специалист может тестировать рассылку под своим аккаунтом, привязав его к нескольким карточкам. Маршрутизация оператора идёт через `specialists`, по `clients.telegram_chat_id` никто не ищет.
 
+### `subscriptions`
+
+Абонемент клиента на несколько встреч. Принадлежит клиенту; `specialist_id` денормализован (как в `appointments`) ради дешёвой проверки владельца без джойна. Не более одного абонемента со `status = active` на клиента — инвариант держится в сервисе (создание из одной точки UI). Закрытые записи не удаляются.
+
+| Колонка         | Тип         | NULL | Замечание                                                      |
+| --------------- | ----------- | ---- | -------------------------------------------------------------- |
+| `id`            | INTEGER     | нет  | PK, autoincrement. Используется в `callback_data`.             |
+| `client_id`     | INTEGER     | нет  | FK → `clients.id`. Клиент абонемента.                          |
+| `specialist_id` | INTEGER     | нет  | FK → `specialists.id`. Денормализованный владелец.             |
+| `purchased`     | INTEGER     | нет  | Всего куплено встреч за жизнь абонемента (растёт при продлении).|
+| `remaining`     | INTEGER     | нет  | Текущий остаток. Списание `-1` с нижней границей 0; продление `+N`. |
+| `status`        | VARCHAR(16) | нет  | `active` \| `closed` (enum строкой).                           |
+| `created_at`    | DATETIME    | нет  | Момент создания (aware UTC).                                   |
+| `closed_at`     | DATETIME    | да   | Момент закрытия; `NULL` у активного.                           |
+
+Индексы:
+
+- `ix_subscriptions_client_status` — составной по `(client_id, status)`. Обслуживает поиск активного абонемента клиента (проверка инварианта «один активный» и кнопка на карточке клиента).
+
+Решения по схеме:
+
+- `purchased` и `remaining` — оба кумулятивные счётчики, без отдельной таблицы движений (YAGNI): карточка отвечает на «сколько куплено / сколько осталось» без журнала.
+- Инвариант «один активный» держится запросом `client_id = ? AND status = 'active'` в сервисе; partial unique index оставлен на будущее (поток ввода последовательный, гонка двойного создания практически нулевая).
+- Абонемент не связан со встречами/расписанием: остаток меняется только ручными действиями.
+
 ## Миграции
 
 - Каталог: `alembic/versions/`.
@@ -169,6 +195,7 @@
 - `0005_client_telegram_link.py` — добавляет в `clients` колонки `invite_token`, `telegram_chat_id`, `linked_at` (все nullable) и уникальный индекс `ix_clients_invite_token`. Существующие строки → `NULL` (валидное «не приглашён»). Down-ревизия удаляет индекс и колонки.
 - `0006_recurring_appointments.py` — создаёт таблицы `recurring_appointments` (индекс `ix_recurring_specialist_active`) и `recurring_exceptions` (`UNIQUE(series_id, original_date)`); добавляет в `appointments` колонки `series_id`, `origin_date` (обе nullable) и уникальный индекс `uq_appointments_series_origin`. Существующие записи → `series_id`/`origin_date = NULL` (разовые, поведение не меняется). Колонки добавлены без inline-FK (SQLite не ALTER-ит ограничения). Down-ревизия удаляет индекс, колонки и обе таблицы.
 - `0007_appointment_reminders.py` — добавляет в `specialists` колонки `reminder_enabled` (server-default `1`), `reminder_time` (server-default `12:00`), `reminder_last_run_on` (nullable); создаёт таблицу `appointment_reminders` (`UNIQUE(specialist_id, client_id, starts_at)`). Существующие специалисты → напоминания включены на 12:00. Down-ревизия удаляет таблицу и три колонки.
+- `0008_subscriptions.py` — добавляет в `specialists` колонку `subscription_default` (server-default `8`); создаёт таблицу `subscriptions` (FK на `clients` и `specialists`, индекс `ix_subscriptions_client_status`). Существующие специалисты → `subscription_default = 8`. Down-ревизия удаляет таблицу и колонку.
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

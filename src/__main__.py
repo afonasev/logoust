@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 import logging
 
@@ -45,12 +46,19 @@ async def main() -> None:
     session_factory = build_session_factory(engine)
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN.get_secret_value())
     dp = build_dispatcher(messages, session_factory)
+    # The minute-scheduler is a background task tied to polling's lifetime, not a
+    # gather peer: aiogram's start_polling handles SIGINT/SIGTERM and *returns* on
+    # shutdown, so gathering it with the never-ending loop would hang on Ctrl-C
+    # waiting for the loop. Cancelling the task on exit lets the process stop cleanly.
+    scheduler_task = asyncio.create_task(
+        _scheduler_loop(bot, session_factory, messages)
+    )
     try:
-        await asyncio.gather(
-            dp.start_polling(bot),
-            _scheduler_loop(bot, session_factory, messages),
-        )
+        await dp.start_polling(bot)
     finally:
+        scheduler_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler_task
         await bot.session.close()
         await engine.dispose()
 

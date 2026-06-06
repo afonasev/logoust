@@ -43,6 +43,7 @@ _CB_WORKDAYS = "settings:workdays"
 _CB_TOGGLE_DAY = "settings:wd:"  # + weekday index 0-6
 _CB_REMINDER_TOGGLE = "settings:reminder"
 _CB_REMINDER_TIME = "settings:reminder_time"
+_CB_SUBSCRIPTION = "settings:subscription_default"
 
 # Maps the FSM step to the setting it edits and the prompt/error texts.
 _FIELD_BY_CALLBACK = {
@@ -50,6 +51,7 @@ _FIELD_BY_CALLBACK = {
     _CB_DAY_END: SettingField.DAY_END,
     _CB_SLOT: SettingField.SLOT_MINUTES,
     _CB_REMINDER_TIME: SettingField.REMINDER_TIME,
+    _CB_SUBSCRIPTION: SettingField.SUBSCRIPTION_DEFAULT,
 }
 
 
@@ -58,6 +60,7 @@ class EditSetting(StatesGroup):
     day_end = State()
     slot = State()
     reminder_time = State()
+    subscription_default = State()
 
 
 _STATE_BY_FIELD = {
@@ -65,6 +68,7 @@ _STATE_BY_FIELD = {
     SettingField.DAY_END: EditSetting.day_end,
     SettingField.SLOT_MINUTES: EditSetting.slot,
     SettingField.REMINDER_TIME: EditSetting.reminder_time,
+    SettingField.SUBSCRIPTION_DEFAULT: EditSetting.subscription_default,
 }
 
 
@@ -87,6 +91,11 @@ def _menu_keyboard(specialist: Specialist, m: SettingsMessages) -> InlineKeyboar
                 InlineKeyboardButton(
                     text=m.btn_reminder_time, callback_data=_CB_REMINDER_TIME
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_subscription_default, callback_data=_CB_SUBSCRIPTION
+                )
             ],
         ]
     )
@@ -134,6 +143,7 @@ def render_settings(specialist: Specialist, m: SettingsMessages) -> str:
         working_days=_format_working_days(specialist.working_days, m),
         reminders=m.state_on if specialist.reminder_enabled else m.state_off,
         reminder_time=specialist.reminder_time,
+        subscription_default=specialist.subscription_default,
     )
 
 
@@ -256,12 +266,16 @@ class SettingsHandlers:
             return self._m.ask_day_end
         if field is SettingField.REMINDER_TIME:
             return self._m.ask_reminder_time
+        if field is SettingField.SUBSCRIPTION_DEFAULT:
+            return self._m.ask_subscription_default
         return self._m.ask_slot
 
     def _error(self, field: SettingField) -> str:
-        return (
-            self._m.bad_slot if field is SettingField.SLOT_MINUTES else self._m.bad_time
-        )
+        if field is SettingField.SLOT_MINUTES:
+            return self._m.bad_slot
+        if field is SettingField.SUBSCRIPTION_DEFAULT:
+            return self._m.bad_subscription_default
+        return self._m.bad_time
 
     async def apply_value(
         self,
@@ -313,6 +327,13 @@ class SettingsHandlers:
     ) -> None:
         await self.apply_value(message, state, specialist_id, SettingField.SLOT_MINUTES)
 
+    async def apply_subscription_default(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self.apply_value(
+            message, state, specialist_id, SettingField.SUBSCRIPTION_DEFAULT
+        )
+
 
 def build_router(
     messages: BotMessages,
@@ -329,6 +350,9 @@ def build_router(
     router.message.register(h.apply_day_end, EditSetting.day_end)
     router.message.register(h.apply_slot, EditSetting.slot)
     router.message.register(h.apply_reminder_time, EditSetting.reminder_time)
+    router.message.register(
+        h.apply_subscription_default, EditSetting.subscription_default
+    )
 
     router.callback_query.register(h.open_menu, F.data == _CB_MENU)
     router.callback_query.register(h.show_timezones, F.data == _CB_TZLIST)
@@ -337,6 +361,7 @@ def build_router(
     router.callback_query.register(h.ask_value, F.data == _CB_DAY_END)
     router.callback_query.register(h.ask_value, F.data == _CB_SLOT)
     router.callback_query.register(h.ask_value, F.data == _CB_REMINDER_TIME)
+    router.callback_query.register(h.ask_value, F.data == _CB_SUBSCRIPTION)
     router.callback_query.register(h.toggle_reminder, F.data == _CB_REMINDER_TOGGLE)
     router.callback_query.register(h.show_working_days, F.data == _CB_WORKDAYS)
     router.callback_query.register(h.toggle_day, F.data.startswith(_CB_TOGGLE_DAY))

@@ -12,12 +12,12 @@ class Appointment:
     comment: str | None
     created_at: datetime
     updated_at: datetime
-    # Recurring-series back-reference. Both NULL = a one-off appointment. A real
+    # Recurring-slot back-reference. Both NULL = a one-off appointment. A real
     # row with both set is a materialised past occurrence; a virtual future
     # occurrence is an Appointment with id=None and these set (see design.md).
-    series_id: int | None = None
+    slot_id: int | None = None
     origin_date: date | None = None
-    # Transient display flag (never persisted): True only for a plain future series
+    # Transient display flag (never persisted): True only for a plain future slot
     # occurrence, so lists show the 🔁 marker. A moved/rescheduled single date is
     # individualised and carries False, so it is not marked as recurring.
     recurring_mark: bool = False

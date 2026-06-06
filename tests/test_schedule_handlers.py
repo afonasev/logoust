@@ -22,7 +22,10 @@ from src.domain.schedule import format_ru_date, today_in_tz, utc_to_wall, wall_t
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
-from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotRepo,
+)
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import (
     SqlAlchemyScheduledMessagesRepo,
@@ -30,6 +33,7 @@ from src.infrastructure.scheduled_messages_repo import (
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
+from src.services.recurring import add_slot, create_schedule
 
 _SP = 1
 _TZ = "Asia/Yekaterinburg"
@@ -365,7 +369,8 @@ async def test_choose_regular_no_then_asks_comment(
         data={"flow": "create", "client_id": 1, "day": "2030-01-15", "hhmm": "14:00"}
     )
     await h.choose_regular(cb, state)
-    assert state.store["regular"] is False
+    # "No" keeps the one-off flow and moves straight to the comment step.
+    assert state.store["flow"] == "create"
     assert state.state == Schedule.comment
     assert _texts(cb.message.edit_text)[0] == messages.schedule.ask_comment
 
@@ -419,32 +424,43 @@ async def test_skip_comment_creates_without_comment(
     assert rows[0].comment is None
 
 
-async def test_regular_flow_creates_series(
+async def test_choose_regular_yes_seeds_first_slot_and_asks_add_more(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
     h = _handlers(messages, session_factory)
-    msg = _fake_message("каждую неделю")
+    cb = _fake_callback("sched:reg:1")
     state = _state(
         data={
             "flow": "create",
             "client_id": client_id,
             "day": "2030-01-15",  # a Tuesday
             "hhmm": "14:00",
-            "regular": True,
         }
     )
-    await h.apply_comment(msg, state, _SP)
-    # The regular branch creates a series (not a one-off) and shows its card.
-    assert messages.recurring.created in _texts(msg.answer)
+    await h.choose_regular(cb, state)
+    # "Yes" no longer creates the schedule here: it seeds the first slot into FSM
+    # data and shows the "add another day?" step. Creation completes in
+    # RecurringHandlers via recur:done (tested in test_recurring_handlers.py).
+    assert state.store["flow"] == "rcreate"
+    assert state.store["slots"] == [
+        {
+            "weekday": date(2030, 1, 15).weekday(),
+            "hhmm": "14:00",
+            "start_date": "2030-01-15",
+        }
+    ]
+    assert _texts(cb.message.edit_text)[0] == messages.recurring.add_more
+    cbs = _callbacks(_markup(cb.message.edit_text))
+    assert "recur:add" in cbs
+    assert "recur:done" in cbs
+    # Nothing is persisted at this step.
     async with session_factory() as session:
-        series = await SqlAlchemyRecurringRepo(session).list_active_for_specialist(_SP)
-    assert len(series) == 1
-    assert series[0].start_date == date(2030, 1, 15)
-    assert series[0].weekday == date(2030, 1, 15).weekday()
-    assert series[0].time_hhmm == "14:00"
-    assert series[0].comment == "каждую неделю"
+        schedules = await SqlAlchemyRecurringScheduleRepo(
+            session
+        ).list_active_for_specialist(_SP)
+    assert schedules == []
 
 
 async def test_custom_time_valid_then_comment(
@@ -627,6 +643,46 @@ async def test_confirm_then_do_delete(
         assert (
             await SqlAlchemyAppointmentsRepo(session).get_for_specialist(appt.id, _SP)
         ) is None
+
+
+async def test_day_view_shows_virtual_recurring_occurrence(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # A future slot occurrence renders as a button routing to its meeting card
+    # (recur:occ:<slot>:<date>) — the virtual-occurrence branch of _appt_row.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    now = datetime.now(UTC)
+    today = today_in_tz(now, _TZ)
+    days_ahead = (0 - today.weekday()) % 7 or 7  # the next Monday (a working day)
+    monday = today + timedelta(days=days_ahead)
+    async with session_factory() as session:
+        schedule = await create_schedule(
+            SqlAlchemyRecurringScheduleRepo(session),
+            specialist_id=_SP,
+            client_id=client_id,
+            comment=None,
+            now=now,
+        )
+    assert schedule.id is not None
+    async with session_factory() as session:
+        slot = await add_slot(
+            SqlAlchemyRecurringSlotRepo(session),
+            schedule_id=schedule.id,
+            weekday=0,
+            time_hhmm="14:00",
+            tz=_TZ,
+            now=now,
+            start_date=monday,
+        )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"sched:day_view:{monday.isoformat()}")
+    await h.open_day(cb, _SP)
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert any(
+        c is not None and c.startswith(f"recur:occ:{slot.id}:{monday.isoformat()}")
+        for c in callbacks
+    )
 
 
 async def test_cancel_clears_state_and_opens_today(
@@ -882,7 +938,7 @@ async def _seed_reminder_status(
             specialist_id=_SP,
             client_id=client_id,
             starts_at=starts_at,
-            series_id=None,
+            slot_id=None,
             origin_date=None,
             status=ReminderStatus.PENDING,
             sent_at=now,
@@ -1387,36 +1443,6 @@ async def test_notify_skip_without_context(
     await h.notify_skip(cb, _state(), _SP)
     assert _texts(cb.message.edit_text)[0] == messages.schedule.notify_skipped
     cb.message.answer.assert_not_awaited()
-
-
-# --- notify the client: series (whole-rule) ----------------------------------
-
-
-async def test_regular_flow_asks_series_notify_for_linked(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    h = _handlers(messages, session_factory)
-    msg = _fake_message("каждую неделю")
-    state = _state(
-        data={
-            "flow": "create",
-            "client_id": client_id,
-            "day": "2030-01-15",  # a Tuesday
-            "hhmm": "14:00",
-            "regular": True,
-        }
-    )
-    await h.apply_comment(msg, state, _SP)
-    # The notify prompt offers the moment choice; context is a whole-series target.
-    cbs = _callbacks(_markup(msg.answer))
-    assert "sched:ntfwhen" in cbs
-    notify = state.store["notify"]
-    assert notify["event"] == "c"
-    assert notify["target_key"].startswith("series:")
-    rule = messages.schedule.notify_series_created.format(rule="каждый вторник в 14:00")
-    assert rule == notify["text"]
 
 
 async def _audit_messages(

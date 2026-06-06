@@ -94,7 +94,7 @@ async def _seed_reminder(
     factory: async_sessionmaker[AsyncSession],
     client_id: int,
     *,
-    series_id: int | None = None,
+    slot_id: int | None = None,
     origin_date: date | None = None,
 ) -> int:
     async with factory() as session:
@@ -103,7 +103,7 @@ async def _seed_reminder(
             specialist_id=_SP,
             client_id=client_id,
             starts_at=_STARTS,
-            series_id=series_id,
+            slot_id=slot_id,
             origin_date=origin_date,
             status=ReminderStatus.PENDING,
             sent_at=_NOW,
@@ -174,20 +174,20 @@ async def test_decline_one_off_without_row_falls_back_to_day_view(
     assert markup.inline_keyboard[0][0].callback_data == "sched:day_view:2026-06-16"
 
 
-async def test_decline_series_repeat_links_to_series_card(
+async def test_decline_slot_repeat_links_to_meeting_card(
     session_factory: async_sessionmaker[AsyncSession],
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
     reminder_id = await _seed_reminder(
-        session_factory, client_id, series_id=4, origin_date=_TOMORROW
+        session_factory, client_id, slot_id=4, origin_date=_TOMORROW
     )
     cb = _fake_callback(
         build_confirm_callback(reminder_id, confirm=False), from_id=_CHAT
     )
     await _handlers(session_factory).confirm(cb)
     markup = cb.bot.send_message.await_args.kwargs["reply_markup"]
-    assert markup.inline_keyboard[0][0].callback_data == "recur:card:4:2026-06-16"
+    assert markup.inline_keyboard[0][0].callback_data == "recur:occ:4:2026-06-16"
 
 
 async def test_foreign_chat_silently_dismissed(

@@ -18,10 +18,10 @@ from src.domain.specialist import Specialist
 from src.services.audit import record_action
 from src.services.recurring import (
     SeriesContext,
-    nearest_series_landing_day,
+    nearest_slot_landing_day,
     next_occurrence,
     occurrences_landing_in,
-    series_taken_times,
+    slot_taken_times,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,9 +74,14 @@ async def taken_slot_times(  # noqa: PLR0913
         if appt.id != exclude_id
     }
     if series is not None:
-        for s in series.series:
-            taken |= series_taken_times(
-                s, series.for_series(s.id), day, tz, series.today
+        for slot in series.slots:
+            taken |= slot_taken_times(
+                slot,
+                series.schedule_for(slot),
+                series.for_slot(slot.id),
+                day,
+                tz,
+                series.today,
             )
     return taken
 
@@ -270,13 +275,14 @@ async def list_specialist_day(
 
 
 def _virtual_on_day(series: SeriesContext, day: date, tz: str) -> list[Appointment]:
-    """Virtual series occurrences whose instant lands on `day`."""
+    """Virtual slot occurrences whose instant lands on `day`."""
     occurrences: list[Appointment] = []
-    for s in series.series:
+    for slot in series.slots:
         occurrences.extend(
             occurrences_landing_in(
-                s,
-                series.for_series(s.id),
+                slot,
+                series.schedule_for(slot),
+                series.for_slot(slot.id),
                 day,
                 day + timedelta(days=1),
                 tz,
@@ -327,7 +333,7 @@ async def adjacent_shown_day(  # noqa: PLR0913
         repo, specialist_id=specialist_id, tz=tz, day=day, forward=forward
     )
     series_day = (
-        nearest_series_landing_day(series, day, tz, forward=forward)
+        nearest_slot_landing_day(series, day, tz, forward=forward)
         if series is not None
         else None
     )
@@ -400,10 +406,16 @@ def _virtual_in_week(series: SeriesContext, today: date, tz: str) -> list[Appoin
     """Virtual occurrences whose instant falls within [today, today+7) days."""
     week_end = today + timedelta(days=7)
     occurrences: list[Appointment] = []
-    for s in series.series:
+    for slot in series.slots:
         occurrences.extend(
             occurrences_landing_in(
-                s, series.for_series(s.id), today, week_end, tz, series.today
+                slot,
+                series.schedule_for(slot),
+                series.for_slot(slot.id),
+                today,
+                week_end,
+                tz,
+                series.today,
             )
         )
     return occurrences
@@ -463,13 +475,16 @@ async def nearest_future_by_client(
     for appt in rows:  # rows are ascending, so the first per client is the nearest
         nearest.setdefault(appt.client_id, appt)
     if series is not None:
-        for s in series.series:
-            occ = next_occurrence(s, series.for_series(s.id), tz, series.today)
-            current = nearest.get(s.client_id)
+        for slot in series.slots:
+            schedule = series.schedule_for(slot)
+            occ = next_occurrence(
+                slot, schedule, series.for_slot(slot.id), tz, series.today
+            )
+            current = nearest.get(schedule.client_id)
             if occ is not None and (
                 current is None or occ.starts_at < current.starts_at
             ):
-                nearest[s.client_id] = occ
+                nearest[schedule.client_id] = occ
     return nearest
 
 
@@ -492,10 +507,13 @@ async def list_client_future(  # noqa: PLR0913
     if series is None:
         return rows
     extra: list[Appointment] = []
-    for s in series.series:
-        if s.client_id != client_id:
+    for slot in series.slots:
+        schedule = series.schedule_for(slot)
+        if schedule.client_id != client_id:
             continue
-        occ = next_occurrence(s, series.for_series(s.id), tz, series.today)
+        occ = next_occurrence(
+            slot, schedule, series.for_slot(slot.id), tz, series.today
+        )
         if occ is not None:
             extra.append(occ)
     return sorted([*rows, *extra], key=lambda appt: appt.starts_at)

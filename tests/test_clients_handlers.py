@@ -17,12 +17,18 @@ from src.domain.appointment import Appointment
 from src.domain.audit import AuditEvent
 from src.domain.client import Client, ClientStatus
 from src.domain.reminder import AppointmentReminder, ReminderStatus
+from src.domain.schedule import next_weekday_on_or_after, today_in_tz
 from src.domain.scheduled_message import (
     ScheduledClientMessage,
     ScheduledMessageStatus,
 )
+from src.domain.specialist import DEFAULT_TIMEZONE
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotRepo,
+)
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -33,6 +39,7 @@ from src.services.clients import (
     list_clients,
 )
 from src.services.invites import consume_invite, create_invite
+from src.services.recurring import add_slot, create_schedule
 
 if TYPE_CHECKING:
     from aiogram.types import TelegramObject
@@ -313,7 +320,7 @@ async def _seed_reminder_status(
             specialist_id=_SPECIALIST_ID,
             client_id=client_id,
             starts_at=starts_at,
-            series_id=None,
+            slot_id=None,
             origin_date=None,
             status=ReminderStatus.PENDING,
             sent_at=moment,
@@ -572,6 +579,47 @@ async def test_show_card_shows_future_appointments(
     assert f"clients:edit:{client.id}" in cbs
     assert f"clients:archiveask:{client.id}" in cbs
     assert f"sched:chist:{client.id}:0" in cbs
+
+
+async def test_show_card_shows_virtual_recurring_occurrence(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # A client with an active recurring schedule shows the nearest virtual repeat
+    # as a button opening the single-meeting card: recur:occ:<slot>:<date>~<back>.
+    await _seed_specialist(session_factory)
+    client = await _seed_client(session_factory, child_name="Лиза")
+    assert client.id is not None
+    moment = datetime.now(UTC)
+    tz = DEFAULT_TIMEZONE
+    # Pick a weekday two days out so the nearest occurrence is unambiguously future.
+    weekday = (today_in_tz(moment, tz).weekday() + 2) % 7
+    async with session_factory() as session:
+        schedule = await create_schedule(
+            SqlAlchemyRecurringScheduleRepo(session),
+            specialist_id=_SPECIALIST_ID,
+            client_id=client.id,
+            comment="регулярно",
+            now=moment,
+        )
+        assert schedule.id is not None
+        slot = await add_slot(
+            SqlAlchemyRecurringSlotRepo(session),
+            schedule_id=schedule.id,
+            weekday=weekday,
+            time_hhmm="14:00",
+            tz=tz,
+            now=moment,
+        )
+    assert slot.id is not None
+    origin = next_weekday_on_or_after(today_in_tz(moment, tz), weekday)
+
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"clients:card:{client.id}")
+    await h.show_card(cb, _SPECIALIST_ID)
+    markup = _markup(cb.message.edit_text)
+    cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+    expected = f"recur:occ:{slot.id}:{origin.isoformat()}~clients:card:{client.id}"
+    assert expected in cbs
 
 
 async def test_show_card_not_found(

@@ -7,15 +7,16 @@ from src.domain.schedule import wall_to_utc
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
-from src.services.recurring import create_series
+from src.services.recurring import add_slot, create_schedule
 from src.services.reminder import (
     ReminderMessages,
     apply_reminder_response,
@@ -91,8 +92,9 @@ async def _run(factory: async_sessionmaker[AsyncSession], specialist, now=_NOW):
             appointments_repo=SqlAlchemyAppointmentsRepo(session),
             reminders_repo=SqlAlchemyRemindersRepo(session),
             specialists_repo=SqlAlchemySpecialistsRepo(session),
-            recurring_repo=SqlAlchemyRecurringRepo(session),
-            exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+            schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+            slot_repo=SqlAlchemyRecurringSlotRepo(session),
+            override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
             clients_repo=SqlAlchemyClientsRepo(session),
             messages=_MESSAGES,
         )
@@ -146,13 +148,19 @@ async def test_series_repeat_is_reminded(
     specialist = await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
     async with session_factory() as session:
-        await create_series(
-            SqlAlchemyRecurringRepo(session),
+        schedule = await create_schedule(
+            SqlAlchemyRecurringScheduleRepo(session),
             specialist_id=_SP,
             client_id=client_id,
+            comment=None,
+            now=_NOW,
+        )
+        assert schedule.id is not None
+        slot = await add_slot(
+            SqlAlchemyRecurringSlotRepo(session),
+            schedule_id=schedule.id,
             weekday=_TOMORROW.weekday(),  # lands on tomorrow
             time_hhmm="11:00",
-            comment=None,
             tz=_TZ,
             now=_NOW,
             start_date=_TOMORROW,
@@ -160,6 +168,11 @@ async def test_series_repeat_is_reminded(
     to_send = await _run(session_factory, specialist)
     assert len(to_send) == 1
     assert "11:00" in to_send[0].text
+    # The journaled reminder for a virtual occurrence carries its slot_id.
+    async with session_factory() as session:
+        reminder = await SqlAlchemyRemindersRepo(session).get(to_send[0].reminder_id)
+    assert reminder is not None
+    assert reminder.slot_id == slot.id
 
 
 async def test_not_due_disabled_sends_nothing(
@@ -206,7 +219,7 @@ async def _seed_reminder(
             specialist_id=_SP,
             client_id=client_id,
             starts_at=wall_to_utc(_TOMORROW, "10:00", _TZ),
-            series_id=None,
+            slot_id=None,
             origin_date=None,
             status=ReminderStatus.PENDING,
             sent_at=_NOW,

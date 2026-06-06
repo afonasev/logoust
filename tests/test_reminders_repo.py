@@ -19,7 +19,7 @@ def _reminder(**overrides: object) -> AppointmentReminder:
         "specialist_id": _SP,
         "client_id": _CLIENT,
         "starts_at": _STARTS,
-        "series_id": None,
+        "slot_id": None,
         "origin_date": None,
         "status": ReminderStatus.PENDING,
         "sent_at": datetime(2026, 6, 15, 7, 0, tzinfo=UTC),
@@ -42,12 +42,12 @@ async def test_insert_pending_sets_id_and_is_idempotent(session: AsyncSession):
 
 async def test_get_round_trips(session: AsyncSession):
     repo = SqlAlchemyRemindersRepo(session)
-    reminder = _reminder(series_id=3, origin_date=date(2026, 6, 16))
+    reminder = _reminder(slot_id=3, origin_date=date(2026, 6, 16))
     await repo.insert_pending(reminder)
     assert reminder.id is not None
     loaded = await repo.get(reminder.id)
     assert loaded is not None
-    assert loaded.series_id == 3
+    assert loaded.slot_id == 3
     assert loaded.origin_date == date(2026, 6, 16)
     assert loaded.status is ReminderStatus.PENDING
     assert loaded.starts_at == _STARTS

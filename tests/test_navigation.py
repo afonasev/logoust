@@ -27,7 +27,7 @@ def _navigator(calls: list[tuple[str, str]]) -> Navigator:
     return Navigator(
         builders={
             "sched:day_view:": builder("day"),
-            "recur:card:": builder("series"),
+            "recur:sched:": builder("series"),
             "clients:card:": builder("client"),
         },
         fallback=builder("today"),
@@ -56,7 +56,7 @@ async def test_open_after_action_edits_card_then_opens_menu():
     await nav.open_after_action(
         message,
         result_text="готово",
-        back="recur:card:3:2026-06-10",
+        back="recur:sched:3~clients:card:5",
         specialist_id=1,
         edit=True,
     )

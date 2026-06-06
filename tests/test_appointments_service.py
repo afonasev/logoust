@@ -4,7 +4,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.appointment import Appointment
-from src.domain.recurring import RecurringAppointment, RecurringException
+from src.domain.recurring import (
+    RecurringSchedule,
+    RecurringSlot,
+    RecurringSlotOverride,
+)
 from src.domain.schedule import utc_to_wall, wall_to_utc
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
@@ -507,16 +511,14 @@ async def test_landing_falls_back_to_today_when_nothing(session: AsyncSession):
 # --- series-aware navigation ------------------------------------------------
 
 
-def _series(
-    weekday: int, start_date: date, *, series_id: int = 1, time_hhmm: str = "14:00"
-) -> RecurringAppointment:
-    return RecurringAppointment(
-        id=series_id,
-        specialist_id=_SPECIALIST,
-        client_id=_CLIENT,
+def _slot(
+    weekday: int, start_date: date, *, slot_id: int = 1, time_hhmm: str = "14:00"
+) -> RecurringSlot:
+    return RecurringSlot(
+        id=slot_id,
+        schedule_id=1,
         weekday=weekday,
         time_hhmm=time_hhmm,
-        comment="регулярная",
         active=True,
         start_date=start_date,
         materialized_through=start_date,
@@ -525,29 +527,48 @@ def _series(
     )
 
 
+def _schedule() -> RecurringSchedule:
+    return RecurringSchedule(
+        id=1,
+        specialist_id=_SPECIALIST,
+        client_id=_CLIENT,
+        comment="регулярная",
+        active=True,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
 def _ctx(
-    series: list[RecurringAppointment],
+    slots: list[RecurringSlot],
     *,
-    exceptions: list[RecurringException] | None = None,
+    overrides: list[RecurringSlotOverride] | None = None,
     today: date = date(2026, 6, 4),
 ) -> SeriesContext:
-    grouped: dict[int, list[RecurringException]] = {}
-    for exc in exceptions or []:
-        grouped.setdefault(exc.series_id, []).append(exc)
-    return SeriesContext(series=series, exceptions=grouped, today=today)
+    grouped: dict[int, list[RecurringSlotOverride]] = {}
+    for ov in overrides or []:
+        grouped.setdefault(ov.slot_id, []).append(ov)
+    return SeriesContext(
+        slots=slots,
+        schedules={1: _schedule()},
+        overrides=grouped,
+        today=today,
+    )
 
 
 async def test_adjacent_shown_day_forward_reaches_moved_occurrence(
     session: AsyncSession,
 ):
-    # Tuesday series; the 2026-06-09 repeat is moved to Sunday 2026-06-07 (no real
+    # Tuesday slot; the 2026-06-09 repeat is moved to Sunday 2026-06-07 (no real
     # row). From Saturday, "next" must land on that Sunday, not skip to Monday.
-    series = _series(weekday=1, start_date=date(2026, 6, 2))  # Tue
-    moved = RecurringException(
+    slot = _slot(weekday=1, start_date=date(2026, 6, 2))  # Tue
+    moved = RecurringSlotOverride(
         id=1,
-        series_id=1,
+        slot_id=1,
         original_date=date(2026, 6, 9),
-        new_starts_at=wall_to_utc(date(2026, 6, 7), "10:00", _TZ),  # Sun
+        skipped=False,
+        moved_to=wall_to_utc(date(2026, 6, 7), "10:00", _TZ),  # Sun
+        comment=None,
         created_at=_NOW,
     )
     repo = SqlAlchemyAppointmentsRepo(session)
@@ -558,7 +579,7 @@ async def test_adjacent_shown_day_forward_reaches_moved_occurrence(
         tz=_TZ,
         day=date(2026, 6, 6),  # Saturday
         forward=True,
-        series=_ctx([series], exceptions=[moved]),
+        series=_ctx([slot], overrides=[moved]),
     )
     assert nxt == date(2026, 6, 7)  # Sunday with the moved repeat, not Monday
 
@@ -566,8 +587,8 @@ async def test_adjacent_shown_day_forward_reaches_moved_occurrence(
 async def test_adjacent_shown_day_forward_reaches_plain_nonworking_repeat(
     session: AsyncSession,
 ):
-    # A plain (non-moved) Sunday series whose weekday is outside working days.
-    series = _series(weekday=6, start_date=date(2026, 6, 7))  # Sunday
+    # A plain (non-moved) Sunday slot whose weekday is outside working days.
+    slot = _slot(weekday=6, start_date=date(2026, 6, 7))  # Sunday
     repo = SqlAlchemyAppointmentsRepo(session)
     nxt = await adjacent_shown_day(
         repo,
@@ -576,7 +597,7 @@ async def test_adjacent_shown_day_forward_reaches_plain_nonworking_repeat(
         tz=_TZ,
         day=date(2026, 6, 6),  # Saturday
         forward=True,
-        series=_ctx([series]),
+        series=_ctx([slot]),
     )
     assert nxt == date(2026, 6, 7)  # the Sunday repeat, not Monday
 
@@ -597,12 +618,34 @@ async def test_adjacent_shown_day_empty_series_still_skips_weekend(
     assert nxt == date(2026, 6, 8)  # Monday; empty weekend still skipped
 
 
+async def test_adjacent_shown_day_forward_two_slots_same_weekday(
+    session: AsyncSession,
+):
+    # NEW: two slots landing on the same Sunday both point "next" at that Sunday
+    # (one schedule, two slots). The nearer landing day wins over Monday.
+    slots = [
+        _slot(weekday=6, start_date=date(2026, 6, 7), slot_id=1, time_hhmm="10:00"),
+        _slot(weekday=6, start_date=date(2026, 6, 7), slot_id=2, time_hhmm="15:00"),
+    ]
+    repo = SqlAlchemyAppointmentsRepo(session)
+    nxt = await adjacent_shown_day(
+        repo,
+        specialist_id=_SPECIALIST,
+        working_days=_WD,
+        tz=_TZ,
+        day=date(2026, 6, 6),  # Saturday
+        forward=True,
+        series=_ctx(slots),
+    )
+    assert nxt == date(2026, 6, 7)  # the Sunday both slots land on
+
+
 async def test_adjacent_shown_day_none_when_only_series_is_backward(
     session: AsyncSession,
 ):
-    # Only a future series repeat exists, no working days, no real rows. Backward
+    # Only a future slot repeat exists, no working days, no real rows. Backward
     # must not surface a virtual occurrence (the past lives in real rows only).
-    series = _series(weekday=6, start_date=date(2026, 6, 7))  # Sunday, future
+    slot = _slot(weekday=6, start_date=date(2026, 6, 7))  # Sunday, future
     repo = SqlAlchemyAppointmentsRepo(session)
     prev = await adjacent_shown_day(
         repo,
@@ -611,6 +654,6 @@ async def test_adjacent_shown_day_none_when_only_series_is_backward(
         tz=_TZ,
         day=date(2026, 6, 10),
         forward=False,
-        series=_ctx([series]),
+        series=_ctx([slot]),
     )
     assert prev is None

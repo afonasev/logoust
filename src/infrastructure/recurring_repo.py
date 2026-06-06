@@ -16,23 +16,27 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.domain.recurring import RecurringAppointment, RecurringException
+from src.domain.recurring import (
+    RecurringSchedule,
+    RecurringSlot,
+    RecurringSlotOverride,
+)
 from src.infrastructure.db import Base
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
     # SQLite drops tzinfo on read; we store aware UTC, so re-attach it (mirrors
-    # appointments_repo._as_utc). None stays None — a skip exception has no time.
+    # appointments_repo._as_utc). None stays None — moved_to may be absent.
     if value is None:
         return None
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-class RecurringAppointmentORM(Base):
-    __tablename__ = "recurring_appointments"
-    # Settle and read-merge always filter by owner and activeness.
+class RecurringScheduleORM(Base):
+    __tablename__ = "recurring_schedules"
+    # Read-merge and settle always filter by owner and activeness.
     __table_args__ = (
-        Index("ix_recurring_specialist_active", "specialist_id", "active"),
+        Index("ix_recurring_schedules_specialist_active", "specialist_id", "active"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -42,9 +46,34 @@ class RecurringAppointmentORM(Base):
     client_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("clients.id"), nullable=False
     )
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<RecurringScheduleORM id={self.id} client={self.client_id} "
+            f"active={self.active}>"
+        )
+
+
+class RecurringSlotORM(Base):
+    __tablename__ = "recurring_slots"
+    __table_args__ = (
+        Index("ix_recurring_slots_schedule_active", "schedule_id", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    schedule_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("recurring_schedules.id"), nullable=False
+    )
     weekday: Mapped[int] = mapped_column(Integer, nullable=False)
     time_hhmm: Mapped[str] = mapped_column(String(5), nullable=False)
-    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     materialized_through: Mapped[date] = mapped_column(Date, nullable=False)
@@ -57,42 +86,55 @@ class RecurringAppointmentORM(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<RecurringAppointmentORM id={self.id} client={self.client_id} "
+            f"<RecurringSlotORM id={self.id} schedule={self.schedule_id} "
             f"weekday={self.weekday} time={self.time_hhmm} active={self.active}>"
         )
 
 
-class RecurringExceptionORM(Base):
-    __tablename__ = "recurring_exceptions"
+class RecurringSlotOverrideORM(Base):
+    __tablename__ = "recurring_slot_overrides"
     __table_args__ = (
-        UniqueConstraint("series_id", "original_date", name="uq_exception_series_date"),
+        UniqueConstraint("slot_id", "original_date", name="uq_override_slot_date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    series_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("recurring_appointments.id"), nullable=False
+    slot_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("recurring_slots.id"), nullable=False
     )
     original_date: Mapped[date] = mapped_column(Date, nullable=False)
-    new_starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    skipped: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    moved_to: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
 
     def __repr__(self) -> str:
         return (
-            f"<RecurringExceptionORM id={self.id} series={self.series_id} "
-            f"date={self.original_date} moved={self.new_starts_at is not None}>"
+            f"<RecurringSlotOverrideORM id={self.id} slot={self.slot_id} "
+            f"date={self.original_date} skipped={self.skipped} "
+            f"moved={self.moved_to is not None}>"
         )
 
 
-def to_domain(orm: RecurringAppointmentORM) -> RecurringAppointment:
-    return RecurringAppointment(
+def schedule_to_domain(orm: RecurringScheduleORM) -> RecurringSchedule:
+    return RecurringSchedule(
         id=orm.id,
         specialist_id=orm.specialist_id,
         client_id=orm.client_id,
+        comment=orm.comment,
+        active=bool(orm.active),
+        created_at=_as_utc(orm.created_at),  # type: ignore[arg-type]
+        updated_at=_as_utc(orm.updated_at),  # type: ignore[arg-type]
+    )
+
+
+def slot_to_domain(orm: RecurringSlotORM) -> RecurringSlot:
+    return RecurringSlot(
+        id=orm.id,
+        schedule_id=orm.schedule_id,
         weekday=orm.weekday,
         time_hhmm=orm.time_hhmm,
-        comment=orm.comment,
         active=bool(orm.active),
         start_date=orm.start_date,
         materialized_through=orm.materialized_through,
@@ -101,167 +143,248 @@ def to_domain(orm: RecurringAppointmentORM) -> RecurringAppointment:
     )
 
 
-def exception_to_domain(orm: RecurringExceptionORM) -> RecurringException:
-    return RecurringException(
+def override_to_domain(orm: RecurringSlotOverrideORM) -> RecurringSlotOverride:
+    return RecurringSlotOverride(
         id=orm.id,
-        series_id=orm.series_id,
+        slot_id=orm.slot_id,
         original_date=orm.original_date,
-        new_starts_at=_as_utc(orm.new_starts_at),
+        skipped=bool(orm.skipped),
+        moved_to=_as_utc(orm.moved_to),
+        comment=orm.comment,
         created_at=_as_utc(orm.created_at),  # type: ignore[arg-type]
     )
 
 
-class SqlAlchemyRecurringRepo:
+class SqlAlchemyRecurringScheduleRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def add(self, series: RecurringAppointment) -> RecurringAppointment:
-        orm = RecurringAppointmentORM(
-            specialist_id=series.specialist_id,
-            client_id=series.client_id,
-            weekday=series.weekday,
-            time_hhmm=series.time_hhmm,
-            comment=series.comment,
-            active=series.active,
-            start_date=series.start_date,
-            materialized_through=series.materialized_through,
-            created_at=series.created_at,
-            updated_at=series.updated_at,
+    async def add(self, schedule: RecurringSchedule) -> RecurringSchedule:
+        orm = RecurringScheduleORM(
+            specialist_id=schedule.specialist_id,
+            client_id=schedule.client_id,
+            comment=schedule.comment,
+            active=schedule.active,
+            created_at=schedule.created_at,
+            updated_at=schedule.updated_at,
         )
         self._session.add(orm)
         await self._session.flush()
         await self._session.commit()
-        return to_domain(orm)
+        return schedule_to_domain(orm)
 
     async def list_active_for_specialist(
         self, specialist_id: int
-    ) -> list[RecurringAppointment]:
+    ) -> list[RecurringSchedule]:
         stmt = (
-            select(RecurringAppointmentORM)
+            select(RecurringScheduleORM)
             .where(
-                RecurringAppointmentORM.specialist_id == specialist_id,
-                RecurringAppointmentORM.active.is_(True),
+                RecurringScheduleORM.specialist_id == specialist_id,
+                RecurringScheduleORM.active.is_(True),
             )
-            .order_by(RecurringAppointmentORM.id.asc())
+            .order_by(RecurringScheduleORM.id.asc())
         )
         result = await self._session.execute(stmt)
-        return [to_domain(orm) for orm in result.scalars().all()]
+        return [schedule_to_domain(orm) for orm in result.scalars().all()]
 
     async def get_for_specialist(
-        self, series_id: int, specialist_id: int
-    ) -> RecurringAppointment | None:
-        orm = await self._get_owned(series_id, specialist_id)
-        return to_domain(orm) if orm is not None else None
+        self, schedule_id: int, specialist_id: int
+    ) -> RecurringSchedule | None:
+        orm = await self._get_owned(schedule_id, specialist_id)
+        return schedule_to_domain(orm) if orm is not None else None
 
     async def set_active(
-        self, series_id: int, specialist_id: int, *, active: bool, updated_at: datetime
-    ) -> RecurringAppointment | None:
-        orm = await self._get_owned(series_id, specialist_id)
+        self,
+        schedule_id: int,
+        specialist_id: int,
+        *,
+        active: bool,
+        updated_at: datetime,
+    ) -> RecurringSchedule | None:
+        orm = await self._get_owned(schedule_id, specialist_id)
         if orm is None:
             return None
         orm.active = active
         orm.updated_at = updated_at
         await self._session.commit()
-        return to_domain(orm)
+        return schedule_to_domain(orm)
+
+    async def _get_owned(
+        self, schedule_id: int, specialist_id: int
+    ) -> RecurringScheduleORM | None:
+        stmt = select(RecurringScheduleORM).where(
+            RecurringScheduleORM.id == schedule_id,
+            RecurringScheduleORM.specialist_id == specialist_id,
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+class SqlAlchemyRecurringSlotRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, slot: RecurringSlot) -> RecurringSlot:
+        orm = RecurringSlotORM(
+            schedule_id=slot.schedule_id,
+            weekday=slot.weekday,
+            time_hhmm=slot.time_hhmm,
+            active=slot.active,
+            start_date=slot.start_date,
+            materialized_through=slot.materialized_through,
+            created_at=slot.created_at,
+            updated_at=slot.updated_at,
+        )
+        self._session.add(orm)
+        await self._session.flush()
+        await self._session.commit()
+        return slot_to_domain(orm)
+
+    async def list_for_schedule(self, schedule_id: int) -> list[RecurringSlot]:
+        # Active slots only: removed slots keep their frozen history but never show
+        # in the rule, occurrences, or the configure list.
+        stmt = (
+            select(RecurringSlotORM)
+            .where(
+                RecurringSlotORM.schedule_id == schedule_id,
+                RecurringSlotORM.active.is_(True),
+            )
+            .order_by(RecurringSlotORM.id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return [slot_to_domain(orm) for orm in result.scalars().all()]
+
+    async def get_for_specialist(
+        self, slot_id: int, specialist_id: int
+    ) -> RecurringSlot | None:
+        orm = await self._get_owned(slot_id, specialist_id)
+        return slot_to_domain(orm) if orm is not None else None
+
+    async def set_active(
+        self, slot_id: int, specialist_id: int, *, active: bool, updated_at: datetime
+    ) -> RecurringSlot | None:
+        orm = await self._get_owned(slot_id, specialist_id)
+        if orm is None:
+            return None
+        orm.active = active
+        orm.updated_at = updated_at
+        await self._session.commit()
+        return slot_to_domain(orm)
 
     async def set_materialized_through(
-        self, series_id: int, *, materialized_through: date
+        self, slot_id: int, *, materialized_through: date
     ) -> None:
-        orm = await self._session.get(RecurringAppointmentORM, series_id)
-        if orm is None:  # pragma: no cover - settle only passes loaded series ids
+        orm = await self._session.get(RecurringSlotORM, slot_id)
+        if orm is None:  # pragma: no cover - settle only passes loaded slot ids
             return
         orm.materialized_through = materialized_through
         await self._session.commit()
 
     async def update_rule(  # noqa: PLR0913
         self,
-        series_id: int,
+        slot_id: int,
         specialist_id: int,
         *,
         weekday: int,
         time_hhmm: str,
-        comment: str | None,
         start_date: date,
         materialized_through: date,
         updated_at: datetime,
-    ) -> RecurringAppointment | None:
-        orm = await self._get_owned(series_id, specialist_id)
+    ) -> RecurringSlot | None:
+        orm = await self._get_owned(slot_id, specialist_id)
         if orm is None:
             return None
         orm.weekday = weekday
         orm.time_hhmm = time_hhmm
-        orm.comment = comment
         orm.start_date = start_date
         orm.materialized_through = materialized_through
         orm.updated_at = updated_at
         await self._session.commit()
-        return to_domain(orm)
+        return slot_to_domain(orm)
 
     async def _get_owned(
-        self, series_id: int, specialist_id: int
-    ) -> RecurringAppointmentORM | None:
-        stmt = select(RecurringAppointmentORM).where(
-            RecurringAppointmentORM.id == series_id,
-            RecurringAppointmentORM.specialist_id == specialist_id,
+        self, slot_id: int, specialist_id: int
+    ) -> RecurringSlotORM | None:
+        # Ownership is via the slot's schedule: a slot carries no specialist_id.
+        stmt = (
+            select(RecurringSlotORM)
+            .join(
+                RecurringScheduleORM,
+                RecurringSlotORM.schedule_id == RecurringScheduleORM.id,
+            )
+            .where(
+                RecurringSlotORM.id == slot_id,
+                RecurringScheduleORM.specialist_id == specialist_id,
+            )
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
 
-class SqlAlchemyRecurringExceptionsRepo:
+class SqlAlchemyRecurringSlotOverrideRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def upsert(
+    async def upsert(  # noqa: PLR0913
         self,
-        series_id: int,
+        slot_id: int,
         original_date: date,
         *,
-        new_starts_at: datetime | None,
+        skipped: bool,
+        moved_to: datetime | None,
+        comment: str | None,
         created_at: datetime,
-    ) -> RecurringException:
-        # Skip and move both write one row keyed by (series_id, original_date);
-        # re-skipping or re-moving the same date overwrites new_starts_at.
+    ) -> RecurringSlotOverride:
+        # One row per (slot_id, original_date); the caller passes the full desired
+        # triple (skip/move/comment), so re-acting on a date overwrites all axes.
         stmt = (
-            sqlite_insert(RecurringExceptionORM)
+            sqlite_insert(RecurringSlotOverrideORM)
             .values(
-                series_id=series_id,
+                slot_id=slot_id,
                 original_date=original_date,
-                new_starts_at=new_starts_at,
+                skipped=skipped,
+                moved_to=moved_to,
+                comment=comment,
                 created_at=created_at,
             )
             .on_conflict_do_update(
-                index_elements=["series_id", "original_date"],
-                set_={"new_starts_at": new_starts_at},
+                index_elements=["slot_id", "original_date"],
+                set_={"skipped": skipped, "moved_to": moved_to, "comment": comment},
             )
         )
         await self._session.execute(stmt)
         await self._session.commit()
         loaded = await self._session.execute(
-            select(RecurringExceptionORM).where(
-                RecurringExceptionORM.series_id == series_id,
-                RecurringExceptionORM.original_date == original_date,
+            select(RecurringSlotOverrideORM).where(
+                RecurringSlotOverrideORM.slot_id == slot_id,
+                RecurringSlotOverrideORM.original_date == original_date,
             )
         )
-        return exception_to_domain(loaded.scalar_one())
+        return override_to_domain(loaded.scalar_one())
 
-    async def list_for_series(self, series_id: int) -> list[RecurringException]:
-        stmt = select(RecurringExceptionORM).where(
-            RecurringExceptionORM.series_id == series_id
+    async def list_for_slot(self, slot_id: int) -> list[RecurringSlotOverride]:
+        stmt = select(RecurringSlotOverrideORM).where(
+            RecurringSlotOverrideORM.slot_id == slot_id
         )
         result = await self._session.execute(stmt)
-        return [exception_to_domain(orm) for orm in result.scalars().all()]
+        return [override_to_domain(orm) for orm in result.scalars().all()]
 
-    async def list_for_specialist(self, specialist_id: int) -> list[RecurringException]:
-        # Join to the owning series so settle/expand can batch-load every
-        # exception for one specialist in a single query.
+    async def list_for_specialist(
+        self, specialist_id: int
+    ) -> list[RecurringSlotOverride]:
+        # Join through slots → schedules so settle/read can batch-load every
+        # override for one specialist in a single query.
         stmt = (
-            select(RecurringExceptionORM)
+            select(RecurringSlotOverrideORM)
             .join(
-                RecurringAppointmentORM,
-                RecurringExceptionORM.series_id == RecurringAppointmentORM.id,
+                RecurringSlotORM,
+                RecurringSlotOverrideORM.slot_id == RecurringSlotORM.id,
             )
-            .where(RecurringAppointmentORM.specialist_id == specialist_id)
+            .join(
+                RecurringScheduleORM,
+                RecurringSlotORM.schedule_id == RecurringScheduleORM.id,
+            )
+            .where(RecurringScheduleORM.specialist_id == specialist_id)
         )
         result = await self._session.execute(stmt)
-        return [exception_to_domain(orm) for orm in result.scalars().all()]
+        return [override_to_domain(orm) for orm in result.scalars().all()]

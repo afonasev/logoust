@@ -1,5 +1,6 @@
 import calendar as _calendar
 from datetime import UTC, date, datetime, timedelta
+from itertools import starmap
 import logging
 from typing import Any, cast
 
@@ -27,7 +28,11 @@ from src.bot.navigation import Navigator
 from src.domain.appointment import Appointment
 from src.domain.audit import AuditEvent, DeliveryStatus
 from src.domain.client import Client
-from src.domain.recurring import RecurringAppointment, RecurringException
+from src.domain.recurring import (
+    RecurringSchedule,
+    RecurringSlot,
+    RecurringSlotOverride,
+)
 from src.domain.reminder import ReminderStatus
 from src.domain.schedule import (
     RU_MONTHS_NOMINATIVE,
@@ -38,6 +43,7 @@ from src.domain.schedule import (
     format_ru_short,
     generate_slots,
     next_occurrence_utc,
+    next_weekday_on_or_after,
     parse_hhmm,
     parse_working_days,
     today_in_tz,
@@ -46,8 +52,8 @@ from src.domain.schedule import (
 )
 from src.domain.scheduled_message import (
     appointment_target_key,
-    series_date_target_key,
-    series_target_key,
+    schedule_target_key,
+    slot_date_target_key,
 )
 from src.domain.specialist import Specialist
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
@@ -55,8 +61,9 @@ from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
@@ -82,12 +89,16 @@ from src.services.clients import client_name_map
 from src.services.message_templates import resolve_template
 from src.services.recurring import (
     SeriesContext,
-    create_series,
-    edit_series,
+    add_slot,
+    create_schedule,
+    edit_slot,
     load_series_context,
-    move_date,
-    skip_date,
-    stop_series,
+    move_occurrence,
+    occurrences_in_window,
+    remove_slot,
+    set_occurrence_comment,
+    skip_occurrence,
+    stop_schedule,
 )
 from src.services.reminder import status_for_occurrence, statuses_for_appointments
 from src.services.scheduled_messages import enqueue_deferred
@@ -125,8 +136,9 @@ async def _series_context(
     session: AsyncSession, specialist_id: int, tz: str
 ) -> SeriesContext:
     return await load_series_context(
-        SqlAlchemyRecurringRepo(session),
-        SqlAlchemyRecurringExceptionsRepo(session),
+        SqlAlchemyRecurringScheduleRepo(session),
+        SqlAlchemyRecurringSlotRepo(session),
+        SqlAlchemyRecurringSlotOverrideRepo(session),
         specialist_id=specialist_id,
         now=datetime.now(UTC),
         tz=tz,
@@ -353,8 +365,8 @@ def _appt_row(  # noqa: PLR0913
     back: str,
     statuses: dict[tuple[int, datetime], ReminderStatus],
 ) -> list[InlineKeyboardButton]:
-    # A virtual occurrence (id is None) routes to the series card by
-    # series_id/origin_date; a real row routes to its appointment card.
+    # A virtual occurrence (id is None) routes to the single-meeting card by
+    # slot_id/origin_date; a real row routes to its appointment card.
     child = names.get(appt.client_id, m.dash)
     time = f"{utc_to_wall(appt.starts_at, tz):%H:%M}"
     # Only a plain occurrence is marked 🔁; a moved one looks like a one-off.
@@ -363,10 +375,10 @@ def _appt_row(  # noqa: PLR0913
     status = rem.status_mark(statuses.get((appt.client_id, appt.starts_at)))
     label = f"{status}{mark}{time} · {child}{_comment_part(appt.comment, m)}"
     if appt.id is None:
-        assert appt.series_id is not None  # noqa: S101 — virtual rows carry a series
+        assert appt.slot_id is not None  # noqa: S101 — virtual rows carry a slot
         assert appt.origin_date is not None  # noqa: S101
-        # Carry the day view as the origin so the series card returns here.
-        callback = f"recur:card:{appt.series_id}:{appt.origin_date.isoformat()}~{back}"
+        # Carry the day view as the origin so the meeting card returns here.
+        callback = f"recur:occ:{appt.slot_id}:{appt.origin_date.isoformat()}~{back}"
         return [InlineKeyboardButton(text=label, callback_data=callback)]
     return _card_button(appt, label, back)
 
@@ -604,10 +616,10 @@ _NOTIFY_AUDIT_EVENTS = {
 
 
 def _series_notify_key(event: str) -> str:
+    # Only schedule create ("c") and stop ("x") notify the client about the weekly
+    # rule; per-slot configure edits apply silently (no noisy per-tweak message).
     if event == "c":
         return "notify_series_created"
-    if event == "m":
-        return "notify_series_changed"
     return "notify_series_cancelled"
 
 
@@ -631,12 +643,20 @@ def _notify_text(template: str, starts_at: datetime, tz: str) -> str:
     return template.format(date=format_ru_date(wall.date()), time=f"{wall:%H:%M}")
 
 
-def _series_notify_text(template: str, weekday: int, hhmm: str) -> str:
-    # "Каждый четверг" → "каждый четверг" so it reads inside a sentence. Both rule
-    # and time are passed; each template uses whichever placeholder it declares.
+def _rule_line(weekday: int, hhmm: str) -> str:
+    """`каждый вторник в 14:00` — one slot's rule, lower-cased to sit in a sentence."""
     every = RU_WEEKDAYS_EVERY[weekday]
-    rule = f"{every[0].lower()}{every[1:]} в {hhmm}"
-    return template.format(rule=rule, time=hhmm)
+    return f"{every[0].lower()}{every[1:]} в {hhmm}"
+
+
+def _rule_text(slots: list[tuple[int, str]]) -> str:
+    """Comma-joined rule for every slot, e.g. `каждый Пн в 12:00, каждый Вт в 14:00`."""
+    return ", ".join(starmap(_rule_line, slots))
+
+
+def _series_notify_text(template: str, rule_text: str, time_hhmm: str) -> str:
+    # Both rule and time are passed; each template uses whichever it declares.
+    return template.format(rule=rule_text, time=time_hhmm)
 
 
 def _notify_ask_keyboard(m: ScheduleMessages) -> InlineKeyboardMarkup:
@@ -751,23 +771,23 @@ async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     state: FSMContext,
     event: str,
     client: Client | None,
-    weekday: int,
-    hhmm: str,
+    rule_text: str,
+    time_hhmm: str,
     target_key: str,
     card_back: str,
     specialist_id: int,
     session_factory: async_sessionmaker[AsyncSession],
     m: ScheduleMessages,
 ) -> bool:
-    # Final step after a series create/edit/stop: the message describes the weekly
-    # rule ("каждый четверг в 14:00"), not a single date.
+    # Final step after a schedule create/edit/stop: the message describes the weekly
+    # rule(s) ("каждый четверг в 14:00"), not a single date.
     if client is None or client.telegram_chat_id is None:
         return False
     key = _series_notify_key(event)
     template = await _resolve_notify(
         session_factory, specialist_id, key, getattr(m, key)
     )
-    preview = _series_notify_text(template, weekday, hhmm)
+    preview = _series_notify_text(template, rule_text, time_hhmm)
     await _store_notify(
         state,
         event=event,
@@ -1026,7 +1046,25 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
 
     async def choose_regular(self, callback: CallbackQuery, state: FSMContext) -> None:
         regular = (callback.data or "").rsplit(":", 1)[1] == "1"
-        await state.update_data(regular=regular)
+        if regular:
+            # Seed the first slot from the picked date+time, then loop "add a day?".
+            data = await state.get_data()
+            day = date.fromisoformat(data["day"])
+            await state.update_data(
+                flow="rcreate",
+                slots=[
+                    {
+                        "weekday": day.weekday(),
+                        "hhmm": data["hhmm"],
+                        "start_date": data["day"],
+                    }
+                ],
+            )
+            await _callback_message(callback).edit_text(
+                self._rm.add_more, reply_markup=_add_more_keyboard(self._rm)
+            )
+            await callback.answer()
+            return
         await state.set_state(Schedule.comment)
         await _callback_message(callback).edit_text(
             self._m.ask_comment, reply_markup=_skip_keyboard()
@@ -1039,28 +1077,15 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         self, message: Message, state: FSMContext, specialist_id: int
     ) -> None:
         comment = (message.text or "").strip() or None
-        await self._finish_create(message, state, specialist_id, comment)
+        await self._finish_one_off(message, state, specialist_id, comment)
 
     async def skip_comment(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
-        await self._finish_create(
+        await self._finish_one_off(
             _callback_message(callback), state, specialist_id, None
         )
         await callback.answer()
-
-    async def _finish_create(
-        self,
-        target: Message,
-        state: FSMContext,
-        specialist_id: int,
-        comment: str | None,
-    ) -> None:
-        data = await state.get_data()
-        if data.get("regular"):
-            await self._finish_regular(target, state, specialist_id, comment)
-        else:
-            await self._finish_one_off(target, state, specialist_id, comment)
 
     async def _finish_one_off(
         self,
@@ -1099,59 +1124,6 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             appointment_target_key(appt.id),
             card_back,
             specialist.timezone,
-            specialist_id,
-            self._session_factory,
-            self._m,
-        )
-        if not shown:
-            await _open_card(
-                self._navigator,
-                target,
-                specialist_id=specialist_id,
-                card_back=card_back,
-            )
-
-    async def _finish_regular(
-        self,
-        target: Message,
-        state: FSMContext,
-        specialist_id: int,
-        comment: str | None,
-    ) -> None:
-        data = await state.get_data()
-        specialist = await self._load_settings(specialist_id)
-        client_id = data["client_id"]
-        day = date.fromisoformat(data["day"])
-        async with self._session_factory() as session:
-            series = await create_series(
-                SqlAlchemyRecurringRepo(session),
-                specialist_id=specialist_id,
-                client_id=client_id,
-                weekday=day.weekday(),
-                time_hhmm=data["hhmm"],
-                comment=comment,
-                tz=specialist.timezone,
-                now=datetime.now(UTC),
-                start_date=day,  # the picked date is the first occurrence
-            )
-        assert series.id is not None  # noqa: S101 — saved series always have an id
-        client = await self._load_client(specialist_id, client_id)
-        await state.clear()
-        await target.answer(self._rm.created)
-        # Defer the series card to the end of the notify scenario.
-        card_back = (
-            f"recur:card:{series.id}:{series.start_date.isoformat()}"
-            f"~clients:card:{client_id}"
-        )
-        shown = await _ask_series_notify(
-            target,
-            state,
-            "c",
-            client,
-            series.weekday,
-            series.time_hhmm,
-            series_target_key(series.id),
-            card_back,
             specialist_id,
             self._session_factory,
             self._m,
@@ -1669,8 +1641,14 @@ _WEEKDAYS_PER_ROW = 4
 
 
 class Recurring(StatesGroup):
+    # `custom_time` and `comment`/`occ_comment` are the only message-input steps; all
+    # other steps are callback-driven and dispatch on the FSM `flow` value.
     custom_time = State()
-    comment = State()
+    comment = State()  # schedule-level comment (creation)
+    occ_comment = State()  # single-occurrence comment
+
+
+# --- pure builders ------------------------------------------------------------
 
 
 def _weekday_keyboard() -> InlineKeyboardMarkup:
@@ -1692,7 +1670,7 @@ def build_recur_slots_keyboard(
     buttons = [
         InlineKeyboardButton(
             text=f"{_SLOT_TAKEN if slot in taken else _SLOT_FREE} {slot}",
-            callback_data=f"recur:slot:{slot.replace(':', '')}",
+            callback_data=f"recur:tslot:{slot.replace(':', '')}",
         )
         for slot in slots
     ]
@@ -1701,56 +1679,250 @@ def build_recur_slots_keyboard(
     ]
     rows.extend(
         (
-            [InlineKeyboardButton(text=m.btn_other_time, callback_data="recur:other")],
+            [InlineKeyboardButton(text=m.btn_other_time, callback_data="recur:tother")],
             [InlineKeyboardButton(text=_BTN_CANCEL, callback_data="recur:cancel")],
         )
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _recur_skip_comment_keyboard() -> InlineKeyboardMarkup:
+def _add_more_keyboard(m: RecurringMessages) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=m.btn_add_more, callback_data="recur:add")],
+            [InlineKeyboardButton(text=m.btn_done, callback_data="recur:done")],
+            [InlineKeyboardButton(text=_BTN_CANCEL, callback_data="recur:cancel")],
+        ]
+    )
+
+
+def _schedule_comment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Пропустить", callback_data="recur:skipc"),
+                InlineKeyboardButton(text="Пропустить", callback_data="recur:cskipc"),
                 InlineKeyboardButton(text=_BTN_CANCEL, callback_data="recur:cancel"),
             ]
         ]
     )
 
 
-def _occurrence_display(
-    series: RecurringAppointment,
-    origin_date: date,
-    exception: "RecurringException | None",
-    tz: str,
-) -> tuple[date, str]:
-    """Effective (date, wall `HH:MM`) of the occurrence — moved date wins over rule."""
-    if exception is not None and exception.new_starts_at is not None:
-        wall = utc_to_wall(exception.new_starts_at, tz)
-        return wall.date(), f"{wall:%H:%M}"
-    return origin_date, series.time_hhmm
+def _recur_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=_BTN_CANCEL, callback_data="recur:cancel")]
+        ]
+    )
 
 
-def render_series_card(  # noqa: PLR0913, PLR0917
-    series: RecurringAppointment,
+# --- formatting ---------------------------------------------------------------
+
+
+def _rule_lines(slots: list[RecurringSlot], rm: RecurringMessages) -> str:
+    """One `🔁 каждый вторник в 14:00` line per active slot, newline-joined."""
+    return "\n".join(
+        rm.rule_line.format(weekday=RU_WEEKDAYS_EVERY[s.weekday], time=s.time_hhmm)
+        for s in slots
+    )
+
+
+def render_schedule_card(  # noqa: PLR0913, PLR0917
+    schedule: RecurringSchedule,
     child: str,
-    origin_date: date,
-    exception: "RecurringException | None",
-    tz: str,
+    slots: list[RecurringSlot],
+    occurrences: list[Appointment],
     rm: RecurringMessages,
     dash: str,
 ) -> str:
-    # Show the base rule ("Каждый вторник в 19:00") plus the next meeting's actual
-    # date/weekday/time, which differs from the rule when that date was moved.
-    eff_date, eff_time = _occurrence_display(series, origin_date, exception, tz)
-    return rm.card.format(
+    text = rm.schedule_card.format(
         child=child,
-        rule=f"{RU_WEEKDAYS_EVERY[series.weekday]} в {series.time_hhmm}",
-        date=format_ru_short(eff_date),
-        weekday=RU_WEEKDAYS[eff_date.weekday()],
-        time=eff_time,
-        comment=series.comment or dash,
+        comment=schedule.comment or dash,
+        rule=_rule_lines(slots, rm) or dash,
+    )
+    if not occurrences:
+        text = f"{text}\n\n{rm.empty_window}"
+    return text
+
+
+def render_meeting_card(  # noqa: PLR0913, PLR0917
+    child: str,
+    occ_date: date,
+    occ_time: str,
+    comment: str | None,
+    rm: RecurringMessages,
+    dash: str,
+) -> str:
+    return rm.meeting_card.format(
+        child=child,
+        date=format_ru_date(occ_date),
+        time=occ_time,
+        comment=comment or dash,
+    )
+
+
+def _schedule_card_keyboard(
+    schedule_id: int,
+    occurrences: list[Appointment],
+    tz: str,
+    rm: RecurringMessages,
+    back: str,
+) -> InlineKeyboardMarkup:
+    # One button per upcoming occurrence (rolling 14 days); each opens its meeting
+    # card and returns here. Then configure / cancel-all, then back.
+    rows: list[list[InlineKeyboardButton]] = []
+    self_back = f"recur:sched:{schedule_id}"
+    for occ in occurrences:
+        assert occ.slot_id is not None  # noqa: S101 — occurrences carry a slot
+        assert occ.origin_date is not None  # noqa: S101
+        wall = utc_to_wall(occ.starts_at, tz)
+        label = rm.occ_btn.format(
+            date=format_ru_short(wall.date()),
+            weekday=RU_WEEKDAYS[wall.date().weekday()],
+            time=f"{wall:%H:%M}",
+        )
+        cb = f"recur:occ:{occ.slot_id}:{occ.origin_date.isoformat()}~{self_back}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=cb)])
+    rows.extend(
+        (
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_configure, callback_data=f"recur:cfg:{schedule_id}"
+                ),
+                InlineKeyboardButton(
+                    text=rm.btn_stop,
+                    callback_data=_with_back(f"recur:stopask:{schedule_id}", back),
+                ),
+            ],
+            [InlineKeyboardButton(text=_BTN_BACK, callback_data=back)],
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _meeting_card_keyboard(
+    slot_id: int,
+    origin_date: date,
+    schedule_id: int,
+    rm: RecurringMessages,
+    back: str,
+) -> InlineKeyboardMarkup:
+    occ = _with_back(f"{slot_id}:{origin_date.isoformat()}", back)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_move, callback_data=f"recur:occmove:{occ}"
+                ),
+                InlineKeyboardButton(
+                    text=rm.btn_skip, callback_data=f"recur:occskipask:{occ}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_comment, callback_data=f"recur:occcmt:{occ}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_to_schedule,
+                    callback_data=_with_back(f"recur:sched:{schedule_id}", back),
+                ),
+            ],
+            [InlineKeyboardButton(text=_BTN_BACK, callback_data=back)],
+        ]
+    )
+
+
+def _config_keyboard(
+    schedule_id: int, slots: list[RecurringSlot], rm: RecurringMessages
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for slot in slots:
+        label = rm.slot_btn.format(
+            weekday=RU_WEEKDAYS[slot.weekday], time=slot.time_hhmm
+        )
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"recur:slot:{slot.id}")]
+        )
+    rows.extend(
+        (
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_add_day, callback_data=f"recur:cfgadd:{schedule_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_BTN_BACK, callback_data=f"recur:sched:{schedule_id}"
+                )
+            ],
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _slot_actions_keyboard(
+    slot: RecurringSlot, rm: RecurringMessages
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_slot_time, callback_data=f"recur:slottime:{slot.id}"
+                ),
+                InlineKeyboardButton(
+                    text=rm.btn_slot_day, callback_data=f"recur:slotday:{slot.id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_slot_delete, callback_data=f"recur:slotdel:{slot.id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_BTN_BACK,
+                    callback_data=f"recur:cfg:{slot.schedule_id}",
+                )
+            ],
+        ]
+    )
+
+
+def _stop_confirm_keyboard(
+    schedule_id: int, back: str, rm: RecurringMessages
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_confirm_stop,
+                    callback_data=_with_back(f"recur:stop:{schedule_id}", back),
+                ),
+                InlineKeyboardButton(
+                    text=_BTN_CANCEL,
+                    callback_data=_with_back(f"recur:sched:{schedule_id}", back),
+                ),
+            ]
+        ]
+    )
+
+
+def _occ_skip_confirm_keyboard(
+    slot_id: int, origin_date: date, back: str, rm: RecurringMessages
+) -> InlineKeyboardMarkup:
+    occ = _with_back(f"{slot_id}:{origin_date.isoformat()}", back)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_confirm_skip, callback_data=f"recur:occskip:{occ}"
+                ),
+                InlineKeyboardButton(
+                    text=_BTN_CANCEL, callback_data=f"recur:occ:{occ}"
+                ),
+            ]
+        ]
     )
 
 
@@ -1759,90 +1931,19 @@ def _with_back(head: str, back: str) -> str:
     return f"{head}~{back}" if back else head
 
 
-def _series_card_keyboard(
-    series_id: int, origin_date: date, rm: RecurringMessages, back: str
-) -> InlineKeyboardMarkup:
-    # `back` is the callback of wherever the series card was opened from (day view
-    # or client card) and is threaded through every action that loops back here.
-    card = _with_back(f"{series_id}:{origin_date.isoformat()}", back)
-    # Mirror the one-off appointment card: top row acts on this date (move / cancel),
-    # second row acts on the whole series (configure / cancel all), then back.
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=rm.btn_move_date, callback_data=f"recur:move:{card}"
-                ),
-                InlineKeyboardButton(
-                    text=rm.btn_skip_date, callback_data=f"recur:skipask:{card}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=rm.btn_edit,
-                    callback_data=_with_back(f"recur:edit:{card}", ""),
-                ),
-                InlineKeyboardButton(
-                    text=rm.btn_stop,
-                    callback_data=_with_back(f"recur:stopask:{series_id}", back),
-                ),
-            ],
-            [InlineKeyboardButton(text=_BTN_BACK, callback_data=back)],
-        ]
-    )
-
-
-def _stop_confirm_keyboard(
-    series_id: int, origin_date: date, back: str, rm: RecurringMessages
-) -> InlineKeyboardMarkup:
-    card = _with_back(f"{series_id}:{origin_date.isoformat()}", back)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=rm.btn_confirm_stop,
-                    callback_data=_with_back(f"recur:stop:{series_id}", back),
-                ),
-                InlineKeyboardButton(
-                    text=_BTN_CANCEL, callback_data=f"recur:card:{card}"
-                ),
-            ]
-        ]
-    )
-
-
-def _skip_confirm_keyboard(
-    series_id: int, origin_date: date, back: str, rm: RecurringMessages
-) -> InlineKeyboardMarkup:
-    card = _with_back(f"{series_id}:{origin_date.isoformat()}", back)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=rm.btn_confirm_skip, callback_data=f"recur:skip:{card}"
-                ),
-                InlineKeyboardButton(
-                    text=_BTN_CANCEL, callback_data=f"recur:card:{card}"
-                ),
-            ]
-        ]
-    )
-
-
 def _split_back(callback_data: str | None) -> tuple[str, str]:
     """Split `head~back` callback data into `(head, back)`; back is `''` if absent."""
     head, _, back = (callback_data or "").partition("~")
     return head, back
 
 
-def _parse_series_date(callback_data: str | None) -> tuple[int, date]:
-    # "recur:<action>:<series_id>:<origin_date>" — date is a plain ISO day (no colon).
-    # Any trailing "~<back>" must be stripped by the caller first (see _split_back).
-    _, _, raw_id, raw_date = (callback_data or "").split(":", 3)
+def _parse_slot_date(head: str) -> tuple[int, date]:
+    # "recur:<action>:<slot_id>:<origin_date>" — date is a plain ISO day (no colon).
+    _, _, raw_id, raw_date = head.split(":", 3)
     return int(raw_id), date.fromisoformat(raw_date)
 
 
-class RecurringHandlers:
+class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurring router
     def __init__(
         self,
         messages: BotMessages,
@@ -1879,31 +1980,128 @@ class RecurringHandlers:
                 client_id, specialist_id
             )
 
-    async def _load_series(
-        self, series_id: int, specialist_id: int
-    ) -> RecurringAppointment | None:
+    async def _load_schedule(
+        self, schedule_id: int, specialist_id: int
+    ) -> RecurringSchedule | None:
         async with self._session_factory() as session:
-            return await SqlAlchemyRecurringRepo(session).get_for_specialist(
-                series_id, specialist_id
+            return await SqlAlchemyRecurringScheduleRepo(session).get_for_specialist(
+                schedule_id, specialist_id
             )
 
-    # --- edit entry ----------------------------------------------------------
+    async def _load_slot(
+        self, slot_id: int, specialist_id: int
+    ) -> RecurringSlot | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyRecurringSlotRepo(session).get_for_specialist(
+                slot_id, specialist_id
+            )
 
-    async def start_edit(self, callback: CallbackQuery, state: FSMContext) -> None:
-        await state.clear()
-        head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
-        await state.update_data(
-            flow="edit",
-            series_id=series_id,
-            back=back,
-            # Where Cancel returns: the series card this edit was started from.
-            card=_with_back(f"recur:card:{series_id}:{origin_date.isoformat()}", back),
-        )
+    async def _load_slots(self, schedule_id: int) -> list[RecurringSlot]:
+        async with self._session_factory() as session:
+            return await SqlAlchemyRecurringSlotRepo(session).list_for_schedule(
+                schedule_id
+            )
+
+    async def _load_override(
+        self, slot_id: int, origin_date: date
+    ) -> RecurringSlotOverride | None:
+        async with self._session_factory() as session:
+            overrides = await SqlAlchemyRecurringSlotOverrideRepo(
+                session
+            ).list_for_slot(slot_id)
+        return next((o for o in overrides if o.original_date == origin_date), None)
+
+    # --- creation wizard (entered from the appointment flow's "make regular") ---
+
+    async def add_day(self, callback: CallbackQuery) -> None:
+        # "Добавить день": pick the next slot's weekday (flow stays "rcreate").
         await _callback_message(callback).edit_text(
             self._m.pick_weekday, reply_markup=_weekday_keyboard()
         )
         await callback.answer()
+
+    async def done_adding(self, callback: CallbackQuery, state: FSMContext) -> None:
+        # "Готово": move on to the shared schedule comment.
+        await state.set_state(Recurring.comment)
+        await _callback_message(callback).edit_text(
+            self._m.ask_comment, reply_markup=_schedule_comment_keyboard()
+        )
+        await callback.answer()
+
+    async def apply_schedule_comment(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        comment = (message.text or "").strip() or None
+        await self._finish_create(message, state, specialist_id, comment)
+
+    async def skip_schedule_comment(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        await self._finish_create(
+            _callback_message(callback), state, specialist_id, None
+        )
+        await callback.answer()
+
+    async def _finish_create(
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        comment: str | None,
+    ) -> None:
+        data = await state.get_data()
+        client_id = data["client_id"]
+        slots = data["slots"]
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            schedule = await create_schedule(
+                SqlAlchemyRecurringScheduleRepo(session),
+                specialist_id=specialist_id,
+                client_id=client_id,
+                comment=comment,
+                now=now,
+            )
+        assert schedule.id is not None  # noqa: S101 — saved schedules have an id
+        specialist = await self._load_settings(specialist_id)
+        async with self._session_factory() as session:
+            slot_repo = SqlAlchemyRecurringSlotRepo(session)
+            for s in slots:
+                await add_slot(
+                    slot_repo,
+                    schedule_id=schedule.id,
+                    weekday=s["weekday"],
+                    time_hhmm=s["hhmm"],
+                    tz=specialist.timezone,
+                    now=now,
+                    start_date=date.fromisoformat(s["start_date"]),
+                )
+        client = await self._load_client(specialist_id, client_id)
+        await state.clear()
+        await target.answer(self._m.created)
+        rule = _rule_text([(s["weekday"], s["hhmm"]) for s in slots])
+        card_back = f"recur:sched:{schedule.id}~clients:card:{client_id}"
+        shown = await _ask_series_notify(
+            target,
+            state,
+            "c",
+            client,
+            rule,
+            slots[0]["hhmm"],
+            schedule_target_key(schedule.id),
+            card_back,
+            specialist_id,
+            self._session_factory,
+            self._sm,
+        )
+        if not shown:
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back=card_back,
+            )
+
+    # --- shared weekday / time pickers (dispatch on flow) --------------------
 
     async def pick_weekday(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
@@ -1919,25 +2117,415 @@ class RecurringHandlers:
         )
         await callback.answer()
 
-    # --- move entry: pick new date, then new time ----------------------------
+    async def pick_slot(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        raw = (callback.data or "").rsplit(":", 1)[1]
+        hhmm = f"{raw[:2]}:{raw[2:]}"
+        await self._apply_time(
+            _callback_message(callback), state, specialist_id, hhmm, edit=True
+        )
+        await callback.answer()
+
+    async def ask_custom_time(self, callback: CallbackQuery, state: FSMContext) -> None:
+        await state.set_state(Recurring.custom_time)
+        await _callback_message(callback).edit_text(
+            self._m.ask_custom_time, reply_markup=_recur_cancel_keyboard()
+        )
+        await callback.answer()
+
+    async def apply_custom_time(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        hhmm = parse_hhmm(message.text or "")
+        if hhmm is None:
+            await message.answer(
+                self._m.bad_time, reply_markup=_recur_cancel_keyboard()
+            )
+            return
+        await self._apply_time(message, state, specialist_id, hhmm, edit=False)
+
+    async def _apply_time(
+        self,
+        target: Message,
+        state: FSMContext,
+        specialist_id: int,
+        hhmm: str,
+        *,
+        edit: bool,
+    ) -> None:
+        data = await state.get_data()
+        flow = data.get("flow")
+        if flow == "rcreate":
+            await self._append_slot(target, state, specialist_id, hhmm)
+        elif flow == "cfg_add":
+            await self._cfg_add_slot(target, state, specialist_id, hhmm)
+        elif flow in {"cfg_time", "cfg_day"}:
+            await self._cfg_edit_slot(target, state, specialist_id, hhmm)
+        else:  # move
+            await self._do_move(target, state, specialist_id, hhmm, edit=edit)
+
+    async def _append_slot(
+        self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
+    ) -> None:
+        data = await state.get_data()
+        specialist = await self._load_settings(specialist_id)
+        weekday = data["weekday"]
+        start = next_weekday_on_or_after(
+            today_in_tz(datetime.now(UTC), specialist.timezone), weekday
+        )
+        slots = [
+            *data["slots"],
+            {"weekday": weekday, "hhmm": hhmm, "start_date": start.isoformat()},
+        ]
+        await state.update_data(slots=slots)
+        await target.answer(self._m.add_more, reply_markup=_add_more_keyboard(self._m))
+
+    # --- schedule card -------------------------------------------------------
+
+    async def _render_schedule_card(
+        self, specialist_id: int, schedule: RecurringSchedule, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        assert schedule.id is not None  # noqa: S101 — loaded schedules have an id
+        specialist = await self._load_settings(specialist_id)
+        tz = specialist.timezone
+        today = today_in_tz(datetime.now(UTC), tz)
+        slots = await self._load_slots(schedule.id)
+        async with self._session_factory() as session:
+            override_repo = SqlAlchemyRecurringSlotOverrideRepo(session)
+            overrides = {
+                slot.id: await override_repo.list_for_slot(slot.id) for slot in slots
+            }
+        occurrences = occurrences_in_window(
+            schedule, slots, overrides, today, today + timedelta(days=14), tz, today
+        )
+        child = await self._child_name(specialist_id, schedule.client_id)
+        back = back or f"clients:card:{schedule.client_id}"
+        text = render_schedule_card(
+            schedule, child, slots, occurrences, self._m, self._sm.dash
+        )
+        return text, _schedule_card_keyboard(
+            schedule.id, occurrences, tz, self._m, back
+        )
+
+    async def nav_schedule_card(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        head, inner = _split_back(back)
+        schedule_id = _last_int(head)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        # Navigation only targets a schedule we just acted on, so it still exists.
+        assert schedule is not None  # noqa: S101
+        return await self._render_schedule_card(specialist_id, schedule, inner)
+
+    async def show_schedule(self, callback: CallbackQuery, specialist_id: int) -> None:
+        head, back = _split_back(callback.data)
+        schedule_id = _last_int(head)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        if schedule is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        text, keyboard = await self._render_schedule_card(specialist_id, schedule, back)
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+    # --- single-meeting card -------------------------------------------------
+
+    async def _render_meeting_card(
+        self, specialist_id: int, slot: RecurringSlot, origin_date: date, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        assert slot.id is not None  # noqa: S101 — loaded slots have an id
+        specialist = await self._load_settings(specialist_id)
+        tz = specialist.timezone
+        schedule = await self._load_schedule(slot.schedule_id, specialist_id)
+        assert schedule is not None  # noqa: S101 — owned slot has an owned schedule
+        override = await self._load_override(slot.id, origin_date)
+        back = back or f"sched:day_view:{origin_date.isoformat()}"
+        child = await self._child_name(specialist_id, schedule.client_id)
+        if override is not None and override.moved_to is not None:
+            wall = utc_to_wall(override.moved_to, tz)
+            occ_date, occ_time, starts_at = (
+                wall.date(),
+                f"{wall:%H:%M}",
+                override.moved_to,
+            )
+        else:
+            occ_date, occ_time = origin_date, slot.time_hhmm
+            starts_at = wall_to_utc(origin_date, slot.time_hhmm, tz)
+        comment = (
+            override.comment
+            if override is not None and override.comment is not None
+            else schedule.comment
+        )
+        text = render_meeting_card(
+            child, occ_date, occ_time, comment, self._m, self._sm.dash
+        )
+        async with self._session_factory() as session:
+            status = await status_for_occurrence(
+                SqlAlchemyRemindersRepo(session),
+                specialist_id=specialist_id,
+                client_id=schedule.client_id,
+                starts_at=starts_at,
+            )
+        if status is ReminderStatus.CONFIRMED:
+            text = f"{text}\n{self._rem.card_confirmed}"
+        return text, _meeting_card_keyboard(
+            slot.id, origin_date, slot.schedule_id, self._m, back
+        )
+
+    async def nav_meeting_card(
+        self, specialist_id: int, back: str
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        head, inner = _split_back(back)
+        slot_id, origin_date = _parse_slot_date(head)
+        slot = await self._load_slot(slot_id, specialist_id)
+        assert slot is not None  # noqa: S101 — navigation targets an existing slot
+        return await self._render_meeting_card(specialist_id, slot, origin_date, inner)
+
+    async def show_meeting(self, callback: CallbackQuery, specialist_id: int) -> None:
+        head, back = _split_back(callback.data)
+        slot_id, origin_date = _parse_slot_date(head)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        text, keyboard = await self._render_meeting_card(
+            specialist_id, slot, origin_date, back
+        )
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+    # --- configure: per-slot edit, add, delete -------------------------------
+
+    async def _render_config(
+        self, schedule_id: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        slots = await self._load_slots(schedule_id)
+        return self._m.configure_title, _config_keyboard(schedule_id, slots, self._m)
+
+    async def show_config(self, callback: CallbackQuery, specialist_id: int) -> None:
+        schedule_id = _last_int(callback.data)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        if schedule is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        text, keyboard = await self._render_config(schedule_id)
+        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+    async def show_slot_actions(
+        self, callback: CallbackQuery, specialist_id: int
+    ) -> None:
+        slot_id = _last_int(callback.data)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await _callback_message(callback).edit_text(
+            self._m.slot_actions_title.format(
+                weekday=RU_WEEKDAYS[slot.weekday], time=slot.time_hhmm
+            ),
+            reply_markup=_slot_actions_keyboard(slot, self._m),
+        )
+        await callback.answer()
+
+    async def start_slot_time(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        slot_id = _last_int(callback.data)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        # Time-only edit keeps the slot's weekday; jump straight to the time picker.
+        await state.update_data(flow="cfg_time", slot_id=slot_id, weekday=slot.weekday)
+        specialist = await self._load_settings(specialist_id)
+        grid = generate_slots(
+            specialist.day_start, specialist.day_end, specialist.slot_minutes
+        )
+        await _callback_message(callback).edit_text(
+            self._m.pick_time,
+            reply_markup=build_recur_slots_keyboard(grid, set(), self._sm),
+        )
+        await callback.answer()
+
+    async def start_slot_day(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        slot_id = _last_int(callback.data)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        await state.update_data(flow="cfg_day", slot_id=slot_id)
+        await _callback_message(callback).edit_text(
+            self._m.pick_weekday, reply_markup=_weekday_keyboard()
+        )
+        await callback.answer()
+
+    async def _cfg_edit_slot(
+        self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
+    ) -> None:
+        data = await state.get_data()
+        specialist = await self._load_settings(specialist_id)
+        async with self._session_factory() as session:
+            slot = await edit_slot(
+                SqlAlchemyRecurringSlotRepo(session),
+                slot_id=data["slot_id"],
+                specialist_id=specialist_id,
+                weekday=data["weekday"],
+                time_hhmm=hhmm,
+                now=datetime.now(UTC),
+                tz=specialist.timezone,
+            )
+        await state.clear()
+        if slot is None:
+            await target.answer(self._m.not_found)
+            return
+        await target.answer(self._m.edited)
+        text, keyboard = await self._render_config(slot.schedule_id)
+        await target.answer(text, reply_markup=keyboard)
+
+    async def start_cfg_add(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        schedule_id = _last_int(callback.data)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        if schedule is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        await state.update_data(flow="cfg_add", schedule_id=schedule_id)
+        await _callback_message(callback).edit_text(
+            self._m.pick_weekday, reply_markup=_weekday_keyboard()
+        )
+        await callback.answer()
+
+    async def _cfg_add_slot(
+        self, target: Message, state: FSMContext, specialist_id: int, hhmm: str
+    ) -> None:
+        data = await state.get_data()
+        specialist = await self._load_settings(specialist_id)
+        async with self._session_factory() as session:
+            await add_slot(
+                SqlAlchemyRecurringSlotRepo(session),
+                schedule_id=data["schedule_id"],
+                weekday=data["weekday"],
+                time_hhmm=hhmm,
+                tz=specialist.timezone,
+                now=datetime.now(UTC),
+            )
+        await state.clear()
+        await target.answer(self._m.edited)
+        text, keyboard = await self._render_config(data["schedule_id"])
+        await target.answer(text, reply_markup=keyboard)
+
+    async def delete_slot(self, callback: CallbackQuery, specialist_id: int) -> None:
+        slot_id = _last_int(callback.data)
+        async with self._session_factory() as session:
+            slot = await remove_slot(
+                SqlAlchemyRecurringScheduleRepo(session),
+                SqlAlchemyRecurringSlotRepo(session),
+                slot_id=slot_id,
+                specialist_id=specialist_id,
+                now=datetime.now(UTC),
+            )
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        target = _callback_message(callback)
+        schedule = await self._load_schedule(slot.schedule_id, specialist_id)
+        # remove_slot stops the schedule when the last active slot is removed; the
+        # loaded schedule is still readable (no active filter) but now inactive.
+        if schedule is None or not schedule.active:
+            await target.edit_text(self._m.slot_removed)
+            await _open_card(
+                self._navigator,
+                target,
+                specialist_id=specialist_id,
+                card_back="",
+            )
+            await callback.answer()
+            return
+        text, keyboard = await self._render_config(slot.schedule_id)
+        await target.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+    # --- stop the whole schedule ---------------------------------------------
+
+    async def confirm_stop(self, callback: CallbackQuery, specialist_id: int) -> None:
+        head, back = _split_back(callback.data)
+        schedule_id = _last_int(head)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        if schedule is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await _callback_message(callback).edit_text(
+            self._m.confirm_stop,
+            reply_markup=_stop_confirm_keyboard(schedule_id, back, self._m),
+        )
+        await callback.answer()
+
+    async def do_stop(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        head, back = _split_back(callback.data)
+        schedule_id = _last_int(head)
+        slots = await self._load_slots(schedule_id)
+        async with self._session_factory() as session:
+            stopped = await stop_schedule(
+                SqlAlchemyRecurringScheduleRepo(session),
+                schedule_id=schedule_id,
+                specialist_id=specialist_id,
+                now=datetime.now(UTC),
+            )
+        if stopped is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        target = _callback_message(callback)
+        await target.edit_text(self._m.stopped)
+        client = await self._load_client(specialist_id, stopped.client_id)
+        rule = _rule_text([(s.weekday, s.time_hhmm) for s in slots])
+        first_time = slots[0].time_hhmm if slots else ""
+        shown = await _ask_series_notify(
+            target,
+            state,
+            "x",
+            client,
+            rule,
+            first_time,
+            schedule_target_key(schedule_id),
+            back,
+            specialist_id,
+            self._session_factory,
+            self._sm,
+        )
+        if not shown:
+            await _open_card(
+                self._navigator, target, specialist_id=specialist_id, card_back=back
+            )
+        await callback.answer()
+
+    # --- move a single occurrence: pick new date, then time ------------------
 
     async def start_move(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
         head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
-        series = await self._load_series(series_id, specialist_id)
-        if series is None:
+        slot_id, origin_date = _parse_slot_date(head)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         await state.clear()
         await state.update_data(
             flow="move",
-            series_id=series_id,
+            slot_id=slot_id,
             origin_date=origin_date.isoformat(),
             back=back,
-            # Where Cancel returns: the series card this move was started from.
-            card=_with_back(f"recur:card:{series_id}:{origin_date.isoformat()}", back),
+            card=_with_back(f"recur:occ:{slot_id}:{origin_date.isoformat()}", back),
         )
         specialist = await self._load_settings(specialist_id)
         today = today_in_tz(datetime.now(UTC), specialist.timezone)
@@ -1967,7 +2555,7 @@ class RecurringHandlers:
         chosen = date(int(year), int(month), int(day))
         await state.update_data(new_day=chosen.isoformat())
         specialist = await self._load_settings(specialist_id)
-        slots = generate_slots(
+        grid = generate_slots(
             specialist.day_start, specialist.day_end, specialist.slot_minutes
         )
         async with self._session_factory() as session:
@@ -1981,128 +2569,9 @@ class RecurringHandlers:
             )
         await _callback_message(callback).edit_text(
             self._m.pick_time,
-            reply_markup=build_recur_slots_keyboard(slots, taken, self._sm),
+            reply_markup=build_recur_slots_keyboard(grid, taken, self._sm),
         )
         await callback.answer()
-
-    # --- time selection ------------------------------------------------------
-
-    async def pick_slot(
-        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
-    ) -> None:
-        raw = (callback.data or "").rsplit(":", 1)[1]
-        hhmm = f"{raw[:2]}:{raw[2:]}"
-        await self._proceed_time(
-            _callback_message(callback), state, specialist_id, hhmm, edit=True
-        )
-        await callback.answer()
-
-    async def ask_custom_time(self, callback: CallbackQuery, state: FSMContext) -> None:
-        await state.set_state(Recurring.custom_time)
-        await _callback_message(callback).edit_text(
-            self._m.ask_custom_time, reply_markup=_recur_cancel_keyboard()
-        )
-        await callback.answer()
-
-    async def apply_custom_time(
-        self, message: Message, state: FSMContext, specialist_id: int
-    ) -> None:
-        hhmm = parse_hhmm(message.text or "")
-        if hhmm is None:
-            await message.answer(
-                self._m.bad_time, reply_markup=_recur_cancel_keyboard()
-            )
-            return
-        # A typed time arrives on the user's own message, which the bot cannot edit,
-        # so the move result is sent as a new message (edit=False).
-        await self._proceed_time(message, state, specialist_id, hhmm, edit=False)
-
-    async def _proceed_time(
-        self,
-        target: Message,
-        state: FSMContext,
-        specialist_id: int,
-        hhmm: str,
-        *,
-        edit: bool,
-    ) -> None:
-        data = await state.get_data()
-        if data.get("flow") == "move":
-            await self._do_move(target, state, specialist_id, hhmm, edit=edit)
-            return
-        await state.update_data(hhmm=hhmm)
-        await state.set_state(Recurring.comment)
-        await target.answer(
-            self._m.ask_comment, reply_markup=_recur_skip_comment_keyboard()
-        )
-
-    # --- edit finish ---------------------------------------------------------
-
-    async def apply_comment(
-        self, message: Message, state: FSMContext, specialist_id: int
-    ) -> None:
-        comment = (message.text or "").strip() or None
-        await self._finish(message, state, specialist_id, comment)
-
-    async def skip_comment(
-        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
-    ) -> None:
-        await self._finish(_callback_message(callback), state, specialist_id, None)
-        await callback.answer()
-
-    async def _finish(
-        self,
-        target: Message,
-        state: FSMContext,
-        specialist_id: int,
-        comment: str | None,
-    ) -> None:
-        data = await state.get_data()
-        specialist = await self._load_settings(specialist_id)
-        async with self._session_factory() as session:
-            series = await edit_series(
-                SqlAlchemyRecurringRepo(session),
-                series_id=data["series_id"],
-                specialist_id=specialist_id,
-                weekday=data["weekday"],
-                time_hhmm=data["hhmm"],
-                comment=comment,
-                now=datetime.now(UTC),
-                tz=specialist.timezone,
-            )
-        back = data["back"]  # set by start_edit (the series card's origin)
-        await state.clear()
-        if series is None:  # edit of a series the specialist does not own
-            await target.answer(self._m.not_found)
-            return
-        await target.answer(self._m.created)
-        # Editing changes the weekly rule → notify with the series ("modified") text;
-        # defer the series card to the end of the notify scenario.
-        assert series.id is not None  # noqa: S101 — edited series have an id
-        client = await self._load_client(specialist_id, series.client_id)
-        card_back = _with_back(
-            f"recur:card:{series.id}:{series.start_date.isoformat()}", back
-        )
-        shown = await _ask_series_notify(
-            target,
-            state,
-            "m",
-            client,
-            series.weekday,
-            series.time_hhmm,
-            series_target_key(series.id),
-            card_back,
-            specialist_id,
-            self._session_factory,
-            self._sm,
-        )
-        if not shown:
-            await _open_card(
-                self._navigator,
-                target,
-                specialist_id=specialist_id,
-                card_back=card_back,
-            )
 
     async def _do_move(
         self,
@@ -2114,18 +2583,18 @@ class RecurringHandlers:
         edit: bool,
     ) -> None:
         data = await state.get_data()
-        origin_date = date.fromisoformat(data["origin_date"])  # the date being moved
-        new_day = date.fromisoformat(data["new_day"])  # where it goes
+        origin_date = date.fromisoformat(data["origin_date"])
+        new_day = date.fromisoformat(data["new_day"])
         specialist = await self._load_settings(specialist_id)
-        new_starts_at = wall_to_utc(new_day, hhmm, specialist.timezone)
+        moved_to = wall_to_utc(new_day, hhmm, specialist.timezone)
         async with self._session_factory() as session:
-            moved = await move_date(
-                SqlAlchemyRecurringRepo(session),
-                SqlAlchemyRecurringExceptionsRepo(session),
-                series_id=data["series_id"],
+            moved = await move_occurrence(
+                SqlAlchemyRecurringSlotRepo(session),
+                SqlAlchemyRecurringSlotOverrideRepo(session),
+                slot_id=data["slot_id"],
                 specialist_id=specialist_id,
                 original_date=origin_date,
-                new_starts_at=new_starts_at,
+                moved_to=moved_to,
                 now=datetime.now(UTC),
             )
         card = data.get("card") or ""
@@ -2133,22 +2602,22 @@ class RecurringHandlers:
         if moved is None:
             await target.answer(self._m.not_found)
             return
-        # Show the result now; the series card is re-opened after the notify scenario.
         if edit:
             await target.edit_text(self._m.moved)
         else:
             await target.answer(self._m.moved)
-        # Moving a single date → notify about that one occurrence (concrete date).
-        series = await self._load_series(data["series_id"], specialist_id)
-        assert series is not None  # noqa: S101 — move succeeded, so the series exists
-        client = await self._load_client(specialist_id, series.client_id)
+        slot = await self._load_slot(data["slot_id"], specialist_id)
+        assert slot is not None  # noqa: S101 — move succeeded, so the slot exists
+        schedule = await self._load_schedule(slot.schedule_id, specialist_id)
+        assert schedule is not None  # noqa: S101
+        client = await self._load_client(specialist_id, schedule.client_id)
         shown = await _ask_notify(
             target,
             state,
             "r",
             client,
-            new_starts_at,
-            series_date_target_key(data["series_id"], origin_date),
+            moved_to,
+            slot_date_target_key(data["slot_id"], origin_date),
             card,
             specialist.timezone,
             specialist_id,
@@ -2160,140 +2629,20 @@ class RecurringHandlers:
                 self._navigator, target, specialist_id=specialist_id, card_back=card
             )
 
-    # --- series card ---------------------------------------------------------
-
-    async def _load_exception(
-        self, series_id: int, origin_date: date
-    ) -> RecurringException | None:
-        async with self._session_factory() as session:
-            exceptions = await SqlAlchemyRecurringExceptionsRepo(
-                session
-            ).list_for_series(series_id)
-        return next((e for e in exceptions if e.original_date == origin_date), None)
-
-    async def _render_series_card(
-        self,
-        specialist_id: int,
-        series: RecurringAppointment,
-        origin_date: date,
-        back: str,
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        assert series.id is not None  # noqa: S101 — loaded series always have an id
-        specialist = await self._load_settings(specialist_id)
-        exception = await self._load_exception(series.id, origin_date)
-        back = back or f"sched:day_view:{origin_date.isoformat()}"
-        child = await self._child_name(specialist_id, series.client_id)
-        tz = specialist.timezone
-        text = render_series_card(
-            series, child, origin_date, exception, tz, self._m, self._sm.dash
-        )
-        # The occurrence's UTC instant: moved → exception's time, else the rule time.
-        if exception is not None and exception.new_starts_at is not None:
-            starts_at = exception.new_starts_at
-        else:
-            starts_at = wall_to_utc(origin_date, series.time_hhmm, tz)
-        async with self._session_factory() as session:
-            status = await status_for_occurrence(
-                SqlAlchemyRemindersRepo(session),
-                specialist_id=specialist_id,
-                client_id=series.client_id,
-                starts_at=starts_at,
-            )
-        if status is ReminderStatus.CONFIRMED:
-            text = f"{text}\n{self._rem.card_confirmed}"
-        return text, _series_card_keyboard(series.id, origin_date, self._m, back)
-
-    async def nav_series_card(
-        self, specialist_id: int, back: str
-    ) -> tuple[str, InlineKeyboardMarkup]:
-        head, inner = _split_back(back)
-        series_id, origin_date = _parse_series_date(head)
-        series = await self._load_series(series_id, specialist_id)
-        # Navigation only targets a series we just acted on, so it still exists.
-        assert series is not None  # noqa: S101
-        return await self._render_series_card(specialist_id, series, origin_date, inner)
-
-    async def show_card(self, callback: CallbackQuery, specialist_id: int) -> None:
-        head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
-        series = await self._load_series(series_id, specialist_id)
-        if series is None:
-            await callback.answer(self._m.not_found, show_alert=True)
-            return
-        text, keyboard = await self._render_series_card(
-            specialist_id, series, origin_date, back
-        )
-        await _callback_message(callback).edit_text(text, reply_markup=keyboard)
-        await callback.answer()
-
-    # --- stop ----------------------------------------------------------------
-
-    async def confirm_stop(self, callback: CallbackQuery, specialist_id: int) -> None:
-        head, back = _split_back(callback.data)
-        series_id = _last_int(head)
-        series = await self._load_series(series_id, specialist_id)
-        if series is None:
-            await callback.answer(self._m.not_found, show_alert=True)
-            return
-        await _callback_message(callback).edit_text(
-            self._m.confirm_stop,
-            reply_markup=_stop_confirm_keyboard(
-                series_id, series.start_date, back, self._m
-            ),
-        )
-        await callback.answer()
-
-    async def do_stop(
-        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
-    ) -> None:
-        head, back = _split_back(callback.data)
-        series_id = _last_int(head)
-        async with self._session_factory() as session:
-            stopped = await stop_series(
-                SqlAlchemyRecurringRepo(session),
-                series_id=series_id,
-                specialist_id=specialist_id,
-                now=datetime.now(UTC),
-            )
-        if stopped is None:
-            await callback.answer(self._m.not_found, show_alert=True)
-            return
-        target = _callback_message(callback)
-        await target.edit_text(self._m.stopped)
-        # Stopping the whole series → notify with the series ("cancelled") text; the
-        # back screen (day/client) is re-opened after the notify scenario.
-        client = await self._load_client(specialist_id, stopped.client_id)
-        shown = await _ask_series_notify(
-            target,
-            state,
-            "x",
-            client,
-            stopped.weekday,
-            stopped.time_hhmm,
-            series_target_key(series_id),
-            back,
-            specialist_id,
-            self._session_factory,
-            self._sm,
-        )
-        if not shown:
-            await _open_card(
-                self._navigator, target, specialist_id=specialist_id, card_back=back
-            )
-        await callback.answer()
-
-    # --- skip ----------------------------------------------------------------
+    # --- skip a single occurrence --------------------------------------------
 
     async def confirm_skip(self, callback: CallbackQuery, specialist_id: int) -> None:
         head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
-        series = await self._load_series(series_id, specialist_id)
-        if series is None:
+        slot_id, origin_date = _parse_slot_date(head)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
             await callback.answer(self._m.not_found, show_alert=True)
             return
         await _callback_message(callback).edit_text(
             self._m.skip_confirm.format(date=format_ru_date(origin_date)),
-            reply_markup=_skip_confirm_keyboard(series_id, origin_date, back, self._m),
+            reply_markup=_occ_skip_confirm_keyboard(
+                slot_id, origin_date, back, self._m
+            ),
         )
         await callback.answer()
 
@@ -2301,12 +2650,12 @@ class RecurringHandlers:
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
         head, back = _split_back(callback.data)
-        series_id, origin_date = _parse_series_date(head)
+        slot_id, origin_date = _parse_slot_date(head)
         async with self._session_factory() as session:
-            skipped = await skip_date(
-                SqlAlchemyRecurringRepo(session),
-                SqlAlchemyRecurringExceptionsRepo(session),
-                series_id=series_id,
+            skipped = await skip_occurrence(
+                SqlAlchemyRecurringSlotRepo(session),
+                SqlAlchemyRecurringSlotOverrideRepo(session),
+                slot_id=slot_id,
                 specialist_id=specialist_id,
                 original_date=origin_date,
                 now=datetime.now(UTC),
@@ -2316,20 +2665,20 @@ class RecurringHandlers:
             return
         target = _callback_message(callback)
         await target.edit_text(self._m.skipped)
-        # Cancelling a single date → notify about that one occurrence (rule time); the
-        # back screen is re-opened after the notify scenario.
         specialist = await self._load_settings(specialist_id)
-        series = await self._load_series(series_id, specialist_id)
-        assert series is not None  # noqa: S101 — skip succeeded, so the series exists
-        client = await self._load_client(specialist_id, series.client_id)
-        starts_at = wall_to_utc(origin_date, series.time_hhmm, specialist.timezone)
+        slot = await self._load_slot(slot_id, specialist_id)
+        assert slot is not None  # noqa: S101 — skip succeeded, so the slot exists
+        schedule = await self._load_schedule(slot.schedule_id, specialist_id)
+        assert schedule is not None  # noqa: S101
+        client = await self._load_client(specialist_id, schedule.client_id)
+        starts_at = wall_to_utc(origin_date, slot.time_hhmm, specialist.timezone)
         shown = await _ask_notify(
             target,
             state,
             "x",
             client,
             starts_at,
-            series_date_target_key(series_id, origin_date),
+            slot_date_target_key(slot_id, origin_date),
             back,
             specialist.timezone,
             specialist_id,
@@ -2342,11 +2691,61 @@ class RecurringHandlers:
             )
         await callback.answer()
 
+    # --- comment a single occurrence -----------------------------------------
+
+    async def start_comment(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        head, back = _split_back(callback.data)
+        slot_id, origin_date = _parse_slot_date(head)
+        slot = await self._load_slot(slot_id, specialist_id)
+        if slot is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        await state.update_data(
+            flow="occ_comment",
+            slot_id=slot_id,
+            origin_date=origin_date.isoformat(),
+            card=_with_back(f"recur:occ:{slot_id}:{origin_date.isoformat()}", back),
+        )
+        await state.set_state(Recurring.occ_comment)
+        await _callback_message(callback).edit_text(
+            self._m.ask_occ_comment, reply_markup=_recur_cancel_keyboard()
+        )
+        await callback.answer()
+
+    async def apply_occ_comment(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        data = await state.get_data()
+        comment = (message.text or "").strip() or None
+        origin_date = date.fromisoformat(data["origin_date"])
+        async with self._session_factory() as session:
+            saved = await set_occurrence_comment(
+                SqlAlchemyRecurringSlotRepo(session),
+                SqlAlchemyRecurringSlotOverrideRepo(session),
+                slot_id=data["slot_id"],
+                specialist_id=specialist_id,
+                original_date=origin_date,
+                comment=comment,
+                now=datetime.now(UTC),
+            )
+        card = data.get("card") or ""
+        await state.clear()
+        if saved is None:
+            await message.answer(self._m.not_found)
+            return
+        await message.answer(self._m.comment_set)
+        await _open_card(
+            self._navigator, message, specialist_id=specialist_id, card_back=card
+        )
+
     async def cancel(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
         data = await state.get_data()
-        card = data.get("card") or ""  # the series card this flow started from
+        card = data.get("card") or ""  # the card this flow started from, if any
         await state.clear()
         await _post_action(
             self._navigator,
@@ -2357,14 +2756,6 @@ class RecurringHandlers:
             edit=True,
         )
         await callback.answer()
-
-
-def _recur_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=_BTN_CANCEL, callback_data="recur:cancel")]
-        ]
-    )
 
 
 def _build_navigator(
@@ -2383,7 +2774,8 @@ def _build_navigator(
             "sched:day_view:": h.nav_day,
             "sched:chist:": h.nav_client_history,
             "sched:card:": h.nav_appt_card,
-            "recur:card:": r.nav_series_card,
+            "recur:sched:": r.nav_schedule_card,
+            "recur:occ:": r.nav_meeting_card,
             "clients:card:": ch.nav_card,
             "clients:active:": ch.nav_active,
             "clients:arch:": ch.nav_archive,
@@ -2395,22 +2787,46 @@ def _build_navigator(
 
 def _register_recurring(router: Router, r: RecurringHandlers) -> None:
     router.message.register(r.apply_custom_time, Recurring.custom_time)
-    router.message.register(r.apply_comment, Recurring.comment)
+    router.message.register(r.apply_schedule_comment, Recurring.comment)
+    router.message.register(r.apply_occ_comment, Recurring.occ_comment)
 
+    # creation wizard (entered from the appointment flow's "make regular")
+    router.callback_query.register(r.add_day, F.data == "recur:add")
+    router.callback_query.register(r.done_adding, F.data == "recur:done")
+    router.callback_query.register(r.skip_schedule_comment, F.data == "recur:cskipc")
+    # shared weekday / time pickers (dispatch on FSM flow)
     router.callback_query.register(r.pick_weekday, F.data.startswith("recur:wd:"))
-    router.callback_query.register(r.navigate_move, F.data.startswith("recur:cal:"))
-    router.callback_query.register(r.pick_move_day, F.data.startswith("recur:day:"))
-    router.callback_query.register(r.pick_slot, F.data.startswith("recur:slot:"))
-    router.callback_query.register(r.ask_custom_time, F.data == "recur:other")
-    router.callback_query.register(r.skip_comment, F.data == "recur:skipc")
+    router.callback_query.register(r.pick_slot, F.data.startswith("recur:tslot:"))
+    router.callback_query.register(r.ask_custom_time, F.data == "recur:tother")
     router.callback_query.register(r.cancel, F.data == "recur:cancel")
-    router.callback_query.register(r.show_card, F.data.startswith("recur:card:"))
-    router.callback_query.register(r.start_edit, F.data.startswith("recur:edit:"))
-    router.callback_query.register(r.start_move, F.data.startswith("recur:move:"))
+    # two-level cards
+    router.callback_query.register(r.show_schedule, F.data.startswith("recur:sched:"))
+    router.callback_query.register(r.show_meeting, F.data.startswith("recur:occ:"))
+    # configure: slot list, per-slot actions, add a day
+    router.callback_query.register(r.show_config, F.data.startswith("recur:cfg:"))
+    router.callback_query.register(r.start_cfg_add, F.data.startswith("recur:cfgadd:"))
+    router.callback_query.register(
+        r.show_slot_actions, F.data.startswith("recur:slot:")
+    )
+    router.callback_query.register(
+        r.start_slot_time, F.data.startswith("recur:slottime:")
+    )
+    router.callback_query.register(
+        r.start_slot_day, F.data.startswith("recur:slotday:")
+    )
+    router.callback_query.register(r.delete_slot, F.data.startswith("recur:slotdel:"))
+    # stop the whole schedule
     router.callback_query.register(r.confirm_stop, F.data.startswith("recur:stopask:"))
     router.callback_query.register(r.do_stop, F.data.startswith("recur:stop:"))
-    router.callback_query.register(r.confirm_skip, F.data.startswith("recur:skipask:"))
-    router.callback_query.register(r.do_skip, F.data.startswith("recur:skip:"))
+    # single-occurrence actions: move / skip / comment
+    router.callback_query.register(r.start_move, F.data.startswith("recur:occmove:"))
+    router.callback_query.register(r.navigate_move, F.data.startswith("recur:cal:"))
+    router.callback_query.register(r.pick_move_day, F.data.startswith("recur:day:"))
+    router.callback_query.register(
+        r.confirm_skip, F.data.startswith("recur:occskipask:")
+    )
+    router.callback_query.register(r.do_skip, F.data.startswith("recur:occskip:"))
+    router.callback_query.register(r.start_comment, F.data.startswith("recur:occcmt:"))
 
 
 def build_router(

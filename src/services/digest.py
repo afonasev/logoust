@@ -15,7 +15,11 @@ import logging
 
 from src.domain.appointment import Appointment, AppointmentsRepo
 from src.domain.client import ClientsRepo
-from src.domain.recurring import RecurringExceptionsRepo, RecurringRepo
+from src.domain.recurring import (
+    RecurringScheduleRepo,
+    RecurringSlotOverrideRepo,
+    RecurringSlotRepo,
+)
 from src.domain.schedule import format_ru_date, today_in_tz, utc_to_wall
 from src.domain.specialist import Specialist, SpecialistsRepo, is_digest_due
 from src.services.appointments import list_specialist_day
@@ -64,21 +68,27 @@ async def collect_today_digest(  # noqa: PLR0913
     now: datetime,
     *,
     appointments_repo: AppointmentsRepo,
-    recurring_repo: RecurringRepo,
-    exceptions_repo: RecurringExceptionsRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
     clients_repo: ClientsRepo,
     messages: DigestMessages,
 ) -> str | None:
     """Rendered digest for today in the specialist's tz, or None when no meetings.
 
     Shared by the scheduled pass and the manual "send now" action so both produce
-    the identical list (real rows + virtual series repeats landing today).
+    the identical list (real rows + virtual slot repeats landing today).
     """
     assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     series = await load_series_context(
-        recurring_repo, exceptions_repo, specialist_id=specialist.id, now=now, tz=tz
+        schedule_repo,
+        slot_repo,
+        override_repo,
+        specialist_id=specialist.id,
+        now=now,
+        tz=tz,
     )
     occurrences = await list_specialist_day(
         appointments_repo, specialist_id=specialist.id, day=today, tz=tz, series=series
@@ -96,8 +106,9 @@ async def send_digest_if_due(  # noqa: PLR0913
     *,
     appointments_repo: AppointmentsRepo,
     specialists_repo: SpecialistsRepo,
-    recurring_repo: RecurringRepo,
-    exceptions_repo: RecurringExceptionsRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
     clients_repo: ClientsRepo,
     messages: DigestMessages,
     send: Callable[[int, str], Awaitable[object]],
@@ -115,8 +126,9 @@ async def send_digest_if_due(  # noqa: PLR0913
         specialist,
         now,
         appointments_repo=appointments_repo,
-        recurring_repo=recurring_repo,
-        exceptions_repo=exceptions_repo,
+        schedule_repo=schedule_repo,
+        slot_repo=slot_repo,
+        override_repo=override_repo,
         clients_repo=clients_repo,
         messages=messages,
     )

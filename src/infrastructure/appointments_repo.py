@@ -27,8 +27,8 @@ class AppointmentORM(Base):
         Index("ix_appointments_client_starts", "client_id", "starts_at"),
         # Idempotency anchor for settle's insert-or-ignore of past occurrences.
         Index(
-            "uq_appointments_series_origin",
-            "series_id",
+            "uq_appointments_slot_origin",
+            "slot_id",
             "origin_date",
             unique=True,
         ),
@@ -43,9 +43,9 @@ class AppointmentORM(Base):
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Set together on series occurrences (NULL on one-off appointments).
-    series_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("recurring_appointments.id"), nullable=True
+    # Set together on slot occurrences (NULL on one-off appointments).
+    slot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("recurring_slots.id"), nullable=True
     )
     origin_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -78,7 +78,7 @@ def to_domain(orm: AppointmentORM) -> Appointment:
         comment=orm.comment,
         created_at=_as_utc(orm.created_at),
         updated_at=_as_utc(orm.updated_at),
-        series_id=orm.series_id,
+        slot_id=orm.slot_id,
         origin_date=orm.origin_date,
     )
 
@@ -222,7 +222,7 @@ class SqlAlchemyAppointmentsRepo:
         return to_domain(orm)
 
     async def insert_occurrence(self, occurrence: Appointment) -> bool:
-        # Insert-or-ignore on UNIQUE(series_id, origin_date): settle may run
+        # Insert-or-ignore on UNIQUE(slot_id, origin_date): settle may run
         # concurrently or repeatedly, so a duplicate occurrence is a no-op, not an
         # error. Returns True when a new row was actually written.
         stmt = (
@@ -232,12 +232,12 @@ class SqlAlchemyAppointmentsRepo:
                 client_id=occurrence.client_id,
                 starts_at=occurrence.starts_at,
                 comment=occurrence.comment,
-                series_id=occurrence.series_id,
+                slot_id=occurrence.slot_id,
                 origin_date=occurrence.origin_date,
                 created_at=occurrence.created_at,
                 updated_at=occurrence.updated_at,
             )
-            .on_conflict_do_nothing(index_elements=["series_id", "origin_date"])
+            .on_conflict_do_nothing(index_elements=["slot_id", "origin_date"])
         )
         result = await self._session.execute(stmt)
         await self._session.commit()

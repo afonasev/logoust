@@ -4,7 +4,7 @@ Pure Python — no SQLAlchemy or aiogram. A *reminder* is a journal row that rec
 that a client was (or will be) reminded about a single occurrence and what they
 answered. An occurrence is identified by the natural key
 `(specialist_id, client_id, starts_at)`, so the journal works identically for a
-real one-off appointment and a virtual future repeat of a series, which has no
+real one-off appointment and a virtual future repeat of a slot, which has no
 appointments row (see design.md, decision 1).
 """
 
@@ -29,9 +29,9 @@ class AppointmentReminder:
     specialist_id: int
     client_id: int
     starts_at: datetime  # aware UTC; with client_id identifies the occurrence
-    # Series back-reference: both NULL for a one-off appointment, both set for a
-    # (possibly virtual) series occurrence so the "open card" link can be built.
-    series_id: int | None
+    # Slot back-reference: both NULL for a one-off appointment, both set for a
+    # (possibly virtual) slot occurrence so the "open card" link can be built.
+    slot_id: int | None
     origin_date: date | None
     status: ReminderStatus
     sent_at: datetime

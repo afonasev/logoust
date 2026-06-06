@@ -132,20 +132,46 @@ class RecurringMessages:
     ask_comment: str
     created: str
     not_found: str
-    card: str
     line: str
-    btn_edit: str
-    btn_move_date: str
-    btn_skip_date: str
+    # multi-slot creation wizard
+    add_more: str
+    btn_add_more: str
+    btn_done: str
+    # schedule card (screen 1)
+    schedule_card: str
+    rule_line: str
+    empty_window: str
+    occ_btn: str
+    btn_configure: str
     btn_stop: str
+    # single-meeting card (screen 2)
+    meeting_card: str
+    btn_move: str
+    btn_skip: str
+    btn_comment: str
+    btn_to_schedule: str
+    # per-slot configuration screen
+    configure_title: str
+    slot_btn: str
+    slot_actions_title: str
+    btn_slot_time: str
+    btn_slot_day: str
+    btn_slot_delete: str
+    btn_add_day: str
+    slot_removed: str
+    edited: str
+    # stop the whole schedule
     confirm_stop: str
     btn_confirm_stop: str
     stopped: str
     cancelled: str
+    # single-occurrence skip / move / comment
     skip_confirm: str
     btn_confirm_skip: str
     skipped: str
     moved: str
+    ask_occ_comment: str
+    comment_set: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,12 +471,30 @@ def load_messages(path: Path) -> BotMessages:
             ask_comment=_require(data, "recurring.ask_comment"),
             created=_require(data, "recurring.created"),
             not_found=_require(data, "recurring.not_found"),
-            card=_require(data, "recurring.card").strip(),
             line=_require(data, "recurring.line"),
-            btn_edit=_require(data, "recurring.btn_edit"),
-            btn_move_date=_require(data, "recurring.btn_move_date"),
-            btn_skip_date=_require(data, "recurring.btn_skip_date"),
+            add_more=_require(data, "recurring.add_more"),
+            btn_add_more=_require(data, "recurring.btn_add_more"),
+            btn_done=_require(data, "recurring.btn_done"),
+            schedule_card=_require(data, "recurring.schedule_card").strip(),
+            rule_line=_require(data, "recurring.rule_line"),
+            empty_window=_require(data, "recurring.empty_window"),
+            occ_btn=_require(data, "recurring.occ_btn"),
+            btn_configure=_require(data, "recurring.btn_configure"),
             btn_stop=_require(data, "recurring.btn_stop"),
+            meeting_card=_require(data, "recurring.meeting_card").strip(),
+            btn_move=_require(data, "recurring.btn_move"),
+            btn_skip=_require(data, "recurring.btn_skip"),
+            btn_comment=_require(data, "recurring.btn_comment"),
+            btn_to_schedule=_require(data, "recurring.btn_to_schedule"),
+            configure_title=_require(data, "recurring.configure_title"),
+            slot_btn=_require(data, "recurring.slot_btn"),
+            slot_actions_title=_require(data, "recurring.slot_actions_title"),
+            btn_slot_time=_require(data, "recurring.btn_slot_time"),
+            btn_slot_day=_require(data, "recurring.btn_slot_day"),
+            btn_slot_delete=_require(data, "recurring.btn_slot_delete"),
+            btn_add_day=_require(data, "recurring.btn_add_day"),
+            slot_removed=_require(data, "recurring.slot_removed"),
+            edited=_require(data, "recurring.edited"),
             confirm_stop=_require(data, "recurring.confirm_stop"),
             btn_confirm_stop=_require(data, "recurring.btn_confirm_stop"),
             stopped=_require(data, "recurring.stopped"),
@@ -459,6 +503,8 @@ def load_messages(path: Path) -> BotMessages:
             btn_confirm_skip=_require(data, "recurring.btn_confirm_skip"),
             skipped=_require(data, "recurring.skipped"),
             moved=_require(data, "recurring.moved"),
+            ask_occ_comment=_require(data, "recurring.ask_occ_comment"),
+            comment_set=_require(data, "recurring.comment_set"),
         ),
         reminder=ReminderMessages(
             client_text=_require(data, "reminder.client_text").strip(),

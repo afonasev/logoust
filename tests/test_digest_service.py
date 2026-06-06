@@ -8,8 +8,9 @@ from src.bot.messages import DEFAULT_MESSAGES_PATH, load_messages
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import create_appointment
@@ -82,8 +83,9 @@ async def _run(
             now,
             appointments_repo=SqlAlchemyAppointmentsRepo(session),
             specialists_repo=SqlAlchemySpecialistsRepo(session),
-            recurring_repo=SqlAlchemyRecurringRepo(session),
-            exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+            schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+            slot_repo=SqlAlchemyRecurringSlotRepo(session),
+            override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
             clients_repo=SqlAlchemyClientsRepo(session),
             messages=_DIGEST,
             send=send,

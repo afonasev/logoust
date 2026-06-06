@@ -5,13 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.windows import WindowsHandlers, render_windows
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
-from src.domain.recurring import RecurringAppointment
 from src.domain.schedule import format_ru_date, next_working_days, today_in_tz
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
-from src.infrastructure.recurring_repo import SqlAlchemyRecurringRepo
+from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
+from src.infrastructure.recurring_repo import (
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotRepo,
+)
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import DayWindows, create_appointment
+from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
+from src.services.recurring import add_slot, create_schedule
 
 _SP = 1
 _TZ = "Asia/Yekaterinburg"  # default specialist timezone
@@ -32,6 +37,21 @@ async def _seed_specialist(factory: async_sessionmaker[AsyncSession]) -> int:
         specialist = await create_invite(SqlAlchemySpecialistsRepo(session))
     assert specialist.id is not None
     return specialist.id
+
+
+async def _seed_client(factory: async_sessionmaker[AsyncSession], sp_id: int) -> int:
+    async with factory() as session:
+        client = await add_client(
+            SqlAlchemyClientsRepo(session),
+            NewClient(
+                specialist_id=sp_id,
+                child_name="Петя",
+                contact_name="Мама",
+                contact_phone="89161234567",
+            ),
+        )
+    assert client.id is not None
+    return client.id
 
 
 def _handlers(
@@ -106,25 +126,28 @@ async def test_show_excludes_series_repeat_slot(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     sp_id = await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, sp_id)
     now = datetime.now(UTC)
     today = today_in_tz(now, _TZ)
-    # The next working day with the series' weekday gets a repeat at 14:00.
+    # The next working day with the slot's weekday gets a repeat at 14:00.
     target = next_working_days(today, {0, 1, 2, 3, 4}, 5)[1]
     async with session_factory() as session:
-        await SqlAlchemyRecurringRepo(session).add(
-            RecurringAppointment(
-                id=None,
-                specialist_id=sp_id,
-                client_id=1,
-                weekday=target.weekday(),
-                time_hhmm="14:00",
-                comment=None,
-                active=True,
-                start_date=target,
-                materialized_through=target,
-                created_at=now,
-                updated_at=now,
-            )
+        schedule = await create_schedule(
+            SqlAlchemyRecurringScheduleRepo(session),
+            specialist_id=sp_id,
+            client_id=client_id,
+            comment=None,
+            now=now,
+        )
+        assert schedule.id is not None
+        await add_slot(
+            SqlAlchemyRecurringSlotRepo(session),
+            schedule_id=schedule.id,
+            weekday=target.weekday(),
+            time_hhmm="14:00",
+            tz=_TZ,
+            now=now,
+            start_date=target,
         )
     msg = _fake_message()
     await _handlers(messages, session_factory).show(msg, sp_id)

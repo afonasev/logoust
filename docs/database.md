@@ -53,8 +53,8 @@
 | `client_id`     | INTEGER  | нет  | FK → `clients.id`. Клиент записи.                  |
 | `starts_at`     | DATETIME | нет  | Время начала в **aware UTC** (настенное ↔ UTC через `timezone` специалиста). |
 | `comment`       | TEXT     | да   | Необязательный комментарий к записи.               |
-| `series_id`     | INTEGER  | да   | FK → `recurring_appointments.id`. `NULL` у разовой записи; заполнен у материализованной occurrence серии. |
-| `origin_date`   | DATE     | да   | Плановая дата occurrence серии. `NULL` у разовой записи. |
+| `slot_id`       | INTEGER  | да   | FK → `recurring_slots.id`. `NULL` у разовой записи; заполнен у материализованной occurrence слота. |
+| `origin_date`   | DATE     | да   | Плановая дата occurrence слота. `NULL` у разовой записи. |
 | `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                       |
 | `updated_at`    | DATETIME | нет  | Обновляется при переносе (`starts_at`).            |
 
@@ -62,7 +62,7 @@
 
 - `ix_appointments_specialist_starts` — составной по `(specialist_id, starts_at)`. Обслуживает ленту специалиста (будущие/история по времени) и по левому префиксу — «все мои».
 - `ix_appointments_client_starts` — составной по `(client_id, starts_at)`. Обслуживает списки записей в карточке клиента.
-- `uq_appointments_series_origin` — **уникальный** по `(series_id, origin_date)`. Делает материализацию прошедших occurrence (`settle`) идемпотентной: повторная/конкурентная вставка той же occurrence — no-op (`INSERT … ON CONFLICT DO NOTHING`).
+- `uq_appointments_slot_origin` — **уникальный** по `(slot_id, origin_date)`. Делает материализацию прошедших occurrence (`settle`) идемпотентной: повторная/конкурентная вставка той же occurrence — no-op (`INSERT … ON CONFLICT DO NOTHING`).
 
 Решения по схеме:
 
@@ -70,45 +70,63 @@
 - Удаление записи — жёсткое (физический `DELETE`), в отличие от клиентов; архива нет.
 - Перенос меняет только `starts_at` (и `updated_at`); `comment` и `client_id` не трогаются.
 - Пагинация истории — паттерн «`LIMIT page_size + 1`» (без `COUNT`), как у архива клиентов.
-- `series_id`/`origin_date` оба `NULL` ⇒ разовая запись (как раньше); оба заполнены ⇒ материализованная прошедшая occurrence регулярной серии — история и расписание прошедших дней читают её как обычную запись. FK на `recurring_appointments` объявлен в ORM, но в миграции колонка добавлена без inline-FK: SQLite не обеспечивает FK и не умеет ALTER-ить ограничение без пересоздания таблицы (см. [решение от 2026-06-05](decisions/2026-06-05_recurring_materialized_past_virtual_future.md)).
+- `slot_id`/`origin_date` оба `NULL` ⇒ разовая запись (как раньше); оба заполнены ⇒ материализованная прошедшая occurrence слота регулярного расписания — история и расписание прошедших дней читают её как обычную запись. FK на `recurring_slots` объявлен в ORM, но в миграции колонка добавлена без inline-FK: SQLite не обеспечивает FK и не умеет ALTER-ить ограничение без пересоздания таблицы (см. [решение от 2026-06-05](decisions/2026-06-05_recurring_materialized_past_virtual_future.md)).
 
-### `recurring_appointments`
+### `recurring_schedules`
 
-Правило еженедельной регулярной записи («серия»). Принадлежит специалисту и клиенту; повторяется в свой день недели и настенное время бесконечно, пока `active`.
+Регулярное расписание клиента. Принадлежит специалисту и клиенту; владеет N слотами (`recurring_slots`). Один общий комментарий на всё расписание (наследуется occurrence'ами, если у override нет своего).
+
+| Колонка         | Тип      | NULL | Замечание                                              |
+| --------------- | -------- | ---- | ------------------------------------------------------ |
+| `id`            | INTEGER  | нет  | PK, autoincrement.                                     |
+| `specialist_id` | INTEGER  | нет  | FK → `specialists.id`. Владелец расписания.            |
+| `client_id`     | INTEGER  | нет  | FK → `clients.id`. Клиент расписания.                  |
+| `comment`       | TEXT     | да   | Необязательный общий комментарий расписания.           |
+| `active`        | BOOLEAN  | нет  | `false` ⇒ расписание остановлено (например, удалён последний активный слот): будущие повторы исчезают, прошлые строки остаются. |
+| `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                           |
+| `updated_at`    | DATETIME | нет  | Обновляется при стопе/редактировании.                 |
+
+Индексы:
+
+- `ix_recurring_schedules_specialist_active` — составной по `(specialist_id, active)`. Обслуживает выборку активных расписаний специалиста (`settle` и слияние виртуального будущего в чтениях).
+
+### `recurring_slots`
+
+Один регулярный слот расписания: день недели + настенное время. У одного расписания может быть несколько слотов, в том числе с повтором дня недели (два занятия в один день).
 
 | Колонка                | Тип        | NULL | Замечание                                              |
 | ---------------------- | ---------- | ---- | ------------------------------------------------------ |
 | `id`                   | INTEGER    | нет  | PK, autoincrement.                                     |
-| `specialist_id`        | INTEGER    | нет  | FK → `specialists.id`. Владелец серии.                 |
-| `client_id`            | INTEGER    | нет  | FK → `clients.id`. Клиент серии.                       |
+| `schedule_id`          | INTEGER    | нет  | FK → `recurring_schedules.id`. Расписание слота.       |
 | `weekday`              | INTEGER    | нет  | День недели `date.weekday()` (Пн=0…Вс=6).             |
 | `time_hhmm`            | VARCHAR(5) | нет  | Настенное время `ЧЧ:ММ` в `timezone` специалиста; в UTC конвертируется отдельно на каждую дату (DST-safe). |
-| `comment`              | TEXT       | да   | Необязательный комментарий серии.                     |
-| `active`               | BOOLEAN    | нет  | `false` ⇒ серия остановлена: будущие повторы исчезают, прошлые строки остаются. |
-| `start_date`           | DATE       | нет  | Первая дата серии (ближайший `weekday` ≥ дня создания); якорь недельной сетки. |
+| `active`               | BOOLEAN    | нет  | `false` ⇒ слот удалён: пропадает из правила, occurrence'ов и списка настройки; прошлые материализованные строки остаются. |
+| `start_date`           | DATE       | нет  | Первая дата слота (ближайший `weekday` ≥ дня создания); якорь недельной сетки. |
 | `materialized_through` | DATE       | нет  | Докуда прошлое уже застывлено в строки `appointments`; дневной guard для `settle`. |
 | `created_at`           | DATETIME   | нет  | `lambda: datetime.now(UTC)`.                          |
-| `updated_at`           | DATETIME   | нет  | Обновляется при стопе/редактировании.                |
+| `updated_at`           | DATETIME   | нет  | Обновляется при редактировании дня/времени или удалении слота. |
 
 Индексы:
 
-- `ix_recurring_specialist_active` — составной по `(specialist_id, active)`. Обслуживает выборку активных серий специалиста (`settle` и слияние виртуального будущего в чтениях).
+- `ix_recurring_slots_schedule_active` — составной по `(schedule_id, active)`. Обслуживает выборку активных слотов расписания (правило, occurrence'ы, `settle`).
 
-### `recurring_exceptions`
+### `recurring_slot_overrides`
 
-Исключение для одной даты серии — унифицированно для пропуска и переноса.
+Исключение для одной даты слота — три независимые оси: пропуск, перенос, комментарий occurrence.
 
 | Колонка         | Тип      | NULL | Замечание                                                       |
 | --------------- | -------- | ---- | --------------------------------------------------------------- |
 | `id`            | INTEGER  | нет  | PK, autoincrement.                                              |
-| `series_id`     | INTEGER  | нет  | FK → `recurring_appointments.id`. Серия исключения.            |
-| `original_date` | DATE     | нет  | Плановая дата серии, к которой относится исключение.           |
-| `new_starts_at` | DATETIME | да   | `NULL` ⇒ пропуск (occurrence нет); задано (aware UTC) ⇒ перенос на это время. |
+| `slot_id`       | INTEGER  | нет  | FK → `recurring_slots.id`. Слот исключения.                    |
+| `original_date` | DATE     | нет  | Плановая дата слота, к которой относится исключение.           |
+| `skipped`       | BOOLEAN  | нет  | `true` ⇒ occurrence пропущена (её нет).                        |
+| `moved_to`      | DATETIME | да   | Задано (aware UTC) ⇒ перенос occurrence на это время; `NULL` ⇒ время сетки. |
+| `comment`       | TEXT     | да   | Задано ⇒ переопределяет комментарий расписания для этой occurrence; `NULL` ⇒ наследуется. |
 | `created_at`    | DATETIME | нет  | `lambda: datetime.now(UTC)`.                                    |
 
 Ограничения:
 
-- `uq_exception_series_date` — `UNIQUE(series_id, original_date)`. Пропуск и перенос одной даты — одна строка (`upsert`): повторный пропуск/перенос перезаписывает `new_starts_at`.
+- `uq_override_slot_date` — `UNIQUE(slot_id, original_date)`. Одна строка на дату слота (`upsert`): повторное действие перезаписывает все три оси (вызывающий передаёт полную желаемую тройку skip/move/comment).
 
 ### `appointment_reminders`
 
@@ -120,8 +138,8 @@
 | `specialist_id` | INTEGER     | нет  | FK → `specialists.id`. Владелец.                                   |
 | `client_id`     | INTEGER     | нет  | FK → `clients.id`. Получатель напоминания.                         |
 | `starts_at`     | DATETIME    | нет  | Время начала occurrence в **aware UTC**; вместе с `client_id` идентифицирует occurrence. |
-| `series_id`     | INTEGER     | да   | `NULL` у разовой записи; задан у (виртуального) повтора серии — для кнопки «Открыть запись». |
-| `origin_date`   | DATE        | да   | Плановая дата occurrence серии; `NULL` у разовой.                  |
+| `slot_id`       | INTEGER     | да   | `NULL` у разовой записи; задан у (виртуального) повтора слота — для кнопки «Открыть запись». |
+| `origin_date`   | DATE        | да   | Плановая дата occurrence слота; `NULL` у разовой.                  |
 | `status`        | VARCHAR(16) | нет  | `pending` \| `confirmed` \| `declined` (enum строкой).             |
 | `sent_at`       | DATETIME    | нет  | Момент отправки напоминания (aware UTC).                           |
 | `responded_at`  | DATETIME    | да   | Момент последнего ответа клиента; `NULL` — ещё не ответил.         |
@@ -247,7 +265,7 @@
 | `client_id`     | INTEGER     | нет  | FK → `clients.id`. Получатель.                                     |
 | `chat_id`       | BIGINT      | нет  | Снимок `telegram_chat_id` клиента на момент постановки.            |
 | `text`          | TEXT        | нет  | Снимок одобренного текста (как в предпросмотре); не пере-рендерится. |
-| `target_key`    | VARCHAR(64) | нет  | Устойчивый ключ цели для вытеснения: `appt:<id>` / `series:<id>` / `series:<id>:<origin_date>`. |
+| `target_key`    | VARCHAR(64) | нет  | Устойчивый ключ цели для вытеснения: `appt:<id>` / `schedule:<id>` / `slot:<id>:<origin_date>`. |
 | `event`         | VARCHAR(32) | нет  | Slug `AuditEvent`, под которым доставка пишется в `audit_log`.     |
 | `due_at`        | DATETIME    | нет  | Момент отправки в **aware UTC** (ближайшее наступление настенного `ЧЧ:ММ`). |
 | `status`        | VARCHAR(16) | нет  | `queued` \| `sent` \| `failed` \| `cancelled` (enum строкой).      |
@@ -282,6 +300,7 @@
 - `0011_morning_digest.py` — добавляет в `specialists` колонки `morning_notify_enabled` (server-default `1`), `morning_notify_time` (server-default `10:00`), `morning_notify_last_run_on` (nullable). Существующие специалисты → утренняя сводка включена на 10:00. Down-ревизия удаляет три колонки.
 - `0012_audit_log.py` — создаёт таблицу `audit_log` (FK на `specialists` и `clients`, индекс `ix_audit_specialist_created`). Только структура, бэкфилла нет (истории событий не было). Down-ревизия удаляет индекс и таблицу.
 - `0013_deferred_client_notify.py` — добавляет в `specialists` колонку `deferred_notify_time` (server-default `20:00`); создаёт таблицу `scheduled_client_messages` (FK на `specialists` и `clients`, три индекса). Существующие специалисты → пресет 20:00. Down-ревизия удаляет таблицу и колонку.
+- `0014_multi_slot_recurring.py` — заменяет однопроходную регулярную схему на «расписание → слоты → исключения». Удаляет таблицы `recurring_exceptions` и `recurring_appointments` (с индексом `ix_recurring_specialist_active`) и затирает материализованные регулярные строки в `appointments`/`appointment_reminders` (`WHERE series_id IS NOT NULL`; прод пуст, разовые записи с `series_id IS NULL` сохраняются). Переименовывает колонку `series_id` → `slot_id` в обоих журналах; индекс `uq_appointments_series_origin` → `uq_appointments_slot_origin` по `(slot_id, origin_date)`. Создаёт три таблицы: `recurring_schedules` (индекс `ix_recurring_schedules_specialist_active`), `recurring_slots` (индекс `ix_recurring_slots_schedule_active`), `recurring_slot_overrides` (`UNIQUE(slot_id, original_date)` = `uq_override_slot_date`). Down-ревизия полностью восстанавливает прежнюю схему (без данных — прод пуст).
 - Применение: `make run` запускает `alembic upgrade head` перед стартом бота. Та же команда есть в `make create_invite`.
 - Async-URL (`sqlite+aiosqlite://`) автоматически переключается на sync-вариант (`sqlite://`) внутри `alembic/env.py`.
 

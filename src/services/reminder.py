@@ -14,7 +14,11 @@ import logging
 
 from src.domain.appointment import Appointment, AppointmentsRepo
 from src.domain.client import Client, ClientsRepo, ClientStatus
-from src.domain.recurring import RecurringExceptionsRepo, RecurringRepo
+from src.domain.recurring import (
+    RecurringScheduleRepo,
+    RecurringSlotOverrideRepo,
+    RecurringSlotRepo,
+)
 from src.domain.reminder import (
     AppointmentReminder,
     RemindersRepo,
@@ -70,8 +74,9 @@ async def run_reminders_if_due(  # noqa: PLR0913
     appointments_repo: AppointmentsRepo,
     reminders_repo: RemindersRepo,
     specialists_repo: SpecialistsRepo,
-    recurring_repo: RecurringRepo,
-    exceptions_repo: RecurringExceptionsRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
     clients_repo: ClientsRepo,
     messages: ReminderMessages,
 ) -> list[ReminderToSend]:
@@ -82,7 +87,12 @@ async def run_reminders_if_due(  # noqa: PLR0913
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     series = await load_series_context(
-        recurring_repo, exceptions_repo, specialist_id=specialist.id, now=now, tz=tz
+        schedule_repo,
+        slot_repo,
+        override_repo,
+        specialist_id=specialist.id,
+        now=now,
+        tz=tz,
     )
     occurrences = await list_specialist_day(
         appointments_repo,
@@ -124,7 +134,7 @@ async def _journal_and_collect(  # noqa: PLR0913, PLR0917
             specialist_id=specialist.id,
             client_id=occ.client_id,
             starts_at=occ.starts_at,
-            series_id=occ.series_id,
+            slot_id=occ.slot_id,
             origin_date=occ.origin_date,
             status=ReminderStatus.PENDING,
             sent_at=now,

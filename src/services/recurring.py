@@ -1,10 +1,13 @@
-"""Use-cases for weekly recurring series: create, stop, expand, settle.
+"""Use-cases for multi-slot recurring schedules: create, configure, expand, settle.
 
-The split between materialised past and computed future lives here (design.md,
-decision 1). `occurrences_landing_in` turns a rule into virtual `Appointment`s for
-reading; `settle` freezes passed occurrences into real rows on specialist interaction.
-A virtual occurrence is an `Appointment` with `id=None` and `series_id`/
-`origin_date` set, so the schedule screens can merge it with real rows uniformly.
+A client's *schedule* owns any number of weekly *slots* (day-of-week + time). The
+split between materialised past and computed future lives per slot (design.md,
+decision 1): `occurrences_landing_in` turns one slot's rule into virtual
+`Appointment`s for reading; `settle` freezes passed occurrences into real rows on
+specialist interaction. A virtual occurrence is an `Appointment` with `id=None` and
+`slot_id`/`origin_date` set, so the schedule screens merge it with real rows
+uniformly. Each occurrence carries its *effective comment* — the slot's per-date
+override comment if set, else the schedule's shared comment (design.md, decision 4).
 """
 
 from dataclasses import dataclass
@@ -13,10 +16,12 @@ import logging
 
 from src.domain.appointment import Appointment, AppointmentsRepo
 from src.domain.recurring import (
-    RecurringAppointment,
-    RecurringException,
-    RecurringExceptionsRepo,
-    RecurringRepo,
+    RecurringSchedule,
+    RecurringScheduleRepo,
+    RecurringSlot,
+    RecurringSlotOverride,
+    RecurringSlotOverrideRepo,
+    RecurringSlotRepo,
 )
 from src.domain.schedule import (
     next_weekday_on_or_after,
@@ -28,223 +33,90 @@ from src.domain.schedule import (
 
 logger = logging.getLogger(__name__)
 
-# A weekly series is infinite; bound the search for its single nearest occurrence.
+# A weekly slot is infinite; bound the search for its single nearest occurrence.
 # A year of slack absorbs any realistic run of consecutive skips.
 _NEXT_OCCURRENCE_HORIZON = timedelta(days=366)
 
 
 @dataclass(slots=True)
 class SeriesContext:
-    """Active series of a specialist plus their exceptions, loaded once per read.
+    """Active slots of a specialist plus their schedules and overrides.
 
-    Threaded into the appointment-read services so they can merge virtual future
-    occurrences with real rows without each one re-querying the repositories.
+    Loaded once per read and threaded into the appointment-read services so they
+    can merge virtual future occurrences with real rows without re-querying. Only
+    slots of active schedules are kept (filtered at load), so every slot here has a
+    schedule in `schedules`.
     """
 
-    series: list[RecurringAppointment]
-    exceptions: dict[int, list[RecurringException]]  # series_id → its exceptions
+    slots: list[RecurringSlot]
+    schedules: dict[int, RecurringSchedule]  # schedule_id → schedule
+    overrides: dict[int, list[RecurringSlotOverride]]  # slot_id → its overrides
     today: date
 
-    def for_series(self, series_id: int | None) -> list[RecurringException]:
-        # No None keys exist, so a virtual series_id=None simply maps to [].
-        return self.exceptions.get(series_id, [])
+    def schedule_for(self, slot: RecurringSlot) -> RecurringSchedule:
+        return self.schedules[slot.schedule_id]
+
+    def for_slot(self, slot_id: int | None) -> list[RecurringSlotOverride]:
+        # No None keys exist, so a virtual slot_id=None simply maps to [].
+        return self.overrides.get(slot_id, [])  # type: ignore[arg-type]
 
 
-def _occurrence(
-    series: RecurringAppointment,
+def _effective_comment(
+    override: RecurringSlotOverride | None, schedule: RecurringSchedule
+) -> str | None:
+    """The occurrence's comment: its own override comment, else the schedule's."""
+    if override is not None and override.comment is not None:
+        return override.comment
+    return schedule.comment
+
+
+def _occurrence(  # noqa: PLR0913, PLR0917
+    slot: RecurringSlot,
+    schedule: RecurringSchedule,
     origin_date: date,
     starts_at: datetime,
     stamp: datetime,
+    comment: str | None,
     *,
     mark: bool = False,
 ) -> Appointment:
-    """An `Appointment` for one series date — virtual (id=None) until settle saves it.
+    """An `Appointment` for one slot date — virtual (id=None) until settle saves it.
 
     `mark` flags a plain (non-moved) future occurrence so lists show the 🔁 marker.
     """
     return Appointment(
         id=None,
-        specialist_id=series.specialist_id,
-        client_id=series.client_id,
+        specialist_id=schedule.specialist_id,
+        client_id=schedule.client_id,
         starts_at=starts_at,
-        comment=series.comment,
+        comment=comment,
         created_at=stamp,
         updated_at=stamp,
-        series_id=series.id,
+        slot_id=slot.id,
         origin_date=origin_date,
         recurring_mark=mark,
     )
 
 
 def _effective_starts_at(
-    series: RecurringAppointment,
+    slot: RecurringSlot,
     day: date,
-    exception: RecurringException | None,
+    override: RecurringSlotOverride | None,
     tz: str,
 ) -> datetime | None:
     """UTC instant of the occurrence on `day`, or None when the date is skipped."""
-    if exception is not None:
-        return exception.new_starts_at  # None = skip; a value = moved instant
-    return wall_to_utc(day, series.time_hhmm, tz)
-
-
-async def create_series(  # noqa: PLR0913
-    repo: RecurringRepo,
-    *,
-    specialist_id: int,
-    client_id: int,
-    weekday: int,
-    time_hhmm: str,
-    comment: str | None,
-    tz: str,
-    now: datetime,
-    start_date: date | None = None,
-) -> RecurringAppointment:
-    # When created from a picked appointment date, that date is the first
-    # occurrence; otherwise start at the nearest matching weekday ≥ today.
-    if start_date is None:
-        start_date = next_weekday_on_or_after(today_in_tz(now, tz), weekday)
-    series = RecurringAppointment(
-        id=None,
-        specialist_id=specialist_id,
-        client_id=client_id,
-        weekday=weekday,
-        time_hhmm=time_hhmm,
-        comment=comment,
-        active=True,
-        start_date=start_date,
-        # Nothing before start_date to freeze, so the grid is materialised up to it.
-        materialized_through=start_date,
-        created_at=now,
-        updated_at=now,
-    )
-    saved = await repo.add(series)
-    logger.info(
-        "recurring.created",
-        extra={
-            "specialist_id": specialist_id,
-            "client_id": client_id,
-            "series_id": saved.id,
-        },
-    )
-    return saved
-
-
-async def stop_series(
-    repo: RecurringRepo, *, series_id: int, specialist_id: int, now: datetime
-) -> RecurringAppointment | None:
-    stopped = await repo.set_active(
-        series_id, specialist_id, active=False, updated_at=now
-    )
-    if stopped is not None:
-        logger.info(
-            "recurring.stopped",
-            extra={"specialist_id": specialist_id, "series_id": series_id},
-        )
-    return stopped
-
-
-async def edit_series(  # noqa: PLR0913
-    repo: RecurringRepo,
-    *,
-    series_id: int,
-    specialist_id: int,
-    weekday: int,
-    time_hhmm: str,
-    comment: str | None,
-    now: datetime,
-    tz: str,
-) -> RecurringAppointment | None:
-    """Update a series rule; only future repeats change, past rows stay frozen.
-
-    Changing the weekday shifts the whole grid, so `start_date` is recomputed to
-    the nearest new weekday ≥ today and `materialized_through` is bumped to today —
-    past rows of the old grid remain as history, the new rule applies going forward
-    (design.md, decision 7). Time/comment-only edits leave the grid untouched.
-    """
-    series = await repo.get_for_specialist(series_id, specialist_id)
-    if series is None:
-        return None
-    today = today_in_tz(now, tz)
-    if weekday != series.weekday:
-        start_date = next_weekday_on_or_after(today, weekday)
-        materialized_through = today
-    else:
-        start_date = series.start_date
-        materialized_through = series.materialized_through
-    updated = await repo.update_rule(
-        series_id,
-        specialist_id,
-        weekday=weekday,
-        time_hhmm=time_hhmm,
-        comment=comment,
-        start_date=start_date,
-        materialized_through=materialized_through,
-        updated_at=now,
-    )
-    logger.info(
-        "recurring.edited",
-        extra={"specialist_id": specialist_id, "series_id": series_id},
-    )
-    return updated
-
-
-async def skip_date(  # noqa: PLR0913
-    repo: RecurringRepo,
-    exc_repo: RecurringExceptionsRepo,
-    *,
-    series_id: int,
-    specialist_id: int,
-    original_date: date,
-    now: datetime,
-) -> RecurringException | None:
-    """Suppress a single date of the series (new_starts_at IS NULL = skip)."""
-    if await repo.get_for_specialist(series_id, specialist_id) is None:
-        return None
-    exc = await exc_repo.upsert(
-        series_id, original_date, new_starts_at=None, created_at=now
-    )
-    logger.info(
-        "recurring.date_skipped",
-        extra={
-            "specialist_id": specialist_id,
-            "series_id": series_id,
-            "original_date": original_date.isoformat(),
-        },
-    )
-    return exc
-
-
-async def move_date(  # noqa: PLR0913
-    repo: RecurringRepo,
-    exc_repo: RecurringExceptionsRepo,
-    *,
-    series_id: int,
-    specialist_id: int,
-    original_date: date,
-    new_starts_at: datetime,
-    now: datetime,
-) -> RecurringException | None:
-    """Move a single date of the series to `new_starts_at` (UTC)."""
-    if await repo.get_for_specialist(series_id, specialist_id) is None:
-        return None
-    exc = await exc_repo.upsert(
-        series_id, original_date, new_starts_at=new_starts_at, created_at=now
-    )
-    logger.info(
-        "recurring.date_moved",
-        extra={
-            "specialist_id": specialist_id,
-            "series_id": series_id,
-            "original_date": original_date.isoformat(),
-        },
-    )
-    return exc
+    if override is not None:
+        if override.skipped:
+            return None
+        if override.moved_to is not None:
+            return override.moved_to
+    return wall_to_utc(day, slot.time_hhmm, tz)
 
 
 def occurrences_landing_in(  # noqa: PLR0913, PLR0917
-    series: RecurringAppointment,
-    exceptions: list[RecurringException],
+    slot: RecurringSlot,
+    schedule: RecurringSchedule,
+    overrides: list[RecurringSlotOverride],
     win_start: date,
     win_end: date,
     tz: str,
@@ -252,41 +124,78 @@ def occurrences_landing_in(  # noqa: PLR0913, PLR0917
 ) -> list[Appointment]:
     """Occurrences whose effective instant's wall-date is in `[win_start, win_end)`.
 
-    Unlike `expand_future` (keyed by the planned grid date), this is keyed by where
-    the occurrence actually lands: a plain date lands on itself, a moved date lands
-    on its new instant (so a date moved to another day shows on that day and frees
-    its original slot). Past origins (< today) live in real rows and are excluded.
+    Keyed by where the occurrence actually lands: a plain date lands on itself, a
+    moved date lands on its new instant (so it shows on that day and frees its
+    original slot). A comment-only override leaves the grid date in place with the
+    overridden comment. Past origins (< today) live in real rows and are excluded.
+    Inactive slots or schedules contribute nothing.
     """
-    if not series.active:
+    if not slot.active or not schedule.active:
         return []
-    exc_by_date = {e.original_date: e for e in exceptions}
+    ov_by_date = {o.original_date: o for o in overrides}
     result: list[Appointment] = []
     lower = max(win_start, today)
-    for day in series_occurrences(series.start_date, series.weekday, lower, win_end):
-        if day in exc_by_date:
-            continue  # skipped or moved-away — a move is re-added below by landing
-        starts_at = wall_to_utc(day, series.time_hhmm, tz)
-        result.append(_occurrence(series, day, starts_at, starts_at, mark=True))
-    for exc in exceptions:
-        if exc.new_starts_at is None or exc.original_date < today:
+    for day in series_occurrences(slot.start_date, slot.weekday, lower, win_end):
+        ov = ov_by_date.get(day)
+        if ov is not None and (ov.skipped or ov.moved_to is not None):
+            continue  # skipped, or moved away — a move is re-added below by landing
+        starts_at = wall_to_utc(day, slot.time_hhmm, tz)
+        comment = _effective_comment(ov, schedule)
+        result.append(
+            _occurrence(slot, schedule, day, starts_at, starts_at, comment, mark=True)
+        )
+    for ov in overrides:
+        if ov.skipped or ov.moved_to is None or ov.original_date < today:
             continue
-        if win_start <= utc_to_wall(exc.new_starts_at, tz).date() < win_end:
+        if win_start <= utc_to_wall(ov.moved_to, tz).date() < win_end:
+            comment = _effective_comment(ov, schedule)
             result.append(
                 _occurrence(
-                    series, exc.original_date, exc.new_starts_at, exc.new_starts_at
+                    slot, schedule, ov.original_date, ov.moved_to, ov.moved_to, comment
                 )
             )
     return result
 
 
-def series_taken_times(
-    series: RecurringAppointment,
-    exceptions: list[RecurringException],
+def occurrences_in_window(  # noqa: PLR0913, PLR0917
+    schedule: RecurringSchedule,
+    slots: list[RecurringSlot],
+    overrides: dict[int, list[RecurringSlotOverride]],
+    win_start: date,
+    win_end: date,
+    tz: str,
+    today: date,
+) -> list[Appointment]:
+    """All occurrences of one schedule's slots in `[win_start, win_end)`, time-sorted.
+
+    Aggregates every active slot of the schedule (two slots in one day land
+    independently) for the schedule card's rolling 14-day list.
+    """
+    result: list[Appointment] = []
+    for slot in slots:
+        result.extend(
+            occurrences_landing_in(
+                slot,
+                schedule,
+                overrides.get(slot.id, []),  # type: ignore[arg-type]
+                win_start,
+                win_end,
+                tz,
+                today,
+            )
+        )
+    return sorted(result, key=lambda occ: occ.starts_at)
+
+
+def slot_taken_times(  # noqa: PLR0913, PLR0917
+    slot: RecurringSlot,
+    schedule: RecurringSchedule,
+    overrides: list[RecurringSlotOverride],
     day: date,
     tz: str,
     today: date,
 ) -> set[str]:
-    """Wall-clock `HH:MM` slots occupied by this series on `day` (future days only).
+    """Wall-clock `HH:MM` slots occupied by this slot on `day` (future days only).
 
     A date moved to another day frees its original slot here and occupies the slot
     on the day it lands (occupancy reflects this date's skip/move).
@@ -294,36 +203,36 @@ def series_taken_times(
     return {
         f"{utc_to_wall(occ.starts_at, tz):%H:%M}"
         for occ in occurrences_landing_in(
-            series, exceptions, day, day + timedelta(days=1), tz, today
+            slot, schedule, overrides, day, day + timedelta(days=1), tz, today
         )
     }
 
 
 def next_occurrence(
-    series: RecurringAppointment,
-    exceptions: list[RecurringException],
+    slot: RecurringSlot,
+    schedule: RecurringSchedule,
+    overrides: list[RecurringSlotOverride],
     tz: str,
     today: date,
 ) -> Appointment | None:
-    """The single nearest future occurrence of `series` at or after `today`.
+    """The single nearest future occurrence of `slot` at or after `today`.
 
     Keyed by the instant it lands on, so a moved date competes by its new time.
     """
     occurrences = occurrences_landing_in(
-        series, exceptions, today, today + _NEXT_OCCURRENCE_HORIZON, tz, today
+        slot, schedule, overrides, today, today + _NEXT_OCCURRENCE_HORIZON, tz, today
     )
     return min(occurrences, key=lambda occ: occ.starts_at) if occurrences else None
 
 
-def nearest_series_landing_day(
+def nearest_slot_landing_day(
     series_ctx: SeriesContext, day: date, tz: str, *, forward: bool
 ) -> date | None:
-    """Calendar day the nearest future series occurrence lands on, past `day`.
+    """Calendar day the nearest future slot occurrence lands on, past `day`.
 
     Forward: the minimum landing date strictly after `day`, bounded by the same
-    horizon as `next_occurrence` so an infinite series cannot drive an unbounded
-    scan. Backward: always None — past occurrences are materialised into real rows,
-    so active series contribute no day before `today` (real rows cover the past).
+    horizon as `next_occurrence`. Backward: always None — past occurrences are
+    materialised into real rows, so active slots contribute no day before `today`.
     """
     if not forward:
         return None
@@ -331,87 +240,388 @@ def nearest_series_landing_day(
     win_end = win_start + _NEXT_OCCURRENCE_HORIZON
     landing_days = [
         utc_to_wall(occ.starts_at, tz).date()
-        for s in series_ctx.series
+        for slot in series_ctx.slots
         for occ in occurrences_landing_in(
-            s, series_ctx.for_series(s.id), win_start, win_end, tz, series_ctx.today
+            slot,
+            series_ctx.schedule_for(slot),
+            series_ctx.for_slot(slot.id),
+            win_start,
+            win_end,
+            tz,
+            series_ctx.today,
         )
     ]
     return min(landing_days) if landing_days else None
 
 
-def _exceptions_by_series(
-    exceptions: list[RecurringException],
-) -> dict[int, list[RecurringException]]:
-    grouped: dict[int, list[RecurringException]] = {}
-    for exc in exceptions:
-        grouped.setdefault(exc.series_id, []).append(exc)
+def _overrides_by_slot(
+    overrides: list[RecurringSlotOverride],
+) -> dict[int, list[RecurringSlotOverride]]:
+    grouped: dict[int, list[RecurringSlotOverride]] = {}
+    for ov in overrides:
+        grouped.setdefault(ov.slot_id, []).append(ov)
     return grouped
 
 
-async def load_series_context(
-    recurring_repo: RecurringRepo,
-    exc_repo: RecurringExceptionsRepo,
+async def load_series_context(  # noqa: PLR0913
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
     *,
     specialist_id: int,
     now: datetime,
     tz: str,
 ) -> SeriesContext:
-    """Load active series and exceptions for merging into appointment reads."""
-    series = await recurring_repo.list_active_for_specialist(specialist_id)
-    exceptions = _exceptions_by_series(
-        await exc_repo.list_for_specialist(specialist_id)
+    """Load active schedules, their active slots, and overrides for read-merging."""
+    schedules = {
+        s.id: s
+        for s in await schedule_repo.list_active_for_specialist(specialist_id)
+        if s.id is not None
+    }
+    slots: list[RecurringSlot] = []
+    for schedule_id in schedules:
+        slots.extend(await slot_repo.list_for_schedule(schedule_id))
+    overrides = _overrides_by_slot(
+        await override_repo.list_for_specialist(specialist_id)
     )
     return SeriesContext(
-        series=series, exceptions=exceptions, today=today_in_tz(now, tz)
+        slots=slots,
+        schedules=schedules,
+        overrides=overrides,
+        today=today_in_tz(now, tz),
     )
+
+
+# --- use-cases: schedule and slots ------------------------------------------
+
+
+async def create_schedule(
+    schedule_repo: RecurringScheduleRepo,
+    *,
+    specialist_id: int,
+    client_id: int,
+    comment: str | None,
+    now: datetime,
+) -> RecurringSchedule:
+    schedule = RecurringSchedule(
+        id=None,
+        specialist_id=specialist_id,
+        client_id=client_id,
+        comment=comment,
+        active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    saved = await schedule_repo.add(schedule)
+    logger.info(
+        "recurring.schedule_created",
+        extra={
+            "specialist_id": specialist_id,
+            "client_id": client_id,
+            "schedule_id": saved.id,
+        },
+    )
+    return saved
+
+
+async def add_slot(  # noqa: PLR0913
+    slot_repo: RecurringSlotRepo,
+    *,
+    schedule_id: int,
+    weekday: int,
+    time_hhmm: str,
+    tz: str,
+    now: datetime,
+    start_date: date | None = None,
+) -> RecurringSlot:
+    # start_date anchors the weekly grid at the nearest matching weekday ≥ today.
+    if start_date is None:
+        start_date = next_weekday_on_or_after(today_in_tz(now, tz), weekday)
+    slot = RecurringSlot(
+        id=None,
+        schedule_id=schedule_id,
+        weekday=weekday,
+        time_hhmm=time_hhmm,
+        active=True,
+        start_date=start_date,
+        # Nothing before start_date to freeze, so the grid is materialised up to it.
+        materialized_through=start_date,
+        created_at=now,
+        updated_at=now,
+    )
+    saved = await slot_repo.add(slot)
+    logger.info(
+        "recurring.slot_added",
+        extra={"schedule_id": schedule_id, "slot_id": saved.id},
+    )
+    return saved
+
+
+async def edit_slot(  # noqa: PLR0913
+    slot_repo: RecurringSlotRepo,
+    *,
+    slot_id: int,
+    specialist_id: int,
+    weekday: int,
+    time_hhmm: str,
+    now: datetime,
+    tz: str,
+) -> RecurringSlot | None:
+    """Update one slot's rule; only future repeats change, past rows stay frozen.
+
+    Changing the weekday shifts the whole grid, so `start_date` is recomputed to the
+    nearest new weekday ≥ today and `materialized_through` is bumped to today — past
+    rows of the old grid remain history. Time-only edits leave the grid untouched.
+    """
+    slot = await slot_repo.get_for_specialist(slot_id, specialist_id)
+    if slot is None:
+        return None
+    today = today_in_tz(now, tz)
+    if weekday != slot.weekday:
+        start_date = next_weekday_on_or_after(today, weekday)
+        materialized_through = today
+    else:
+        start_date = slot.start_date
+        materialized_through = slot.materialized_through
+    updated = await slot_repo.update_rule(
+        slot_id,
+        specialist_id,
+        weekday=weekday,
+        time_hhmm=time_hhmm,
+        start_date=start_date,
+        materialized_through=materialized_through,
+        updated_at=now,
+    )
+    logger.info(
+        "recurring.slot_edited",
+        extra={"specialist_id": specialist_id, "slot_id": slot_id},
+    )
+    return updated
+
+
+async def remove_slot(
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    *,
+    slot_id: int,
+    specialist_id: int,
+    now: datetime,
+) -> RecurringSlot | None:
+    """Deactivate a slot; if it was the last active one, stop the whole schedule."""
+    slot = await slot_repo.set_active(
+        slot_id, specialist_id, active=False, updated_at=now
+    )
+    if slot is None:
+        return None
+    logger.info(
+        "recurring.slot_removed",
+        extra={"specialist_id": specialist_id, "slot_id": slot_id},
+    )
+    remaining = await slot_repo.list_for_schedule(slot.schedule_id)
+    if not remaining:
+        await schedule_repo.set_active(
+            slot.schedule_id, specialist_id, active=False, updated_at=now
+        )
+        logger.info(
+            "recurring.schedule_stopped",
+            extra={"specialist_id": specialist_id, "schedule_id": slot.schedule_id},
+        )
+    return slot
+
+
+async def stop_schedule(
+    schedule_repo: RecurringScheduleRepo,
+    *,
+    schedule_id: int,
+    specialist_id: int,
+    now: datetime,
+) -> RecurringSchedule | None:
+    stopped = await schedule_repo.set_active(
+        schedule_id, specialist_id, active=False, updated_at=now
+    )
+    if stopped is not None:
+        logger.info(
+            "recurring.schedule_stopped",
+            extra={"specialist_id": specialist_id, "schedule_id": schedule_id},
+        )
+    return stopped
+
+
+# --- use-cases: per-occurrence overrides ------------------------------------
+
+
+def _find_override(
+    overrides: list[RecurringSlotOverride], original_date: date
+) -> RecurringSlotOverride | None:
+    return next((o for o in overrides if o.original_date == original_date), None)
+
+
+async def skip_occurrence(  # noqa: PLR0913
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
+    *,
+    slot_id: int,
+    specialist_id: int,
+    original_date: date,
+    now: datetime,
+) -> RecurringSlotOverride | None:
+    """Suppress a single date of the slot (skipped=true), preserving its comment."""
+    if await slot_repo.get_for_specialist(slot_id, specialist_id) is None:
+        return None
+    existing = _find_override(await override_repo.list_for_slot(slot_id), original_date)
+    ov = await override_repo.upsert(
+        slot_id,
+        original_date,
+        skipped=True,
+        moved_to=None,
+        comment=existing.comment if existing is not None else None,
+        created_at=now,
+    )
+    logger.info(
+        "recurring.occurrence_skipped",
+        extra={
+            "specialist_id": specialist_id,
+            "slot_id": slot_id,
+            "original_date": original_date.isoformat(),
+        },
+    )
+    return ov
+
+
+async def move_occurrence(  # noqa: PLR0913
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
+    *,
+    slot_id: int,
+    specialist_id: int,
+    original_date: date,
+    moved_to: datetime,
+    now: datetime,
+) -> RecurringSlotOverride | None:
+    """Move a single date of the slot to `moved_to` (UTC); un-skips, keeps comment."""
+    if await slot_repo.get_for_specialist(slot_id, specialist_id) is None:
+        return None
+    existing = _find_override(await override_repo.list_for_slot(slot_id), original_date)
+    ov = await override_repo.upsert(
+        slot_id,
+        original_date,
+        skipped=False,
+        moved_to=moved_to,
+        comment=existing.comment if existing is not None else None,
+        created_at=now,
+    )
+    logger.info(
+        "recurring.occurrence_moved",
+        extra={
+            "specialist_id": specialist_id,
+            "slot_id": slot_id,
+            "original_date": original_date.isoformat(),
+        },
+    )
+    return ov
+
+
+async def set_occurrence_comment(  # noqa: PLR0913
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
+    *,
+    slot_id: int,
+    specialist_id: int,
+    original_date: date,
+    comment: str | None,
+    now: datetime,
+) -> RecurringSlotOverride | None:
+    """Set a future occurrence's comment, preserving its skip/move state."""
+    if await slot_repo.get_for_specialist(slot_id, specialist_id) is None:
+        return None
+    existing = _find_override(await override_repo.list_for_slot(slot_id), original_date)
+    ov = await override_repo.upsert(
+        slot_id,
+        original_date,
+        skipped=existing.skipped if existing is not None else False,
+        moved_to=existing.moved_to if existing is not None else None,
+        comment=comment,
+        created_at=now,
+    )
+    logger.info(
+        "recurring.occurrence_commented",
+        extra={
+            "specialist_id": specialist_id,
+            "slot_id": slot_id,
+            "original_date": original_date.isoformat(),
+        },
+    )
+    return ov
+
+
+# --- materialisation --------------------------------------------------------
 
 
 async def settle(  # noqa: PLR0913
-    recurring_repo: RecurringRepo,
-    exc_repo: RecurringExceptionsRepo,
+    schedule_repo: RecurringScheduleRepo,
+    slot_repo: RecurringSlotRepo,
+    override_repo: RecurringSlotOverrideRepo,
     appt_repo: AppointmentsRepo,
     *,
     specialist_id: int,
     now: datetime,
     tz: str,
 ) -> None:
-    """Freeze passed occurrences of active series into real rows, idempotently.
+    """Freeze passed occurrences of active slots into real rows, idempotently.
 
-    Materialises dates in `[materialized_through, today)` per series, then advances
-    `materialized_through` to today. The daily guard (skip series already settled
-    today) plus insert-or-ignore make repeated and concurrent calls safe no-ops.
+    Materialises dates in `[materialized_through, today)` per slot, writing the
+    effective comment into the row, then advances `materialized_through` to today.
+    The per-slot guard plus insert-or-ignore make repeated/concurrent calls safe.
     """
     today = today_in_tz(now, tz)
-    series_list = await recurring_repo.list_active_for_specialist(specialist_id)
-    pending = [s for s in series_list if s.materialized_through < today]
-    if not pending:
+    schedules = {
+        s.id: s
+        for s in await schedule_repo.list_active_for_specialist(specialist_id)
+        if s.id is not None
+    }
+    if not schedules:
         return
-    exc_by_series = _exceptions_by_series(
-        await exc_repo.list_for_specialist(specialist_id)
+    overrides = _overrides_by_slot(
+        await override_repo.list_for_specialist(specialist_id)
     )
-    for series in pending:
-        await _settle_series(
-            appt_repo, series, exc_by_series.get(series.id, []), today, tz, now
-        )
-        await recurring_repo.set_materialized_through(
-            series.id, materialized_through=today
-        )
+    for schedule_id, schedule in schedules.items():
+        for slot in await slot_repo.list_for_schedule(schedule_id):
+            assert slot.id is not None  # noqa: S101 — persisted slots have an id
+            if slot.materialized_through >= today:
+                continue
+            await _settle_slot(
+                appt_repo,
+                slot,
+                schedule,
+                overrides.get(slot.id, []),  # type: ignore[arg-type]
+                today,
+                tz,
+                now,
+            )
+            await slot_repo.set_materialized_through(
+                slot.id, materialized_through=today
+            )
 
 
-async def _settle_series(  # noqa: PLR0913, PLR0917
+async def _settle_slot(  # noqa: PLR0913, PLR0917
     appt_repo: AppointmentsRepo,
-    series: RecurringAppointment,
-    exceptions: list[RecurringException],
+    slot: RecurringSlot,
+    schedule: RecurringSchedule,
+    overrides: list[RecurringSlotOverride],
     today: date,
     tz: str,
     now: datetime,
 ) -> None:
-    exc_map = {e.original_date: e for e in exceptions}
+    ov_map = {o.original_date: o for o in overrides}
     dates = series_occurrences(
-        series.start_date, series.weekday, series.materialized_through, today
+        slot.start_date, slot.weekday, slot.materialized_through, today
     )
     for day in dates:
-        starts_at = _effective_starts_at(series, day, exc_map.get(day), tz)
+        ov = ov_map.get(day)
+        starts_at = _effective_starts_at(slot, day, ov, tz)
         if starts_at is None:
             continue  # skipped date leaves no history row
-        await appt_repo.insert_occurrence(_occurrence(series, day, starts_at, now))
+        comment = _effective_comment(ov, schedule)
+        await appt_repo.insert_occurrence(
+            _occurrence(slot, schedule, day, starts_at, now, comment)
+        )

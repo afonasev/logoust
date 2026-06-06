@@ -4,20 +4,20 @@ from unittest.mock import AsyncMock
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.bot.handlers.clients import ClientsHandlers, SpecialistMiddleware
 from src.bot.handlers.schedule import (
     RecurringHandlers,
     ScheduleHandlers,
     _build_navigator,
 )
 from src.bot.messages import BotMessages
-from src.domain.recurring import RecurringAppointment
+from src.domain.recurring import RecurringSchedule, RecurringSlot
 from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.domain.schedule import today_in_tz, wall_to_utc
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -25,7 +25,7 @@ from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
 
 _SP = 1
-_TZ = "Asia/Yekaterinburg"  # UTC+5, no DST
+_TZ = "Asia/Yekaterinburg"  # UTC+5, no DST (matches the specialist default)
 _CHAT = 555111
 
 
@@ -106,23 +106,16 @@ async def _seed_specialist(factory: async_sessionmaker[AsyncSession]) -> int:
     return specialist.id
 
 
-async def _seed_client(factory: async_sessionmaker[AsyncSession]) -> int:
+async def _seed_other_specialist(factory: async_sessionmaker[AsyncSession]) -> int:
     async with factory() as session:
-        client = await add_client(
-            SqlAlchemyClientsRepo(session),
-            NewClient(
-                specialist_id=_SP,
-                child_name="Петя",
-                contact_name="Мама",
-                contact_phone="89161234567",
-            ),
-        )
-    assert client.id is not None
-    return client.id
+        other = await create_invite(SqlAlchemySpecialistsRepo(session))
+    assert other.id is not None
+    assert other.id != _SP
+    return other.id
 
 
-async def _seed_linked_client(
-    factory: async_sessionmaker[AsyncSession], *, chat_id: int
+async def _seed_client(
+    factory: async_sessionmaker[AsyncSession], *, chat_id: int | None = None
 ) -> int:
     now = datetime.now(UTC)
     async with factory() as session:
@@ -137,20 +130,45 @@ async def _seed_linked_client(
             ),
         )
         assert client.id is not None
-        await repo.link_telegram(
-            client.id,
-            telegram_chat_id=chat_id,
-            username=None,
-            linked_at=now,
-            updated_at=now,
-        )
+        if chat_id is not None:
+            await repo.link_telegram(
+                client.id,
+                telegram_chat_id=chat_id,
+                username=None,
+                linked_at=now,
+                updated_at=now,
+            )
     return client.id
 
 
-async def _seed_series(  # noqa: PLR0913
+async def _seed_schedule(
     factory: async_sessionmaker[AsyncSession],
     *,
     client_id: int,
+    comment: str | None = "регулярная",
+    active: bool = True,
+) -> int:
+    now = datetime.now(UTC)
+    async with factory() as session:
+        schedule = await SqlAlchemyRecurringScheduleRepo(session).add(
+            RecurringSchedule(
+                id=None,
+                specialist_id=_SP,
+                client_id=client_id,
+                comment=comment,
+                active=active,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    assert schedule.id is not None
+    return schedule.id
+
+
+async def _seed_slot(  # noqa: PLR0913
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    schedule_id: int,
     weekday: int,
     start_date: date,
     time_hhmm: str = "14:00",
@@ -158,14 +176,12 @@ async def _seed_series(  # noqa: PLR0913
 ) -> int:
     now = datetime.now(UTC)
     async with factory() as session:
-        series = await SqlAlchemyRecurringRepo(session).add(
-            RecurringAppointment(
+        slot = await SqlAlchemyRecurringSlotRepo(session).add(
+            RecurringSlot(
                 id=None,
-                specialist_id=_SP,
-                client_id=client_id,
+                schedule_id=schedule_id,
                 weekday=weekday,
                 time_hhmm=time_hhmm,
-                comment="регулярная",
                 active=active,
                 start_date=start_date,
                 materialized_through=start_date,
@@ -173,8 +189,28 @@ async def _seed_series(  # noqa: PLR0913
                 updated_at=now,
             )
         )
-    assert series.id is not None
-    return series.id
+    assert slot.id is not None
+    return slot.id
+
+
+async def _upsert_override(  # noqa: PLR0913
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    slot_id: int,
+    original_date: date,
+    skipped: bool = False,
+    moved_to: datetime | None = None,
+    comment: str | None = None,
+) -> None:
+    async with factory() as session:
+        await SqlAlchemyRecurringSlotOverrideRepo(session).upsert(
+            slot_id,
+            original_date,
+            skipped=skipped,
+            moved_to=moved_to,
+            comment=comment,
+            created_at=datetime.now(UTC),
+        )
 
 
 def _recur(
@@ -186,169 +222,749 @@ def _recur(
     return r
 
 
-async def _load_series(
-    factory: async_sessionmaker[AsyncSession], series_id: int
-) -> RecurringAppointment | None:
+async def _load_schedule(
+    factory: async_sessionmaker[AsyncSession], schedule_id: int
+) -> RecurringSchedule | None:
     async with factory() as session:
-        return await SqlAlchemyRecurringRepo(session).get_for_specialist(series_id, _SP)
+        return await SqlAlchemyRecurringScheduleRepo(session).get_for_specialist(
+            schedule_id, _SP
+        )
 
 
-# --- edit flow with custom time ---------------------------------------------
+async def _load_slots(
+    factory: async_sessionmaker[AsyncSession], schedule_id: int
+) -> list[RecurringSlot]:
+    async with factory() as session:
+        return await SqlAlchemyRecurringSlotRepo(session).list_for_schedule(schedule_id)
 
 
-async def test_edit_flow_custom_time_and_comment(
+async def _list_overrides(
+    factory: async_sessionmaker[AsyncSession], slot_id: int
+) -> list[Any]:
+    async with factory() as session:
+        return await SqlAlchemyRecurringSlotOverrideRepo(session).list_for_slot(slot_id)
+
+
+def _next_weekday(today: date, weekday: int) -> date:
+    delta = (weekday - today.weekday()) % 7
+    return today + timedelta(days=delta)
+
+
+# --- creation wizard --------------------------------------------------------
+
+
+async def test_add_day_shows_weekday_picker(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _recur(messages, session_factory)
+    cb = _fake_callback("recur:add")
+    await h.add_day(cb)
+    assert messages.recurring.pick_weekday in _texts(cb.message.edit_text)
+    assert "recur:wd:0" in _callbacks(_markup(cb.message.edit_text))
+
+
+async def test_create_wizard_second_slot_then_finish(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    first_start = _next_weekday(today, 0)
     h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:1"), state, _SP)
-    await h.ask_custom_time(_fake_callback("recur:other"), state)
-    await h.apply_custom_time(_fake_message("10:30"), state, _SP)
-    await h.apply_comment(_fake_message("принести тетрадь"), state, _SP)
+    # Seeded as if choose_regular(sched:reg:1) already created the first slot.
+    state = _state(
+        {
+            "flow": "rcreate",
+            "client_id": client_id,
+            "slots": [
+                {
+                    "weekday": 0,
+                    "hhmm": "12:00",
+                    "start_date": first_start.isoformat(),
+                }
+            ],
+        }
+    )
+    # Add a second day (Wednesday) at 14:00.
+    await h.add_day(_fake_callback("recur:add"))
+    await h.pick_weekday(_fake_callback("recur:wd:2"), state, _SP)
+    add_cb = _fake_callback("recur:tslot:1400")
+    await h.pick_slot(add_cb, state, _SP)
+    # _append_slot answers with the "add more?" prompt.
+    assert messages.recurring.add_more in _texts(add_cb.message.answer)
+    assert len(state.store["slots"]) == 2
 
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.time_hhmm == "10:30"
-    assert series.comment == "принести тетрадь"
+    done = _fake_callback("recur:done")
+    await h.done_adding(done, state)
+    assert messages.recurring.ask_comment in _texts(done.message.edit_text)
+
+    msg = _fake_message("принести тетрадь")
+    await h.apply_schedule_comment(msg, state, _SP)
+    assert messages.recurring.created in _texts(msg.answer)
+
+    schedules = await _load_schedules(session_factory)
+    assert len(schedules) == 1
+    schedule_id = schedules[0].id
+    assert schedule_id is not None
+    assert schedules[0].comment == "принести тетрадь"
+    slots = await _load_slots(session_factory, schedule_id)
+    assert {(s.weekday, s.time_hhmm) for s in slots} == {(0, "12:00"), (2, "14:00")}
+    assert state.store == {}
 
 
-async def test_edit_bad_custom_time_reasks(
+async def test_create_wizard_custom_time_appends_slot(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
+    today = today_in_tz(datetime.now(UTC), _TZ)
     h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:1"), state, _SP)
-    await h.ask_custom_time(_fake_callback("recur:other"), state)
+    state = _state(
+        {
+            "flow": "rcreate",
+            "client_id": client_id,
+            "slots": [
+                {
+                    "weekday": 0,
+                    "hhmm": "12:00",
+                    "start_date": _next_weekday(today, 0).isoformat(),
+                }
+            ],
+        }
+    )
+    await h.pick_weekday(_fake_callback("recur:wd:4"), state, _SP)
+    await h.ask_custom_time(_fake_callback("recur:tother"), state)
+    msg = _fake_message("10:30")
+    await h.apply_custom_time(msg, state, _SP)
+    assert messages.recurring.add_more in _texts(msg.answer)
+    assert state.store["slots"][1] == {
+        "weekday": 4,
+        "hhmm": "10:30",
+        "start_date": _next_weekday(today, 4).isoformat(),
+    }
+
+
+async def test_create_wizard_bad_custom_time_reasks(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "rcreate", "client_id": 1, "slots": [], "weekday": 0})
     msg = _fake_message("99:99")
     await h.apply_custom_time(msg, state, _SP)
     assert messages.recurring.bad_time in _texts(msg.answer)
-    # The series rule is unchanged.
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.weekday == 0
 
 
-# --- series card + stop -----------------------------------------------------
-
-
-async def test_show_card_renders_actions(
+async def test_skip_schedule_comment_creates_without_comment(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    h = _recur(messages, session_factory)
+    state = _state(
+        {
+            "flow": "rcreate",
+            "client_id": client_id,
+            "slots": [
+                {
+                    "weekday": 1,
+                    "hhmm": "15:00",
+                    "start_date": _next_weekday(today, 1).isoformat(),
+                }
+            ],
+        }
+    )
+    cb = _fake_callback("recur:cskipc")
+    await h.skip_schedule_comment(cb, state, _SP)
+    assert messages.recurring.created in _texts(cb.message.answer)
+    schedules = await _load_schedules(session_factory)
+    assert len(schedules) == 1
+    assert schedules[0].comment is None
+
+
+async def test_create_asks_series_notify_for_linked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    h = _recur(messages, session_factory)
+    state = _state(
+        {
+            "flow": "rcreate",
+            "client_id": client_id,
+            "slots": [
+                {
+                    "weekday": 0,
+                    "hhmm": "12:00",
+                    "start_date": _next_weekday(today, 0).isoformat(),
+                }
+            ],
+        }
+    )
+    cb = _fake_callback("recur:cskipc")
+    await h.skip_schedule_comment(cb, state, _SP)
+    schedules = await _load_schedules(session_factory)
+    schedule_id = schedules[0].id
+    assert "sched:ntfwhen" in _callbacks(_markup(cb.message.answer))
+    assert state.store["notify"]["event"] == "c"
+    assert state.store["notify"]["target_key"] == f"schedule:{schedule_id}"
+
+
+# --- schedule card ----------------------------------------------------------
+
+
+async def test_show_schedule_renders_card(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_mon = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=_next_weekday(today, 0),
+        time_hhmm="12:00",
+    )
+    slot_wed = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=2,
+        start_date=_next_weekday(today, 2),
+        time_hhmm="14:00",
     )
     h = _recur(messages, session_factory)
-    # Opened from the client card → that origin is threaded into every action.
     back = f"clients:card:{client_id}"
-    cb = _fake_callback(f"recur:card:{series_id}:2026-06-22~{back}")
-    await h.show_card(cb, _SP)
+    cb = _fake_callback(f"recur:sched:{schedule_id}~{back}")
+    await h.show_schedule(cb, _SP)
+    text = _texts(cb.message.edit_text)[0]
+    assert "Петя" in text
+    assert "регулярная" in text
+    # Both slot rules are rendered (rule_line uses the "Каждый…" weekday form).
+    assert "Каждый понедельник в 12:00" in text
+    assert "Каждую среду в 14:00" in text
     callbacks = _callbacks(_markup(cb.message.edit_text))
-    assert f"recur:edit:{series_id}:2026-06-22~{back}" in callbacks
-    assert f"recur:move:{series_id}:2026-06-22~{back}" in callbacks
-    assert f"recur:skipask:{series_id}:2026-06-22~{back}" in callbacks
-    assert f"recur:stopask:{series_id}~{back}" in callbacks
-    # The back button returns to the client card, not the day view.
+    # Occurrence buttons for both slots within the 14-day window.
+    assert any(c and c.startswith(f"recur:occ:{slot_mon}:") for c in callbacks)
+    assert any(c and c.startswith(f"recur:occ:{slot_wed}:") for c in callbacks)
+    assert f"recur:cfg:{schedule_id}" in callbacks
+    assert f"recur:stopask:{schedule_id}~{back}" in callbacks
+    # The back button honours the origin we came from.
     assert back in callbacks
 
 
-async def test_show_card_foreign_series_blocked(
+async def test_show_schedule_empty_window(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    # Start far in the future so no occurrence lands in the rolling 14-day window.
+    await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=today + timedelta(days=30),
+        time_hhmm="12:00",
     )
     h = _recur(messages, session_factory)
-    cb = _fake_callback(f"recur:card:{series_id}:2026-06-22")
-    await h.show_card(cb, 999)  # another specialist
-    cb.answer.assert_awaited()
+    cb = _fake_callback(f"recur:sched:{schedule_id}")
+    await h.show_schedule(cb, _SP)
+    assert messages.recurring.empty_window in _texts(cb.message.edit_text)[0]
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert not any(c and c.startswith("recur:occ:") for c in callbacks)
+
+
+async def test_show_schedule_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:sched:{schedule_id}")
+    await h.show_schedule(cb, other)
     cb.message.edit_text.assert_not_awaited()
+    cb.answer.assert_awaited()
 
 
-async def test_show_card_shows_moved_occurrence_time(
+async def test_nav_schedule_card_parses_composite(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=_next_weekday(today, 0),
     )
-    # Move the 06-22 occurrence to Wednesday 06-24 16:00 local (11:00 UTC).
-    async with session_factory() as session:
-        await SqlAlchemyRecurringExceptionsRepo(session).upsert(
-            series_id,
-            date(2026, 6, 22),
-            new_starts_at=datetime(2026, 6, 24, 11, 0, tzinfo=UTC),
-            created_at=datetime.now(UTC),
-        )
     h = _recur(messages, session_factory)
-    cb = _fake_callback(f"recur:card:{series_id}:2026-06-22")
-    await h.show_card(cb, _SP)
+    back = f"recur:sched:{schedule_id}~clients:card:{client_id}"
+    _, keyboard = await h.nav_schedule_card(_SP, back)
+    cbs = _callbacks(keyboard)
+    assert f"recur:cfg:{schedule_id}" in cbs
+    assert f"clients:card:{client_id}" in cbs
+
+
+# --- meeting card -----------------------------------------------------------
+
+
+async def test_show_meeting_renders_occurrence(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    back = f"recur:sched:{schedule_id}"
+    cb = _fake_callback(f"recur:occ:{slot_id}:{occ_day.isoformat()}~{back}")
+    await h.show_meeting(cb, _SP)
     text = _texts(cb.message.edit_text)[0]
-    # The card shows the base rule explicitly...
-    assert "Каждый понедельник в 14:00" in text
-    # ...and the moved next-meeting date/time, not the series' default 14:00.
-    assert "24 июня" in text
-    assert "16:00" in text
+    assert "Петя" in text
+    assert "14:00" in text
+    # The schedule's shared comment is inherited.
+    assert "регулярная" in text
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert any(c and c.startswith(f"recur:occmove:{slot_id}:") for c in callbacks)
+    assert any(c and c.startswith(f"recur:occskipask:{slot_id}:") for c in callbacks)
+    assert any(c and c.startswith(f"recur:occcmt:{slot_id}:") for c in callbacks)
+    assert any(c and c.startswith(f"recur:sched:{schedule_id}") for c in callbacks)
+    assert back in callbacks
 
 
-async def test_show_card_marks_confirmed_occurrence(
+async def test_show_meeting_marks_confirmed(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="14:00",
     )
-    # Confirm the 2026-06-22 occurrence (14:00 wall in +05 → 09:00 UTC).
-    starts_at = wall_to_utc(date(2026, 6, 22), "14:00", "Asia/Yekaterinburg")
+    now = datetime.now(UTC)
     async with session_factory() as session:
-        repo = SqlAlchemyRemindersRepo(session)
-        reminder = AppointmentReminder(
-            id=None,
-            specialist_id=_SP,
-            client_id=client_id,
-            starts_at=starts_at,
-            series_id=series_id,
-            origin_date=date(2026, 6, 22),
-            status=ReminderStatus.PENDING,
-            sent_at=datetime.now(UTC),
-            responded_at=None,
+        await SqlAlchemyRemindersRepo(session).insert_pending(
+            AppointmentReminder(
+                id=None,
+                specialist_id=_SP,
+                client_id=client_id,
+                starts_at=wall_to_utc(occ_day, "14:00", _TZ),
+                slot_id=slot_id,
+                origin_date=occ_day,
+                status=ReminderStatus.CONFIRMED,
+                sent_at=now,
+                responded_at=now,
+            )
         )
-        await repo.insert_pending(reminder)
-        assert reminder.id is not None
-        await repo.set_status(reminder.id, ReminderStatus.CONFIRMED, datetime.now(UTC))
     h = _recur(messages, session_factory)
-    cb = _fake_callback(f"recur:card:{series_id}:2026-06-22")
-    await h.show_card(cb, _SP)
+    cb = _fake_callback(f"recur:occ:{slot_id}:{occ_day.isoformat()}")
+    await h.show_meeting(cb, _SP)
     assert messages.reminder.card_confirmed in _texts(cb.message.edit_text)[0]
 
 
-async def test_navigate_move_redraws_calendar(
+async def test_show_meeting_moved_override_shows_new_time(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="14:00",
+    )
+    # Move to occ_day+2 at 16:00 local (11:00 UTC) with an override comment.
+    moved_day = occ_day + timedelta(days=2)
+    await _upsert_override(
+        session_factory,
+        slot_id=slot_id,
+        original_date=occ_day,
+        moved_to=wall_to_utc(moved_day, "16:00", _TZ),
+        comment="перенос",
+    )
     h = _recur(messages, session_factory)
-    cb = _fake_callback("recur:cal:2027:3")
-    await h.navigate_move(cb, _SP)
-    callbacks = _callbacks(_markup(cb.message.edit_reply_markup))
-    # The redrawn calendar uses the recurring namespace for day/nav callbacks.
-    assert any(c and c.startswith("recur:day:2027:3:") for c in callbacks)
+    cb = _fake_callback(f"recur:occ:{slot_id}:{occ_day.isoformat()}")
+    await h.show_meeting(cb, _SP)
+    text = _texts(cb.message.edit_text)[0]
+    assert "16:00" in text
+    # Override comment wins over the schedule's shared comment.
+    assert "перенос" in text
+
+
+async def test_show_meeting_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:occ:{slot_id}:2026-06-22")
+    await h.show_meeting(cb, other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_nav_meeting_card_builds_from_back(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
+    )
+    h = _recur(messages, session_factory)
+    back = f"recur:occ:{slot_id}:{occ_day.isoformat()}~recur:sched:{schedule_id}"
+    text, keyboard = await h.nav_meeting_card(_SP, back)
+    assert "Петя" in text
+    cbs = _callbacks(keyboard)
+    assert any(c and c.startswith(f"recur:occmove:{slot_id}:") for c in cbs)
+    assert f"recur:sched:{schedule_id}" in cbs
+
+
+# --- configure --------------------------------------------------------------
+
+
+async def test_show_config_lists_slots(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_a = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="12:00",
+    )
+    slot_b = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=2,
+        start_date=date(2026, 6, 3),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:cfg:{schedule_id}")
+    await h.show_config(cb, _SP)
+    assert messages.recurring.configure_title in _texts(cb.message.edit_text)
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert f"recur:slot:{slot_a}" in callbacks
+    assert f"recur:slot:{slot_b}" in callbacks
+    assert f"recur:cfgadd:{schedule_id}" in callbacks
+    assert f"recur:sched:{schedule_id}" in callbacks
+
+
+async def test_show_config_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:cfg:{schedule_id}")
+    await h.show_config(cb, other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_show_slot_actions(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slot:{slot_id}")
+    await h.show_slot_actions(cb, _SP)
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert f"recur:slottime:{slot_id}" in callbacks
+    assert f"recur:slotday:{slot_id}" in callbacks
+    assert f"recur:slotdel:{slot_id}" in callbacks
+    assert f"recur:cfg:{schedule_id}" in callbacks
+
+
+async def test_show_slot_actions_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slot:{slot_id}")
+    await h.show_slot_actions(cb, other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_edit_slot_time_only(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    start = _next_weekday(today, 0)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=start,
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_slot_time(_fake_callback(f"recur:slottime:{slot_id}"), state, _SP)
+    assert state.store["flow"] == "cfg_time"
+    msg_cb = _fake_callback("recur:tslot:1600")
+    await h.pick_slot(msg_cb, state, _SP)
+    # Time-only edit keeps the grid: weekday and start_date untouched.
+    slots = await _load_slots(session_factory, schedule_id)
+    assert len(slots) == 1
+    assert slots[0].time_hhmm == "16:00"
+    assert slots[0].weekday == 0
+    assert slots[0].start_date == start
+
+
+async def test_edit_slot_day_change(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=_next_weekday(today, 0),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_slot_day(_fake_callback(f"recur:slotday:{slot_id}"), state, _SP)
+    assert state.store["flow"] == "cfg_day"
+    await h.pick_weekday(_fake_callback("recur:wd:3"), state, _SP)  # Thursday
+    msg_cb = _fake_callback("recur:tslot:1100")
+    await h.pick_slot(msg_cb, state, _SP)
+    assert messages.recurring.edited in _texts(msg_cb.message.answer)
+    slots = await _load_slots(session_factory, schedule_id)
+    assert slots[0].weekday == 3
+    assert slots[0].time_hhmm == "11:00"
+    # Weekday change recomputes start_date to the next Thursday ≥ today.
+    assert slots[0].start_date == _next_weekday(today, 3)
+
+
+async def test_edit_slot_foreign_reports_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    # State as if start_slot_time ran, but the edit is finished by a non-owner.
+    state = _state({"flow": "cfg_time", "slot_id": slot_id, "weekday": 0})
+    msg_cb = _fake_callback("recur:tslot:1600")
+    await h.pick_slot(msg_cb, state, other)
+    assert messages.recurring.not_found in _texts(msg_cb.message.answer)
+
+
+async def test_start_slot_time_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slottime:{slot_id}")
+    await h.start_slot_time(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_start_slot_day_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotday:{slot_id}")
+    await h.start_slot_day(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_add_slot_via_config(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="12:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_cfg_add(_fake_callback(f"recur:cfgadd:{schedule_id}"), state, _SP)
+    assert state.store["flow"] == "cfg_add"
+    await h.pick_weekday(_fake_callback("recur:wd:4"), state, _SP)  # Friday
+    msg_cb = _fake_callback("recur:tslot:1500")
+    await h.pick_slot(msg_cb, state, _SP)
+    assert messages.recurring.edited in _texts(msg_cb.message.answer)
+    slots = await _load_slots(session_factory, schedule_id)
+    assert {(s.weekday, s.time_hhmm) for s in slots} == {(0, "12:00"), (4, "15:00")}
+
+
+async def test_start_cfg_add_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:cfgadd:{schedule_id}")
+    await h.start_cfg_add(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_delete_slot_keeps_schedule_with_remaining(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_keep = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=date(2026, 6, 1),
+        time_hhmm="12:00",
+    )
+    slot_del = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=2,
+        start_date=date(2026, 6, 3),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotdel:{slot_del}")
+    await h.delete_slot(cb, _SP)
+    # Re-renders the configure list (one slot remains).
+    assert messages.recurring.configure_title in _texts(cb.message.edit_text)
+    callbacks = _callbacks(_markup(cb.message.edit_text))
+    assert f"recur:slot:{slot_keep}" in callbacks
+    assert f"recur:slot:{slot_del}" not in callbacks
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.active is True
+
+
+async def test_delete_last_slot_stops_schedule(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotdel:{slot_id}")
+    await h.delete_slot(cb, _SP)
+    # The slot is deactivated and, being the last active one, stops the schedule.
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.active is False
+    assert await _load_slots(session_factory, schedule_id) == []
+    # Last active slot removed → the handler reports "slot removed" and returns to
+    # the freshest screen via the navigator (no empty configure re-render).
+    assert messages.recurring.slot_removed in _texts(cb.message.edit_text)
+    cb.message.answer.assert_awaited()
+
+
+async def test_delete_slot_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slotdel:{slot_id}")
+    await h.delete_slot(cb, other)
+    cb.message.edit_text.assert_not_awaited()
+    slots = await _load_slots(session_factory, schedule_id)
+    assert len(slots) == 1  # untouched
+
+
+# --- stop the whole schedule ------------------------------------------------
 
 
 async def test_stop_flow_confirms_and_deactivates(
@@ -356,491 +972,404 @@ async def test_stop_flow_confirms_and_deactivates(
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
     )
     h = _recur(messages, session_factory)
-
-    confirm = _fake_callback(f"recur:stopask:{series_id}")
+    confirm = _fake_callback(f"recur:stopask:{schedule_id}")
     await h.confirm_stop(confirm, _SP)
-    assert f"recur:stop:{series_id}" in _callbacks(_markup(confirm.message.edit_text))
+    assert messages.recurring.confirm_stop in _texts(confirm.message.edit_text)
+    assert f"recur:stop:{schedule_id}" in _callbacks(_markup(confirm.message.edit_text))
 
-    do = _fake_callback(f"recur:stop:{series_id}")
+    do = _fake_callback(f"recur:stop:{schedule_id}")
     await h.do_stop(do, _state(), _SP)
     assert messages.recurring.stopped in _texts(do.message.edit_text)
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.active is False
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.active is False
 
 
-async def test_stop_foreign_series_blocked(
+async def test_stop_foreign_blocked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
     )
     h = _recur(messages, session_factory)
-    await h.confirm_stop(_fake_callback(f"recur:stopask:{series_id}"), 999)
-    do = _fake_callback(f"recur:stop:{series_id}")
-    await h.do_stop(do, _state(), 999)
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.active is True
-
-
-# --- edit flow --------------------------------------------------------------
-
-
-async def test_edit_flow_changes_rule(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:3"), state, _SP)
-    await h.pick_slot(_fake_callback("recur:slot:1100"), state, _SP)
-    await h.apply_comment(_fake_message("новый"), state, _SP)
-
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.weekday == 3
-    assert series.time_hhmm == "11:00"
-    assert series.comment == "новый"
-
-
-async def test_edit_flow_skip_comment_clears_it(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:0"), state, _SP)
-    await h.pick_slot(_fake_callback("recur:slot:1100"), state, _SP)
-    await h.skip_comment(_fake_callback("recur:skipc"), state, _SP)
-
-    series = await _load_series(session_factory, series_id)
-    assert series is not None
-    assert series.comment is None
-    assert series.time_hhmm == "11:00"
-
-
-async def test_edit_foreign_series_reports_not_found(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    # A second, valid specialist who does not own the series.
-    async with session_factory() as session:
-        other = await create_invite(SqlAlchemySpecialistsRepo(session))
-    assert other.id is not None
-    assert other.id != _SP
-    h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:3"), state, other.id)
-    await h.pick_slot(_fake_callback("recur:slot:1100"), state, other.id)
-    msg = _fake_message("x")
-    await h.apply_comment(msg, state, other.id)
-    assert messages.recurring.not_found in _texts(msg.answer)
-
-
-# --- skip flow --------------------------------------------------------------
-
-
-async def test_skip_flow_creates_exception(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    await h.confirm_skip(_fake_callback(f"recur:skipask:{series_id}:2026-06-22"), _SP)
-    do = _fake_callback(f"recur:skip:{series_id}:2026-06-22")
-    await h.do_skip(do, _state(), _SP)
-    assert messages.recurring.skipped in _texts(do.message.edit_text)
-    async with session_factory() as session:
-        exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
-            series_id
-        )
-    assert len(exc) == 1
-    assert exc[0].new_starts_at is None
-
-
-async def test_skip_foreign_series_blocked(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    await h.confirm_skip(_fake_callback(f"recur:skipask:{series_id}:2026-06-22"), 999)
-    await h.do_skip(_fake_callback(f"recur:skip:{series_id}:2026-06-22"), _state(), 999)
-    async with session_factory() as session:
-        exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
-            series_id
-        )
-    assert exc == []
-
-
-# --- move flow --------------------------------------------------------------
-
-
-async def test_move_flow_creates_moved_exception(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    state = _state()
-    # Move flow: pick a new date, then a new time.
-    await h.start_move(_fake_callback(f"recur:move:{series_id}:2026-06-22"), state, _SP)
-    await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
-    do = _fake_callback("recur:slot:1600")
-    await h.pick_slot(do, state, _SP)
-    # The slots picker becomes the standalone "moved" result; the series card
-    # re-opens as a fresh message below it.
-    assert messages.recurring.moved in _texts(do.message.edit_text)
-    async with session_factory() as session:
-        exc = await SqlAlchemyRecurringExceptionsRepo(session).list_for_series(
-            series_id
-        )
-    assert len(exc) == 1
-    # The original Monday (06-22) is moved to Wednesday 06-24 16:00 local → 11:00 UTC.
-    assert exc[0].original_date == date(2026, 6, 22)
-    assert exc[0].new_starts_at == datetime(2026, 6, 24, 11, 0, tzinfo=UTC)
-
-
-async def test_move_foreign_series_blocked(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    state = _state()
-    cb = _fake_callback(f"recur:move:{series_id}:2026-06-22")
-    await h.start_move(cb, state, 999)
-    cb.message.edit_text.assert_not_awaited()
-
-
-async def test_move_reports_not_found_for_foreign_series(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    async with session_factory() as session:
-        other = await create_invite(SqlAlchemySpecialistsRepo(session))
-    assert other.id is not None
-    h = _recur(messages, session_factory)
-    # State as if start_move + pick_move_day ran, but finished by a different owner.
-    state = _state(
-        {
-            "flow": "move",
-            "series_id": series_id,
-            "origin_date": "2026-06-22",
-            "new_day": "2026-06-24",
-        }
-    )
-    msg_cb = _fake_callback("recur:slot:1600")
-    await h.pick_slot(msg_cb, state, other.id)
-    assert messages.recurring.not_found in _texts(msg_cb.message.answer)
-
-
-async def test_cancel_clears_state(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    h = _recur(messages, session_factory)
-    state = _state({"flow": "create"})
-    cb = _fake_callback("recur:cancel")
-    await h.cancel(cb, state, _SP)
-    assert messages.recurring.cancelled in _texts(cb.message.edit_text)
-    assert await state.get_data() == {}
-
-
-# --- notify the client (series + per-date) ----------------------------------
-
-
-async def test_edit_asks_series_notify_for_linked(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
-    )
-    h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_edit(_fake_callback(f"recur:edit:{series_id}:2026-06-22"), state)
-    await h.pick_weekday(_fake_callback("recur:wd:3"), state, _SP)  # Thursday
-    await h.pick_slot(_fake_callback("recur:slot:1100"), state, _SP)
-    msg = _fake_message("новый")
-    await h.apply_comment(msg, state, _SP)
-    # Series edit → "modified" prompt; context is a whole-series target.
-    cbs = _callbacks(_markup(msg.answer))
-    assert "sched:ntfwhen" in cbs
-    assert "sched:ntfno" in cbs
-    assert state.store["notify"]["event"] == "m"
-    assert state.store["notify"]["target_key"] == f"series:{series_id}"
+    await h.confirm_stop(_fake_callback(f"recur:stopask:{schedule_id}"), other)
+    await h.do_stop(_fake_callback(f"recur:stop:{schedule_id}"), _state(), other)
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.active is True
 
 
 async def test_stop_asks_series_notify_for_linked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
     )
     h = _recur(messages, session_factory)
-    do = _fake_callback(f"recur:stop:{series_id}")
+    do = _fake_callback(f"recur:stop:{schedule_id}")
     state = _state()
     await h.do_stop(do, state, _SP)
     assert messages.recurring.stopped in _texts(do.message.edit_text)
     assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
     assert state.store["notify"]["event"] == "x"
-    assert state.store["notify"]["target_key"] == f"series:{series_id}"
+    assert state.store["notify"]["target_key"] == f"schedule:{schedule_id}"
+
+
+# --- move a single occurrence -----------------------------------------------
+
+
+async def test_move_occurrence_creates_override(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="14:00",
+    )
+    new_day = occ_day + timedelta(days=2)
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_move(
+        _fake_callback(f"recur:occmove:{slot_id}:{occ_day.isoformat()}"), state, _SP
+    )
+    assert state.store["flow"] == "move"
+    await h.pick_move_day(
+        _fake_callback(f"recur:day:{new_day.year}:{new_day.month}:{new_day.day}"),
+        state,
+        _SP,
+    )
+    do = _fake_callback("recur:tslot:1600")
+    await h.pick_slot(do, state, _SP)
+    assert messages.recurring.moved in _texts(do.message.edit_text)
+    overrides = await _list_overrides(session_factory, slot_id)
+    assert len(overrides) == 1
+    assert overrides[0].original_date == occ_day
+    assert overrides[0].moved_to == wall_to_utc(new_day, "16:00", _TZ)
+    assert overrides[0].skipped is False
+
+
+async def test_move_via_navigate_then_typed_time(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="14:00",
+    )
+    new_day = occ_day + timedelta(days=2)
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_move(
+        _fake_callback(f"recur:occmove:{slot_id}:{occ_day.isoformat()}"), state, _SP
+    )
+    # Redraw the calendar to another month, then come back and pick a day.
+    nav = _fake_callback("recur:cal:2027:3")
+    await h.navigate_move(nav, _SP)
+    nav_cbs = _callbacks(_markup(nav.message.edit_reply_markup))
+    assert any(c and c.startswith("recur:day:2027:3:") for c in nav_cbs)
+
+    await h.pick_move_day(
+        _fake_callback(f"recur:day:{new_day.year}:{new_day.month}:{new_day.day}"),
+        state,
+        _SP,
+    )
+    await h.ask_custom_time(_fake_callback("recur:tother"), state)
+    msg = _fake_message("16:00")
+    await h.apply_custom_time(msg, state, _SP)
+    # Typed time → result arrives as a fresh answer (edit=False).
+    assert messages.recurring.moved in _texts(msg.answer)
+    overrides = await _list_overrides(session_factory, slot_id)
+    assert overrides[0].moved_to == wall_to_utc(new_day, "16:00", _TZ)
+
+
+async def test_start_move_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:occmove:{slot_id}:2026-06-22")
+    await h.start_move(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_move_finished_by_non_owner_reports_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state(
+        {
+            "flow": "move",
+            "slot_id": slot_id,
+            "origin_date": "2026-06-22",
+            "new_day": "2026-06-24",
+            "back": "",
+            "card": f"recur:occ:{slot_id}:2026-06-22",
+        }
+    )
+    msg_cb = _fake_callback("recur:tslot:1600")
+    await h.pick_slot(msg_cb, state, other)
+    assert messages.recurring.not_found in _texts(msg_cb.message.answer)
+    assert await _list_overrides(session_factory, slot_id) == []
 
 
 async def test_move_asks_notify_for_linked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
     )
+    new_day = occ_day + timedelta(days=2)
     h = _recur(messages, session_factory)
     state = _state()
-    await h.start_move(_fake_callback(f"recur:move:{series_id}:2026-06-22"), state, _SP)
-    await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
-    do = _fake_callback("recur:slot:1600")
+    await h.start_move(
+        _fake_callback(f"recur:occmove:{slot_id}:{occ_day.isoformat()}"), state, _SP
+    )
+    await h.pick_move_day(
+        _fake_callback(f"recur:day:{new_day.year}:{new_day.month}:{new_day.day}"),
+        state,
+        _SP,
+    )
+    do = _fake_callback("recur:tslot:1600")
     await h.pick_slot(do, state, _SP)
-    # Moving one date → single-occurrence "rescheduled" prompt (a series date target).
     assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
     assert state.store["notify"]["event"] == "r"
-    assert state.store["notify"]["target_key"] == f"series:{series_id}:2026-06-22"
+    assert state.store["notify"]["target_key"] == (
+        f"slot:{slot_id}:{occ_day.isoformat()}"
+    )
 
 
-async def test_move_via_typed_time_answers_result(
+# --- skip a single occurrence -----------------------------------------------
+
+
+async def test_skip_occurrence_creates_override(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
     )
     h = _recur(messages, session_factory)
-    state = _state()
-    await h.start_move(_fake_callback(f"recur:move:{series_id}:2026-06-22"), state, _SP)
-    await h.pick_move_day(_fake_callback("recur:day:2026:6:24"), state, _SP)
-    await h.ask_custom_time(_fake_callback("recur:other"), state)
-    msg = _fake_message("16:00")
-    # A typed time arrives on the user's message → result is a fresh answer (edit=False).
-    await h.apply_custom_time(msg, state, _SP)
-    assert messages.recurring.moved in _texts(msg.answer)
-    assert "sched:ntfwhen" in _callbacks(_markup(msg.answer))
+    confirm = _fake_callback(f"recur:occskipask:{slot_id}:{occ_day.isoformat()}")
+    await h.confirm_skip(confirm, _SP)
+    assert f"recur:occskip:{slot_id}:{occ_day.isoformat()}" in _callbacks(
+        _markup(confirm.message.edit_text)
+    )
+    do = _fake_callback(f"recur:occskip:{slot_id}:{occ_day.isoformat()}")
+    await h.do_skip(do, _state(), _SP)
+    assert messages.recurring.skipped in _texts(do.message.edit_text)
+    overrides = await _list_overrides(session_factory, slot_id)
+    assert len(overrides) == 1
+    assert overrides[0].skipped is True
+    assert overrides[0].moved_to is None
+
+
+async def test_confirm_skip_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    await h.confirm_skip(
+        _fake_callback(f"recur:occskipask:{slot_id}:2026-06-22"), other
+    )
+    await h.do_skip(
+        _fake_callback(f"recur:occskip:{slot_id}:2026-06-22"), _state(), other
+    )
+    assert await _list_overrides(session_factory, slot_id) == []
 
 
 async def test_skip_asks_notify_for_linked(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
-    client_id = await _seed_linked_client(session_factory, chat_id=555)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    client_id = await _seed_client(session_factory, chat_id=555)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
     )
     h = _recur(messages, session_factory)
-    do = _fake_callback(f"recur:skip:{series_id}:2026-06-22")
+    do = _fake_callback(f"recur:occskip:{slot_id}:{occ_day.isoformat()}")
     state = _state()
     await h.do_skip(do, state, _SP)
-    assert messages.recurring.skipped in _texts(do.message.edit_text)
-    # Cancelling one date → single-occurrence "cancelled" prompt (a series date target).
     assert "sched:ntfwhen" in _callbacks(_markup(do.message.answer))
     assert state.store["notify"]["event"] == "x"
-    assert state.store["notify"]["target_key"] == f"series:{series_id}:2026-06-22"
+    assert state.store["notify"]["target_key"] == (
+        f"slot:{slot_id}:{occ_day.isoformat()}"
+    )
 
 
-# --- rendering of virtual occurrences ---------------------------------------
+# --- comment a single occurrence --------------------------------------------
 
 
-async def test_day_view_shows_series_button(
+async def test_comment_occurrence_sets_override_comment(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
     today = today_in_tz(datetime.now(UTC), _TZ)
-    view_day = today + timedelta(days=14)
-    await _seed_series(
-        session_factory,
-        client_id=client_id,
-        weekday=today.weekday(),
-        start_date=today,
-    )
-    h = ScheduleHandlers(messages, session_factory)
-    cb = _fake_callback(f"sched:day_view:{view_day.isoformat()}")
-    await h.open_day(cb, _SP)
-    callbacks = _callbacks(_markup(cb.message.edit_text))
-    assert any(c and c.startswith("recur:card:") for c in callbacks)
-
-
-async def test_week_marks_series_line(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    today = today_in_tz(datetime.now(UTC), _TZ)
-    await _seed_series(
-        session_factory,
-        client_id=client_id,
-        weekday=today.weekday(),
-        start_date=today,
-    )
-    h = ScheduleHandlers(messages, session_factory)
-    cb = _fake_callback("sched:week")
-    await h.show_week(cb, _SP)
-    text = _texts(cb.message.edit_text)[0]
-    assert messages.recurring.mark in text
-
-
-async def test_client_card_links_series_occurrence(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    today = today_in_tz(datetime.now(UTC), _TZ)
-    await _seed_series(
-        session_factory,
-        client_id=client_id,
-        weekday=today.weekday(),
-        start_date=today,
-    )
-    h = ClientsHandlers(messages, session_factory)
-    cb = _fake_callback(f"clients:card:{client_id}")
-    await h.show_card(cb, _SP)
-    callbacks = _callbacks(_markup(cb.message.edit_text))
-    # The series occurrence links to the series card; there is no separate
-    # "create regular" button anymore (it lives in the normal записать flow).
-    assert any(c and c.startswith("recur:card:") for c in callbacks)
-    assert not any(c and c.startswith("recur:new:") for c in callbacks)
-
-
-# --- middleware settle (7.2) ------------------------------------------------
-
-
-async def test_middleware_settles_once_per_day(
-    session_factory: async_sessionmaker[AsyncSession],
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    today = today_in_tz(datetime.now(UTC), _TZ)
-    # A series that started two weeks ago has passed occurrences to freeze.
-    start = today - timedelta(days=14)
-    series_id = await _seed_series(
-        session_factory,
-        client_id=client_id,
-        weekday=start.weekday(),
-        start_date=start,
-    )
-    mw = SpecialistMiddleware(session_factory)
-
-    calls = {"n": 0}
-
-    async def handler(_event: Any, _data: dict[str, Any]) -> str:  # noqa: RUF029
-        calls["n"] += 1
-        return "ok"
-
-    event = AsyncMock()
-    data = {"event_from_user": AsyncMock(id=_CHAT)}
-    await mw(handler, event, data)
-
-    async with session_factory() as session:
-        from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
-
-        rows = await SqlAlchemyAppointmentsRepo(session).list_for_specialist_between(
-            _SP,
-            start=datetime(2000, 1, 1, tzinfo=UTC),
-            end=datetime(2100, 1, 1, tzinfo=UTC),
-        )
-    materialized = len(rows)
-    assert materialized >= 1  # at least one past occurrence frozen
-    assert all(r.series_id == series_id for r in rows)
-    assert data["specialist_id"] == _SP
-    assert calls["n"] == 1
-
-    # Second interaction the same day must not create duplicates.
-    await mw(handler, event, {"event_from_user": AsyncMock(id=_CHAT)})
-    async with session_factory() as session:
-        from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
-
-        rows2 = await SqlAlchemyAppointmentsRepo(session).list_for_specialist_between(
-            _SP,
-            start=datetime(2000, 1, 1, tzinfo=UTC),
-            end=datetime(2100, 1, 1, tzinfo=UTC),
-        )
-    assert len(rows2) == materialized
-
-
-# --- auto-return / navigation builders --------------------------------------
-
-
-async def test_nav_series_card_parses_composite_prefix(
-    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
-):
-    await _seed_specialist(session_factory)
-    client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
     )
     h = _recur(messages, session_factory)
-    back = f"recur:card:{series_id}:2026-06-22~clients:card:{client_id}"
-    _, keyboard = await h.nav_series_card(_SP, back)
-    cbs = _callbacks(keyboard)
-    # The composite key (series_id + origin date) is parsed back into this date's
-    # actions, and the card's Back honours the inner target after "~".
-    assert any(c and c.startswith(f"recur:move:{series_id}:2026-06-22") for c in cbs)
-    assert f"clients:card:{client_id}" in cbs
+    state = _state()
+    await h.start_comment(
+        _fake_callback(f"recur:occcmt:{slot_id}:{occ_day.isoformat()}"), state, _SP
+    )
+    assert state.store["flow"] == "occ_comment"
+    msg = _fake_message("принести краски")
+    await h.apply_occ_comment(msg, state, _SP)
+    assert messages.recurring.comment_set in _texts(msg.answer)
+    overrides = await _list_overrides(session_factory, slot_id)
+    assert len(overrides) == 1
+    assert overrides[0].comment == "принести краски"
 
 
-async def test_cancel_returns_to_series_card(
+async def test_start_comment_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:occcmt:{slot_id}:2026-06-22")
+    await h.start_comment(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_apply_occ_comment_foreign_reports_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=date(2026, 6, 1)
+    )
+    h = _recur(messages, session_factory)
+    state = _state(
+        {
+            "flow": "occ_comment",
+            "slot_id": slot_id,
+            "origin_date": "2026-06-22",
+            "card": "",
+        }
+    )
+    msg = _fake_message("x")
+    await h.apply_occ_comment(msg, state, other)
+    assert messages.recurring.not_found in _texts(msg.answer)
+    assert await _list_overrides(session_factory, slot_id) == []
+
+
+# --- cancel -----------------------------------------------------------------
+
+
+async def test_cancel_clears_state_and_returns_to_card(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
     await _seed_specialist(session_factory)
     client_id = await _seed_client(session_factory)
-    series_id = await _seed_series(
-        session_factory, client_id=client_id, weekday=0, start_date=date(2026, 6, 1)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory, schedule_id=schedule_id, weekday=0, start_date=occ_day
     )
     h = _recur(messages, session_factory)
-    state = _state({"flow": "move", "card": f"recur:card:{series_id}:2026-06-22"})
+    card = f"recur:occ:{slot_id}:{occ_day.isoformat()}"
+    state = _state({"flow": "move", "card": card})
     cb = _fake_callback("recur:cancel")
     await h.cancel(cb, state, _SP)
     assert messages.recurring.cancelled in _texts(cb.message.edit_text)
+    assert await state.get_data() == {}
+    # The cancel re-opens the meeting card it started from.
     cbs = _callbacks(_markup(cb.message.answer))
-    assert any(c and c.startswith(f"recur:move:{series_id}:") for c in cbs)
+    assert any(c and c.startswith(f"recur:occmove:{slot_id}:") for c in cbs)
+
+
+async def test_cancel_without_card_falls_back(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    await _seed_client(session_factory)
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "rcreate"})
+    cb = _fake_callback("recur:cancel")
+    await h.cancel(cb, state, _SP)
+    assert messages.recurring.cancelled in _texts(cb.message.edit_text)
+    assert await state.get_data() == {}
+    # Falls back to today's schedule day view.
+    assert _markup(cb.message.answer) is not None
+
+
+# --- helper to enumerate schedules ------------------------------------------
+
+
+async def _load_schedules(
+    factory: async_sessionmaker[AsyncSession],
+) -> list[RecurringSchedule]:
+    async with factory() as session:
+        return await SqlAlchemyRecurringScheduleRepo(
+            session
+        ).list_active_for_specialist(_SP)

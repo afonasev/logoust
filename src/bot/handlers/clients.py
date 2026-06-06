@@ -37,8 +37,9 @@ from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
@@ -278,13 +279,13 @@ def _archive_keyboard(page: ClientsPage) -> InlineKeyboardMarkup:
 
 
 def _appt_callback(appt: Appointment, back: str) -> str:
-    # A virtual series occurrence (id is None) opens the series card; a real row
-    # opens its appointment card.
+    # A virtual slot occurrence (id is None) opens the single-meeting card; a real
+    # row opens its appointment card.
     if appt.id is None:
-        assert appt.series_id is not None  # noqa: S101 — virtual rows carry a series
+        assert appt.slot_id is not None  # noqa: S101 — virtual rows carry a slot
         assert appt.origin_date is not None  # noqa: S101
-        # Carry the origin (e.g. the client card) so the series card returns there.
-        return f"recur:card:{appt.series_id}:{appt.origin_date.isoformat()}~{back}"
+        # Carry the origin (e.g. the client card) so the meeting card returns there.
+        return f"recur:occ:{appt.slot_id}:{appt.origin_date.isoformat()}~{back}"
     return f"sched:card:{appt.id}~{back}"
 
 
@@ -591,8 +592,9 @@ class SpecialistMiddleware(BaseMiddleware):
         # (no scheduler). Idempotent + daily-guarded, so it is cheap to repeat.
         async with self._session_factory() as session:
             await settle(
-                SqlAlchemyRecurringRepo(session),
-                SqlAlchemyRecurringExceptionsRepo(session),
+                SqlAlchemyRecurringScheduleRepo(session),
+                SqlAlchemyRecurringSlotRepo(session),
+                SqlAlchemyRecurringSlotOverrideRepo(session),
                 SqlAlchemyAppointmentsRepo(session),
                 specialist_id=specialist.id,
                 now=datetime.now(UTC),
@@ -617,8 +619,9 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
         session: AsyncSession, specialist_id: int, tz: str
     ) -> SeriesContext:
         return await load_series_context(
-            SqlAlchemyRecurringRepo(session),
-            SqlAlchemyRecurringExceptionsRepo(session),
+            SqlAlchemyRecurringScheduleRepo(session),
+            SqlAlchemyRecurringSlotRepo(session),
+            SqlAlchemyRecurringSlotOverrideRepo(session),
             specialist_id=specialist_id,
             now=datetime.now(UTC),
             tz=tz,

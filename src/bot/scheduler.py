@@ -24,8 +24,9 @@ from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.scheduled_messages_repo import SqlAlchemyScheduledMessagesRepo
@@ -67,8 +68,9 @@ async def run_reminder_pass(
                 appointments_repo=SqlAlchemyAppointmentsRepo(session),
                 reminders_repo=SqlAlchemyRemindersRepo(session),
                 specialists_repo=SqlAlchemySpecialistsRepo(session),
-                recurring_repo=SqlAlchemyRecurringRepo(session),
-                exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+                schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+                slot_repo=SqlAlchemyRecurringSlotRepo(session),
+                override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
                 clients_repo=SqlAlchemyClientsRepo(session),
                 messages=ReminderMessages(client_text=client_text),
             )
@@ -94,8 +96,9 @@ async def run_digest_pass(
                     now,
                     appointments_repo=SqlAlchemyAppointmentsRepo(session),
                     specialists_repo=SqlAlchemySpecialistsRepo(session),
-                    recurring_repo=SqlAlchemyRecurringRepo(session),
-                    exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+                    schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+                    slot_repo=SqlAlchemyRecurringSlotRepo(session),
+                    override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
                     clients_repo=SqlAlchemyClientsRepo(session),
                     messages=messages.digest,
                     send=bot.send_message,

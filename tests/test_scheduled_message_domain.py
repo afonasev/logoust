@@ -7,8 +7,8 @@ from src.domain.scheduled_message import (
     ScheduledMessageStatus,
     appointment_target_key,
     is_message_due,
-    series_date_target_key,
-    series_target_key,
+    schedule_target_key,
+    slot_date_target_key,
 )
 
 _TZ = "Asia/Yekaterinburg"  # UTC+5, no DST
@@ -62,8 +62,8 @@ def test_next_occurrence_other_timezone():
 
 def test_target_key_builders():
     assert appointment_target_key(7) == "appt:7"
-    assert series_target_key(3) == "series:3"
-    assert series_date_target_key(3, date(2026, 6, 22)) == "series:3:2026-06-22"
+    assert schedule_target_key(3) == "schedule:3"
+    assert slot_date_target_key(3, date(2026, 6, 22)) == "slot:3:2026-06-22"
 
 
 def test_is_message_due_true_when_queued_and_past():

@@ -10,8 +10,9 @@ from src.bot.messages import BotMessages, WindowsMessages
 from src.domain.schedule import format_ru_date, parse_working_days
 from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.appointments import DayWindows, list_free_windows
@@ -59,8 +60,9 @@ class WindowsHandlers:
             # Future repeats of active series occupy slots too, so they must be
             # subtracted from free windows (availability spec).
             series = await load_series_context(
-                SqlAlchemyRecurringRepo(session),
-                SqlAlchemyRecurringExceptionsRepo(session),
+                SqlAlchemyRecurringScheduleRepo(session),
+                SqlAlchemyRecurringSlotRepo(session),
+                SqlAlchemyRecurringSlotOverrideRepo(session),
                 specialist_id=specialist_id,
                 now=datetime.now(UTC),
                 tz=specialist.timezone,

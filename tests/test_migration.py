@@ -201,14 +201,15 @@ def test_appointments_migration_creates_table_and_backfills_settings(
 
     insp = inspect(engine)
     appt_columns = {c["name"] for c in insp.get_columns("appointments")}
-    # series_id/origin_date are added later by 0006; this test runs to head.
+    # slot_id/origin_date are added by 0006 (as series_id) and renamed by 0014;
+    # this test runs to head.
     assert appt_columns == {
         "id",
         "specialist_id",
         "client_id",
         "starts_at",
         "comment",
-        "series_id",
+        "slot_id",
         "origin_date",
         "created_at",
         "updated_at",
@@ -271,7 +272,8 @@ def test_recurring_migration_adds_tables_and_appointment_columns(
             )
         )
 
-    command.upgrade(cfg, "head")
+    # 0006 in isolation: 0014 later replaces this recurring schema entirely.
+    command.upgrade(cfg, "0006")
 
     insp = inspect(engine)
     assert "recurring_appointments" in insp.get_table_names()
@@ -321,7 +323,8 @@ def test_appointment_reminders_migration_adds_table_and_columns(
             )
         )
 
-    command.upgrade(cfg, "head")
+    # 0007 in isolation: 0014 later renames series_id → slot_id on this journal.
+    command.upgrade(cfg, "0007")
 
     insp = inspect(engine)
     assert "appointment_reminders" in insp.get_table_names()
@@ -620,6 +623,103 @@ def test_deferred_client_notify_migration_adds_table_and_column(
     assert "scheduled_client_messages" not in insp.get_table_names()
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "deferred_notify_time" not in specialist_columns
+    engine.dispose()
+
+
+def test_multi_slot_recurring_migration_replaces_schema_and_wipes_recurring(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0014 and seed the old recurring schema with a materialised
+    # occurrence plus a one-off appointment that must survive the wipe.
+    command.upgrade(cfg, "0013")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO clients "
+                "(specialist_id, child_name, contact_name, status, "
+                "created_at, updated_at) "
+                "VALUES (1, 'Маша', 'Мама', 'active', '2026-05-01', '2026-05-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO recurring_appointments "
+                "(specialist_id, client_id, weekday, time_hhmm, active, "
+                "start_date, materialized_through, created_at, updated_at) "
+                "VALUES (1, 1, 0, '14:00', 1, '2026-05-04', '2026-05-04', "
+                "'2026-05-01', '2026-05-01')"
+            )
+        )
+        # A materialised recurring occurrence (series_id set) → wiped.
+        conn.execute(
+            text(
+                "INSERT INTO appointments "
+                "(specialist_id, client_id, starts_at, series_id, origin_date, "
+                "created_at, updated_at) "
+                "VALUES (1, 1, '2026-05-04 11:00', 1, '2026-05-04', "
+                "'2026-05-01', '2026-05-01')"
+            )
+        )
+        # A one-off appointment (series_id NULL) → kept.
+        conn.execute(
+            text(
+                "INSERT INTO appointments "
+                "(specialist_id, client_id, starts_at, created_at, updated_at) "
+                "VALUES (1, 1, '2026-05-05 09:00', '2026-05-01', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert "recurring_appointments" not in tables
+    assert "recurring_exceptions" not in tables
+    assert {"recurring_schedules", "recurring_slots", "recurring_slot_overrides"} <= (
+        tables
+    )
+    appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    assert "slot_id" in appt_columns
+    assert "series_id" not in appt_columns
+    reminder_columns = {c["name"] for c in insp.get_columns("appointment_reminders")}
+    assert "slot_id" in reminder_columns
+    assert "series_id" not in reminder_columns
+    appt_indexes = {i["name"] for i in insp.get_indexes("appointments")}
+    assert "uq_appointments_slot_origin" in appt_indexes
+    assert "uq_appointments_series_origin" not in appt_indexes
+    slot_indexes = {i["name"] for i in insp.get_indexes("recurring_slots")}
+    assert "ix_recurring_slots_schedule_active" in slot_indexes
+
+    # The recurring occurrence is wiped; the one-off survives.
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT starts_at, slot_id FROM appointments ORDER BY starts_at")
+        ).fetchall()
+    assert rows == [("2026-05-05 09:00", None)]
+
+    command.downgrade(cfg, "0013")
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    assert "recurring_appointments" in tables
+    assert "recurring_schedules" not in tables
+    appt_columns = {c["name"] for c in insp.get_columns("appointments")}
+    assert "series_id" in appt_columns
+    assert "slot_id" not in appt_columns
     engine.dispose()
 
 

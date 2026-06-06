@@ -33,8 +33,9 @@ from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.recurring_repo import (
-    SqlAlchemyRecurringExceptionsRepo,
-    SqlAlchemyRecurringRepo,
+    SqlAlchemyRecurringScheduleRepo,
+    SqlAlchemyRecurringSlotOverrideRepo,
+    SqlAlchemyRecurringSlotRepo,
 )
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.services.digest import collect_today_digest
@@ -361,8 +362,9 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
                 specialist,
                 datetime.now(UTC),
                 appointments_repo=SqlAlchemyAppointmentsRepo(session),
-                recurring_repo=SqlAlchemyRecurringRepo(session),
-                exceptions_repo=SqlAlchemyRecurringExceptionsRepo(session),
+                schedule_repo=SqlAlchemyRecurringScheduleRepo(session),
+                slot_repo=SqlAlchemyRecurringSlotRepo(session),
+                override_repo=SqlAlchemyRecurringSlotOverrideRepo(session),
                 clients_repo=SqlAlchemyClientsRepo(session),
                 messages=self._dm,
             )

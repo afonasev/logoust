@@ -45,14 +45,14 @@ def appointment_target_key(appointment_id: int) -> str:
     return f"appt:{appointment_id}"
 
 
-def series_target_key(series_id: int) -> str:
-    """Stable supersede key for a whole series."""
-    return f"series:{series_id}"
+def schedule_target_key(schedule_id: int) -> str:
+    """Stable supersede key for a whole recurring schedule."""
+    return f"schedule:{schedule_id}"
 
 
-def series_date_target_key(series_id: int, origin_date: date) -> str:
-    """Stable supersede key for a single date of a series."""
-    return f"series:{series_id}:{origin_date.isoformat()}"
+def slot_date_target_key(slot_id: int, origin_date: date) -> str:
+    """Stable supersede key for a single occurrence of a slot."""
+    return f"slot:{slot_id}:{origin_date.isoformat()}"
 
 
 def is_message_due(message: ScheduledClientMessage, now: datetime) -> bool:

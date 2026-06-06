@@ -65,10 +65,10 @@ def build_reminder_keyboard(
 def _open_card_callback(
     reminder: AppointmentReminder, appointment_id: int | None
 ) -> str:
-    # Virtual series repeat → series card by (series_id, origin_date); one-off →
+    # Virtual slot repeat → meeting card by (slot_id, origin_date); one-off →
     # its appointment card; a moved/missing one-off falls back to the day view.
-    if reminder.series_id is not None and reminder.origin_date is not None:
-        return f"recur:card:{reminder.series_id}:{reminder.origin_date.isoformat()}"
+    if reminder.slot_id is not None and reminder.origin_date is not None:
+        return f"recur:occ:{reminder.slot_id}:{reminder.origin_date.isoformat()}"
     if appointment_id is not None:
         return f"sched:card:{appointment_id}"
     return "sched:day_view:" + reminder.starts_at.date().isoformat()

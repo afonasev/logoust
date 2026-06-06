@@ -46,7 +46,7 @@ class AppointmentReminderORM(Base):
         Integer, ForeignKey("clients.id"), nullable=False
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    series_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    slot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     origin_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -65,7 +65,7 @@ def to_domain(orm: AppointmentReminderORM) -> AppointmentReminder:
         specialist_id=orm.specialist_id,
         client_id=orm.client_id,
         starts_at=_as_utc(orm.starts_at),
-        series_id=orm.series_id,
+        slot_id=orm.slot_id,
         origin_date=orm.origin_date,
         status=ReminderStatus(orm.status),
         sent_at=_as_utc(orm.sent_at),
@@ -88,7 +88,7 @@ class SqlAlchemyRemindersRepo:
                 specialist_id=reminder.specialist_id,
                 client_id=reminder.client_id,
                 starts_at=reminder.starts_at,
-                series_id=reminder.series_id,
+                slot_id=reminder.slot_id,
                 origin_date=reminder.origin_date,
                 status=reminder.status.value,
                 sent_at=reminder.sent_at,

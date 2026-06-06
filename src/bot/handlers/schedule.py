@@ -84,6 +84,7 @@ from src.services.appointments import (
     reschedule_appointment,
     schedule_landing_day,
     taken_slot_times,
+    update_appointment_comment,
 )
 from src.services.clients import client_name_map
 from src.services.message_templates import resolve_template
@@ -97,6 +98,7 @@ from src.services.recurring import (
     occurrences_in_window,
     remove_slot,
     set_occurrence_comment,
+    set_schedule_comment,
     skip_occurrence,
     stop_schedule,
 )
@@ -128,7 +130,8 @@ _CB_NOTIFY_NO = "sched:ntfno"
 
 class Schedule(StatesGroup):
     custom_time = State()
-    comment = State()
+    comment = State()  # comment at creation
+    edit_comment = State()  # comment edit from the appointment card
     notify_custom_time = State()
 
 
@@ -296,6 +299,11 @@ def _card_keyboard(
                 ),
                 InlineKeyboardButton(
                     text=m.btn_delete, callback_data=f"sched:del:{appt.id}~{back}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=m.btn_comment, callback_data=f"sched:cmt:{appt.id}~{back}"
                 ),
             ],
             [InlineKeyboardButton(text=_BTN_BACK, callback_data=back)],
@@ -901,6 +909,14 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 client_id, specialist_id
             )
 
+    async def _load_appt(
+        self, appointment_id: int, specialist_id: int
+    ) -> Appointment | None:
+        async with self._session_factory() as session:
+            return await SqlAlchemyAppointmentsRepo(session).get_for_specialist(
+                appointment_id, specialist_id
+            )
+
     # --- navigation builders (re-open a target from another router) -----------
 
     async def nav_day(
@@ -1246,6 +1262,51 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             reply_markup=_delete_confirm_keyboard(appt_id, back, self._m),
         )
         await callback.answer()
+
+    async def start_edit_comment(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        # "sched:cmt:<id>[~<origin-back>]" — edit a one-off appointment's comment.
+        head, _, back = (callback.data or "").partition("~")
+        appt_id = int(head.rsplit(":", 1)[1])
+        appt = await self._load_appt(appt_id, specialist_id)
+        if appt is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        await state.update_data(
+            flow="edit_comment",
+            appointment_id=appt_id,
+            card=f"sched:card:{appt_id}~{back}",
+        )
+        await state.set_state(Schedule.edit_comment)
+        await _callback_message(callback).edit_text(
+            self._m.ask_edit_comment, reply_markup=_cancel_keyboard()
+        )
+        await callback.answer()
+
+    async def apply_edit_comment(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        data = await state.get_data()
+        comment = (message.text or "").strip() or None
+        async with self._session_factory() as session:
+            saved = await update_appointment_comment(
+                SqlAlchemyAppointmentsRepo(session),
+                appointment_id=data["appointment_id"],
+                specialist_id=specialist_id,
+                comment=comment,
+                now=datetime.now(UTC),
+            )
+        card = data.get("card") or ""
+        await state.clear()
+        if saved is None:
+            await message.answer(self._m.not_found)
+            return
+        await message.answer(self._m.comment_set)
+        await _open_card(
+            self._navigator, message, specialist_id=specialist_id, card_back=card
+        )
 
     async def do_delete(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
@@ -1674,6 +1735,7 @@ class Recurring(StatesGroup):
     # other steps are callback-driven and dispatch on the FSM `flow` value.
     custom_time = State()
     comment = State()  # schedule-level comment (creation)
+    sched_comment = State()  # schedule-level comment (edit from the schedule card)
     occ_comment = State()  # single-occurrence comment
 
 
@@ -1813,6 +1875,12 @@ def _schedule_card_keyboard(
         rows.append([InlineKeyboardButton(text=label, callback_data=cb)])
     rows.extend(
         (
+            [
+                InlineKeyboardButton(
+                    text=rm.btn_schedule_comment,
+                    callback_data=_with_back(f"recur:schedcmt:{schedule_id}", back),
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text=rm.btn_configure, callback_data=f"recur:cfg:{schedule_id}"
@@ -2787,6 +2855,52 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             )
         await callback.answer()
 
+    # --- edit the series' shared comment from the schedule card --------------
+
+    async def start_sched_comment(
+        self, callback: CallbackQuery, state: FSMContext, specialist_id: int
+    ) -> None:
+        head, back = _split_back(callback.data)
+        schedule_id = _last_int(head)
+        schedule = await self._load_schedule(schedule_id, specialist_id)
+        if schedule is None:
+            await callback.answer(self._m.not_found, show_alert=True)
+            return
+        await state.clear()
+        await state.update_data(
+            flow="sched_comment",
+            schedule_id=schedule_id,
+            card=_with_back(f"recur:sched:{schedule_id}", back),
+        )
+        await state.set_state(Recurring.sched_comment)
+        await _callback_message(callback).edit_text(
+            self._m.ask_schedule_comment, reply_markup=_recur_cancel_keyboard()
+        )
+        await callback.answer()
+
+    async def apply_sched_comment(
+        self, message: Message, state: FSMContext, specialist_id: int
+    ) -> None:
+        data = await state.get_data()
+        comment = (message.text or "").strip() or None
+        async with self._session_factory() as session:
+            saved = await set_schedule_comment(
+                SqlAlchemyRecurringScheduleRepo(session),
+                schedule_id=data["schedule_id"],
+                specialist_id=specialist_id,
+                comment=comment,
+                now=datetime.now(UTC),
+            )
+        card = data.get("card") or ""
+        await state.clear()
+        if saved is None:
+            await message.answer(self._m.not_found)
+            return
+        await message.answer(self._m.comment_set)
+        await _open_card(
+            self._navigator, message, specialist_id=specialist_id, card_back=card
+        )
+
     # --- comment a single occurrence -----------------------------------------
 
     async def start_comment(
@@ -2884,6 +2998,7 @@ def _build_navigator(
 def _register_recurring(router: Router, r: RecurringHandlers) -> None:
     router.message.register(r.apply_custom_time, Recurring.custom_time)
     router.message.register(r.apply_schedule_comment, Recurring.comment)
+    router.message.register(r.apply_sched_comment, Recurring.sched_comment)
     router.message.register(r.apply_occ_comment, Recurring.occ_comment)
 
     # creation wizard (entered from the appointment flow's "make regular")
@@ -2895,6 +3010,10 @@ def _register_recurring(router: Router, r: RecurringHandlers) -> None:
     router.callback_query.register(r.pick_slot, F.data.startswith("recur:tslot:"))
     router.callback_query.register(r.ask_custom_time, F.data == "recur:tother")
     router.callback_query.register(r.cancel, F.data == "recur:cancel")
+    # edit the series' shared comment from the schedule card
+    router.callback_query.register(
+        r.start_sched_comment, F.data.startswith("recur:schedcmt:")
+    )
     # two-level cards
     router.callback_query.register(r.show_schedule, F.data.startswith("recur:sched:"))
     router.callback_query.register(r.show_meeting, F.data.startswith("recur:occ:"))
@@ -2943,6 +3062,7 @@ def build_router(
     router.message.register(h.show_feed, F.text == messages.schedule.button)
     router.message.register(h.apply_custom_time, Schedule.custom_time)
     router.message.register(h.apply_comment, Schedule.comment)
+    router.message.register(h.apply_edit_comment, Schedule.edit_comment)
     router.message.register(h.apply_notify_custom_time, Schedule.notify_custom_time)
 
     router.callback_query.register(h.start_create, F.data.startswith("sched:new:"))
@@ -2967,6 +3087,9 @@ def build_router(
     router.callback_query.register(h.show_card, F.data.startswith("sched:card:"))
     router.callback_query.register(h.confirm_delete, F.data.startswith("sched:del:"))
     router.callback_query.register(h.do_delete, F.data.startswith("sched:delyes:"))
+    router.callback_query.register(
+        h.start_edit_comment, F.data.startswith("sched:cmt:")
+    )
     router.callback_query.register(h.notify_skip, F.data == _CB_NOTIFY_NO)
     router.callback_query.register(h.ask_when, F.data == _CB_NOTIFY_WHEN)
     router.callback_query.register(h.notify_now, F.data == _CB_NOTIFY_NOW)

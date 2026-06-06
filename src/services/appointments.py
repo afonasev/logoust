@@ -218,6 +218,26 @@ async def reschedule_appointment(  # noqa: PLR0913
     return moved
 
 
+async def update_appointment_comment(
+    repo: AppointmentsRepo,
+    *,
+    appointment_id: int,
+    specialist_id: int,
+    comment: str | None,
+    now: datetime,
+) -> Appointment | None:
+    updated = await repo.update_comment(
+        appointment_id, specialist_id, comment=comment, updated_at=now
+    )
+    if updated is None:
+        return None
+    logger.info(
+        "appointment.commented",
+        extra={"specialist_id": specialist_id, "appointment_id": appointment_id},
+    )
+    return updated
+
+
 async def delete_appointment(
     repo: AppointmentsRepo,
     *,

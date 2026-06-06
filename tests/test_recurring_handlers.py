@@ -1417,6 +1417,72 @@ async def test_apply_occ_comment_foreign_reports_not_found(
     assert await _list_overrides(session_factory, slot_id) == []
 
 
+async def test_edit_schedule_comment_updates_series(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(
+        session_factory, client_id=client_id, comment="старый"
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_sched_comment(
+        _fake_callback(f"recur:schedcmt:{schedule_id}"), state, _SP
+    )
+    assert state.store["flow"] == "sched_comment"
+    msg = _fake_message("новый общий комментарий")
+    await h.apply_sched_comment(msg, state, _SP)
+    assert messages.recurring.comment_set in _texts(msg.answer)
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.comment == "новый общий комментарий"
+
+
+async def test_edit_schedule_comment_clears_when_blank(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(
+        session_factory, client_id=client_id, comment="старый"
+    )
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "sched_comment", "schedule_id": schedule_id, "card": ""})
+    msg = _fake_message("   ")
+    await h.apply_sched_comment(msg, state, _SP)
+    schedule = await _load_schedule(session_factory, schedule_id)
+    assert schedule is not None
+    assert schedule.comment is None
+
+
+async def test_start_sched_comment_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:schedcmt:{schedule_id}")
+    await h.start_sched_comment(cb, _state(), other)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_apply_sched_comment_foreign_reports_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    other = await _seed_other_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "sched_comment", "schedule_id": schedule_id, "card": ""})
+    msg = _fake_message("x")
+    await h.apply_sched_comment(msg, state, other)
+    assert messages.recurring.not_found in _texts(msg.answer)
+
+
 # --- cancel -----------------------------------------------------------------
 
 

@@ -150,6 +150,40 @@ async def test_set_active_removes_from_active_list(session: AsyncSession):
     assert await repo.list_active_for_specialist(_SPECIALIST) == []
 
 
+async def test_set_comment_updates_value(session: AsyncSession):
+    await _seed_owners(session)
+    repo = SqlAlchemyRecurringScheduleRepo(session)
+    saved = await repo.add(_schedule())
+    assert saved.id is not None
+
+    updated_at = datetime(2026, 6, 6, 9, 0, tzinfo=UTC)
+    updated = await repo.set_comment(
+        saved.id, _SPECIALIST, comment="новый", updated_at=updated_at
+    )
+    assert updated is not None
+    assert updated.comment == "новый"
+    assert updated.updated_at == updated_at
+
+    cleared = await repo.set_comment(
+        saved.id, _SPECIALIST, comment=None, updated_at=updated_at
+    )
+    assert cleared is not None
+    assert cleared.comment is None
+
+
+async def test_set_comment_rejects_other_owner(session: AsyncSession):
+    await _seed_owners(session)
+    repo = SqlAlchemyRecurringScheduleRepo(session)
+    saved = await repo.add(_schedule())
+    assert saved.id is not None
+    assert (
+        await repo.set_comment(
+            saved.id, _OTHER_SPECIALIST, comment="x", updated_at=_NOW
+        )
+        is None
+    )
+
+
 async def test_set_active_rejects_other_owner(session: AsyncSession):
     await _seed_owners(session)
     repo = SqlAlchemyRecurringScheduleRepo(session)

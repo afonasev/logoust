@@ -72,6 +72,15 @@ class AppointmentsRepo(Protocol):
         updated_at: datetime,
     ) -> Appointment | None: ...
 
+    async def update_comment(  # pragma: no cover
+        self,
+        appointment_id: int,
+        specialist_id: int,
+        *,
+        comment: str | None,
+        updated_at: datetime,
+    ) -> Appointment | None: ...
+
     async def delete(  # pragma: no cover
         self, appointment_id: int, specialist_id: int
     ) -> bool: ...

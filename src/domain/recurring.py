@@ -77,6 +77,15 @@ class RecurringScheduleRepo(Protocol):
         updated_at: datetime,
     ) -> RecurringSchedule | None: ...
 
+    async def set_comment(  # pragma: no cover
+        self,
+        schedule_id: int,
+        specialist_id: int,
+        *,
+        comment: str | None,
+        updated_at: datetime,
+    ) -> RecurringSchedule | None: ...
+
 
 class RecurringSlotRepo(Protocol):
     # Protocol method bodies are unimplemented placeholders by design.

@@ -27,6 +27,7 @@ from src.services.appointments import (
     reschedule_appointment,
     schedule_landing_day,
     taken_slot_times,
+    update_appointment_comment,
 )
 from src.services.recurring import SeriesContext
 
@@ -121,6 +122,40 @@ async def test_reschedule_missing_returns_none(session: AsyncSession):
         now=_NOW,
     )
     assert moved is None
+
+
+async def test_update_comment_sets_and_clears(session: AsyncSession):
+    appt = await _create(session, day=date(2026, 6, 5), comment="старый")
+    assert appt.id is not None
+    updated = await update_appointment_comment(
+        SqlAlchemyAppointmentsRepo(session),
+        appointment_id=appt.id,
+        specialist_id=_SPECIALIST,
+        comment="новый",
+        now=_NOW,
+    )
+    assert updated is not None
+    assert updated.comment == "новый"
+    cleared = await update_appointment_comment(
+        SqlAlchemyAppointmentsRepo(session),
+        appointment_id=appt.id,
+        specialist_id=_SPECIALIST,
+        comment=None,
+        now=_NOW,
+    )
+    assert cleared is not None
+    assert cleared.comment is None
+
+
+async def test_update_comment_missing_returns_none(session: AsyncSession):
+    result = await update_appointment_comment(
+        SqlAlchemyAppointmentsRepo(session),
+        appointment_id=999,
+        specialist_id=_SPECIALIST,
+        comment="x",
+        now=_NOW,
+    )
+    assert result is None
 
 
 async def test_delete_removes_and_reports(session: AsyncSession):

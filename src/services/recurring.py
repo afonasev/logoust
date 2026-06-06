@@ -554,6 +554,27 @@ async def set_occurrence_comment(  # noqa: PLR0913
     return ov
 
 
+async def set_schedule_comment(
+    schedule_repo: RecurringScheduleRepo,
+    *,
+    schedule_id: int,
+    specialist_id: int,
+    comment: str | None,
+    now: datetime,
+) -> RecurringSchedule | None:
+    """Set the series' shared default comment inherited by every occurrence."""
+    schedule = await schedule_repo.set_comment(
+        schedule_id, specialist_id, comment=comment, updated_at=now
+    )
+    if schedule is None:
+        return None
+    logger.info(
+        "recurring.schedule_commented",
+        extra={"specialist_id": specialist_id, "schedule_id": schedule_id},
+    )
+    return schedule
+
+
 # --- materialisation --------------------------------------------------------
 
 

@@ -221,6 +221,22 @@ class SqlAlchemyAppointmentsRepo:
         await self._session.commit()
         return to_domain(orm)
 
+    async def update_comment(
+        self,
+        appointment_id: int,
+        specialist_id: int,
+        *,
+        comment: str | None,
+        updated_at: datetime,
+    ) -> Appointment | None:
+        orm = await self._get_owned(appointment_id, specialist_id)
+        if orm is None:
+            return None
+        orm.comment = comment
+        orm.updated_at = updated_at
+        await self._session.commit()
+        return to_domain(orm)
+
     async def insert_occurrence(self, occurrence: Appointment) -> bool:
         # Insert-or-ignore on UNIQUE(slot_id, origin_date): settle may run
         # concurrently or repeatedly, so a duplicate occurrence is a no-op, not an

@@ -645,6 +645,93 @@ async def test_confirm_then_do_delete(
         ) is None
 
 
+async def test_card_has_comment_button(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"sched:card:{appt.id}")
+    await h.show_card(cb, _SP)
+    assert any(
+        c and c.startswith(f"sched:cmt:{appt.id}")
+        for c in _callbacks(_markup(cb.message.edit_text))
+    )
+
+
+async def test_edit_comment_updates_appointment(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(
+        session_factory, client_id=client_id, starts_at=_FUTURE, comment="старый"
+    )
+    h = _handlers(messages, session_factory)
+    state = _state()
+    await h.start_edit_comment(_fake_callback(f"sched:cmt:{appt.id}"), state, _SP)
+    assert state.store["flow"] == "edit_comment"
+    msg = _fake_message("новый комментарий")
+    await h.apply_edit_comment(msg, state, _SP)
+    assert messages.schedule.comment_set in _texts(msg.answer)
+    async with session_factory() as session:
+        assert appt.id is not None
+        reloaded = await SqlAlchemyAppointmentsRepo(session).get_for_specialist(
+            appt.id, _SP
+        )
+    assert reloaded is not None
+    assert reloaded.comment == "новый комментарий"
+
+
+async def test_edit_comment_blank_clears(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(
+        session_factory, client_id=client_id, starts_at=_FUTURE, comment="старый"
+    )
+    h = _handlers(messages, session_factory)
+    assert appt.id is not None
+    state = _state({"flow": "edit_comment", "appointment_id": appt.id, "card": ""})
+    msg = _fake_message("   ")
+    await h.apply_edit_comment(msg, state, _SP)
+    async with session_factory() as session:
+        reloaded = await SqlAlchemyAppointmentsRepo(session).get_for_specialist(
+            appt.id, _SP
+        )
+    assert reloaded is not None
+    assert reloaded.comment is None
+
+
+async def test_start_edit_comment_foreign_blocked(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback(f"sched:cmt:{appt.id}")
+    await h.start_edit_comment(cb, _state(), 999)
+    cb.answer.assert_awaited_once_with(messages.schedule.not_found, show_alert=True)
+    cb.message.edit_text.assert_not_awaited()
+
+
+async def test_apply_edit_comment_foreign_reports_not_found(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    appt = await _seed_appt(session_factory, client_id=client_id, starts_at=_FUTURE)
+    h = _handlers(messages, session_factory)
+    assert appt.id is not None
+    state = _state({"flow": "edit_comment", "appointment_id": appt.id, "card": ""})
+    msg = _fake_message("x")
+    await h.apply_edit_comment(msg, state, 999)
+    assert messages.schedule.not_found in _texts(msg.answer)
+
+
 async def test_day_view_shows_virtual_recurring_occurrence(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):

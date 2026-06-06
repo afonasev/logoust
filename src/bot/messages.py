@@ -77,6 +77,8 @@ class ScheduleMessages:
     ask_custom_time: str
     bad_time: str
     ask_comment: str
+    ask_edit_comment: str
+    comment_set: str
     ask_regular: str
     btn_regular_yes: str
     btn_regular_no: str
@@ -91,6 +93,7 @@ class ScheduleMessages:
     btn_client_history: str
     btn_reschedule: str
     btn_delete: str
+    btn_comment: str
     btn_confirm_delete: str
     btn_other_time: str
     btn_history: str
@@ -145,6 +148,8 @@ class RecurringMessages:
     occ_btn: str
     btn_configure: str
     btn_stop: str
+    btn_schedule_comment: str
+    ask_schedule_comment: str
     # single-meeting card (screen 2)
     meeting_card: str
     btn_move: str
@@ -437,6 +442,8 @@ def load_messages(path: Path) -> BotMessages:
             ask_custom_time=_require(data, "schedule.ask_custom_time"),
             bad_time=_require(data, "schedule.bad_time"),
             ask_comment=_require(data, "schedule.ask_comment"),
+            ask_edit_comment=_require(data, "schedule.ask_edit_comment"),
+            comment_set=_require(data, "schedule.comment_set"),
             ask_regular=_require(data, "schedule.ask_regular"),
             btn_regular_yes=_require(data, "schedule.btn_regular_yes"),
             btn_regular_no=_require(data, "schedule.btn_regular_no"),
@@ -451,6 +458,7 @@ def load_messages(path: Path) -> BotMessages:
             btn_client_history=_require(data, "schedule.btn_client_history"),
             btn_reschedule=_require(data, "schedule.btn_reschedule"),
             btn_delete=_require(data, "schedule.btn_delete"),
+            btn_comment=_require(data, "schedule.btn_comment"),
             btn_confirm_delete=_require(data, "schedule.btn_confirm_delete"),
             btn_other_time=_require(data, "schedule.btn_other_time"),
             btn_history=_require(data, "schedule.btn_history"),
@@ -503,6 +511,8 @@ def load_messages(path: Path) -> BotMessages:
             occ_btn=_require(data, "recurring.occ_btn"),
             btn_configure=_require(data, "recurring.btn_configure"),
             btn_stop=_require(data, "recurring.btn_stop"),
+            btn_schedule_comment=_require(data, "recurring.btn_schedule_comment"),
+            ask_schedule_comment=_require(data, "recurring.ask_schedule_comment"),
             meeting_card=_require(data, "recurring.meeting_card").strip(),
             btn_move=_require(data, "recurring.btn_move"),
             btn_skip=_require(data, "recurring.btn_skip"),

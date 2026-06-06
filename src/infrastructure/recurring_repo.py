@@ -209,6 +209,22 @@ class SqlAlchemyRecurringScheduleRepo:
         await self._session.commit()
         return schedule_to_domain(orm)
 
+    async def set_comment(
+        self,
+        schedule_id: int,
+        specialist_id: int,
+        *,
+        comment: str | None,
+        updated_at: datetime,
+    ) -> RecurringSchedule | None:
+        orm = await self._get_owned(schedule_id, specialist_id)
+        if orm is None:
+            return None
+        orm.comment = comment
+        orm.updated_at = updated_at
+        await self._session.commit()
+        return schedule_to_domain(orm)
+
     async def _get_owned(
         self, schedule_id: int, specialist_id: int
     ) -> RecurringScheduleORM | None:

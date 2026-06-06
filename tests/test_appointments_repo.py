@@ -134,6 +134,34 @@ async def test_update_starts_at_other_owner_returns_none(session: AsyncSession):
     assert result is None
 
 
+async def test_update_comment(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    ts = datetime(2026, 6, 5, tzinfo=UTC)
+    updated = await repo.update_comment(
+        saved.id, _SPECIALIST, comment="новый", updated_at=ts
+    )
+    assert updated is not None
+    assert updated.comment == "новый"
+    assert updated.updated_at == ts
+    cleared = await repo.update_comment(
+        saved.id, _SPECIALIST, comment=None, updated_at=ts
+    )
+    assert cleared is not None
+    assert cleared.comment is None
+
+
+async def test_update_comment_other_owner_returns_none(session: AsyncSession):
+    repo = SqlAlchemyAppointmentsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    result = await repo.update_comment(
+        saved.id, 999, comment="x", updated_at=datetime.now(UTC)
+    )
+    assert result is None
+
+
 async def test_delete_owned_and_foreign(session: AsyncSession):
     repo = SqlAlchemyAppointmentsRepo(session)
     saved = await repo.add(_make())

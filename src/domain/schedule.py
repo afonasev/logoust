@@ -132,6 +132,26 @@ def generate_slots(day_start: str, day_end: str, slot_minutes: int) -> list[str]
     return slots
 
 
+def occupied_grid_slots(
+    grid: list[str], starts: set[str], slot_minutes: int
+) -> set[str]:
+    """Grid cells whose interval overlaps any appointment start.
+
+    A cell `s` is occupied by a start `a` when the half-open intervals
+    `[a, a+slot)` and `[s, s+slot)` intersect — for equal durations that is
+    `|a - s| < slot_minutes` (touching edges do not count: a 14:00 start does not
+    occupy 14:30 at a 30-min step). Returns the subset of `grid` cells overlapped by
+    at least one start, so a start off the grid (e.g. 14:10) still marks both
+    neighbouring cells.
+    """
+    start_minutes = [_to_minutes(start) for start in starts]
+    return {
+        cell
+        for cell in grid
+        if any(abs(start - _to_minutes(cell)) < slot_minutes for start in start_minutes)
+    }
+
+
 _MAX_WEEKDAY = 6  # Sunday, with Monday = 0 (date.weekday convention).
 
 

@@ -13,6 +13,7 @@ from src.bot.messages import BotMessages
 from src.domain.recurring import RecurringSchedule, RecurringSlot
 from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.domain.schedule import today_in_tz, wall_to_utc
+from src.infrastructure.appointments_repo import SqlAlchemyAppointmentsRepo
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.recurring_repo import (
     SqlAlchemyRecurringScheduleRepo,
@@ -21,6 +22,7 @@ from src.infrastructure.recurring_repo import (
 )
 from src.infrastructure.reminders_repo import SqlAlchemyRemindersRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
+from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
 from src.services.invites import create_invite
 
@@ -88,6 +90,10 @@ def _markup(mock: AsyncMock) -> Any:
 
 def _callbacks(markup: Any) -> list[str | None]:
     return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+
+def _labels(markup: Any) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
 
 
 # --- seeding ----------------------------------------------------------------
@@ -210,6 +216,27 @@ async def _upsert_override(  # noqa: PLR0913
             moved_to=moved_to,
             comment=comment,
             created_at=datetime.now(UTC),
+        )
+
+
+async def _seed_appt(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    client_id: int,
+    day: date,
+    hhmm: str,
+    comment: str | None = None,
+) -> None:
+    async with factory() as session:
+        await create_appointment(
+            SqlAlchemyAppointmentsRepo(session),
+            specialist_id=_SP,
+            client_id=client_id,
+            day=day,
+            hhmm=hhmm,
+            comment=comment,
+            tz=_TZ,
+            now=datetime.now(UTC),
         )
 
 
@@ -802,6 +829,30 @@ async def test_edit_slot_day_change(
     assert slots[0].start_date == _next_weekday(today, 3)
 
 
+async def test_start_slot_day_same_weekday_marks_current(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # Re-choosing the slot's own weekday keeps its time as the 🟡 "current" marker.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=_next_weekday(today, 0),
+        time_hhmm="14:00",
+    )
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_slot_day(_fake_callback(f"recur:slotday:{slot_id}"), state, _SP)
+    cb = _fake_callback("recur:wd:0")  # the same (Monday) weekday
+    await h.pick_weekday(cb, state, _SP)
+    labels = _labels(_markup(cb.message.edit_text))
+    assert "🟡 14:00" in labels
+
+
 async def test_edit_slot_foreign_reports_not_found(
     messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
 ):
@@ -875,6 +926,90 @@ async def test_add_slot_via_config(
     assert messages.recurring.edited in _texts(msg_cb.message.answer)
     slots = await _load_slots(session_factory, schedule_id)
     assert {(s.weekday, s.time_hhmm) for s in slots} == {(0, "12:00"), (4, "15:00")}
+
+
+# --- slot occupancy in the recurring pickers (change: slot-occupancy-overlap) ---
+
+
+async def test_pick_weekday_create_marks_occupancy(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # Creating a regular slot now computes occupancy on the nearest matching weekday
+    # date (previously the grid was always drawn with an empty taken set).
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    monday = _next_weekday(today, 0)
+    await _seed_appt(session_factory, client_id=client_id, day=monday, hhmm="14:00")
+    h = _recur(messages, session_factory)
+    state = _state({"flow": "rcreate", "client_id": client_id, "slots": []})
+    cb = _fake_callback("recur:wd:0")  # Monday
+    await h.pick_weekday(cb, state, _SP)
+    labels = _labels(_markup(cb.message.edit_text))
+    assert "🔴 14:00" in labels
+    assert "🟢 09:00" in labels
+    # The day's list is shown above the grid.
+    assert messages.schedule.pick_time in _texts(cb.message.edit_text)[0]
+
+
+async def test_start_slot_time_marks_current_and_taken(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # Editing a slot's time: its own time is the "current" marker (not taken), while
+    # another booking on the same weekday date shows as taken.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    monday = _next_weekday(today, 0)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=monday,
+        time_hhmm="14:00",
+    )
+    await _seed_appt(session_factory, client_id=client_id, day=monday, hhmm="16:00")
+    h = _recur(messages, session_factory)
+    cb = _fake_callback(f"recur:slottime:{slot_id}")
+    await h.start_slot_time(cb, _state(), _SP)
+    labels = _labels(_markup(cb.message.edit_text))
+    assert "🟡 14:00" in labels  # the slot being edited — its own time, not taken
+    assert "🔴 16:00" in labels  # another booking
+
+
+async def test_pick_move_day_off_grid_marks_both_overlapped(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # An off-grid booking (14:10, hourly grid) marks both overlapped cells (14:00 and
+    # 15:00); the non-overlapping neighbours stay free.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    today = today_in_tz(datetime.now(UTC), _TZ)
+    schedule_id = await _seed_schedule(session_factory, client_id=client_id)
+    occ_day = _next_weekday(today, 0)
+    slot_id = await _seed_slot(
+        session_factory,
+        schedule_id=schedule_id,
+        weekday=0,
+        start_date=occ_day,
+        time_hhmm="09:00",
+    )
+    new_day = occ_day + timedelta(days=2)
+    await _seed_appt(session_factory, client_id=client_id, day=new_day, hhmm="14:10")
+    h = _recur(messages, session_factory)
+    state = _state()
+    await h.start_move(
+        _fake_callback(f"recur:occmove:{slot_id}:{occ_day.isoformat()}"), state, _SP
+    )
+    cb = _fake_callback(f"recur:day:{new_day.year}:{new_day.month}:{new_day.day}")
+    await h.pick_move_day(cb, state, _SP)
+    labels = _labels(_markup(cb.message.edit_text))
+    assert "🔴 14:00" in labels
+    assert "🔴 15:00" in labels
+    assert "🟢 13:00" in labels
+    # The off-grid 14:10 booking is listed in the text above the grid.
+    assert "14:10" in _texts(cb.message.edit_text)[0]
 
 
 async def test_edit_slot_asks_series_notify_for_linked(

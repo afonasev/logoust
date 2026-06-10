@@ -9,6 +9,7 @@ from src.domain.schedule import (
     is_known_timezone,
     nearest_working_day,
     next_working_days,
+    occupied_grid_slots,
     parse_hhmm,
     parse_working_days,
     today_in_tz,
@@ -58,6 +59,30 @@ def test_generate_slots_hourly():
 
 def test_generate_slots_empty_when_start_not_before_end():
     assert generate_slots("20:00", "09:00", 60) == []
+
+
+_GRID_30 = ["13:30", "14:00", "14:30", "15:00"]
+
+
+def test_occupied_grid_slots_off_grid_marks_two_neighbours():
+    # 14:10 at a 30-min step overlaps [14:00,14:30) and [14:30,15:00).
+    assert occupied_grid_slots(_GRID_30, {"14:10"}, 30) == {"14:00", "14:30"}
+
+
+def test_occupied_grid_slots_on_grid_marks_single_cell():
+    # An exact 14:00 start touches but does not cross 14:30 — only 14:00 is taken.
+    assert occupied_grid_slots(_GRID_30, {"14:00"}, 30) == {"14:00"}
+
+
+def test_occupied_grid_slots_boundaries_free():
+    # 13:30 and 15:00 do not overlap [14:10, 14:40).
+    occupied = occupied_grid_slots(_GRID_30, {"14:10"}, 30)
+    assert "13:30" not in occupied
+    assert "15:00" not in occupied
+
+
+def test_occupied_grid_slots_empty_starts():
+    assert occupied_grid_slots(_GRID_30, set(), 30) == set()
 
 
 def test_wall_to_utc_and_back_round_trip():

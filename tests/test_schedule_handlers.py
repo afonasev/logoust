@@ -11,8 +11,10 @@ from src.bot.handlers.schedule import (
     ScheduleHandlers,
     _build_navigator,
     build_calendar,
+    build_recur_slots_keyboard,
     build_slots_keyboard,
     render_card,
+    render_day_appointments_list,
 )
 from src.bot.messages import BotMessages
 from src.domain.appointment import Appointment
@@ -254,10 +256,65 @@ def test_build_slots_keyboard_full_rows():
     assert "sched:slot:1100" in _callbacks(markup)
 
 
+def test_build_recur_slots_keyboard_current_marker_wins():
+    # The edited slot's own time shows the "current" marker, not taken/free.
+    markup = build_recur_slots_keyboard(
+        ["09:00", "10:00", "11:00"],
+        {"10:00"},
+        _messages_schedule(),
+        current="11:00",
+    )
+    labels = _button_texts(markup)
+    assert "🟢 09:00" in labels  # free
+    assert "🔴 10:00" in labels  # taken by another booking
+    assert "🟡 11:00" in labels  # the slot being edited
+
+
 def _messages_schedule():
     from src.bot.messages import DEFAULT_MESSAGES_PATH, load_messages
 
     return load_messages(DEFAULT_MESSAGES_PATH).schedule
+
+
+def _day_appt(
+    day: date, hhmm: str, *, client_id: int, comment: str | None
+) -> Appointment:
+    starts_at = wall_to_utc(day, hhmm, _TZ)
+    return Appointment(
+        id=1,
+        specialist_id=_SP,
+        client_id=client_id,
+        starts_at=starts_at,
+        comment=comment,
+        created_at=starts_at,
+        updated_at=starts_at,
+    )
+
+
+def test_render_day_appointments_list_formats_sorted_lines():
+    m = _messages_schedule()
+    day = date(2030, 1, 15)
+    off_grid = _day_appt(day, "14:10", client_id=2, comment="привет")
+    early = _day_appt(day, "09:00", client_id=3, comment=None)
+    text = render_day_appointments_list(
+        day, [off_grid, early], {2: "Петя", 3: "Маша"}, _TZ, m
+    )
+    lines = text.splitlines()
+    assert lines[0] == m.day_list_title.format(date=format_ru_date(day))
+    # Sorted by time: 09:00 before the off-grid 14:10.
+    assert "09:00" in lines[1]
+    assert "Маша" in lines[1]
+    assert "14:10" in lines[2]
+    assert "Петя" in lines[2]
+    # Off-grid 14:10 is present with its comment, though the grid has no such button.
+    assert "привет" in lines[2]
+
+
+def test_render_day_appointments_list_empty():
+    m = _messages_schedule()
+    day = date(2030, 1, 15)
+    text = render_day_appointments_list(day, [], {}, _TZ, m)
+    assert m.day_list_empty in text
 
 
 def test_render_card_uses_dash_without_comment():
@@ -301,7 +358,10 @@ async def test_pick_day_shows_slots(
     state = _state(data={"flow": "create", "client_id": 1})
     await h.pick_day(cb, state, _SP)
     assert state.store["day"] == "2030-01-15"
-    assert _texts(cb.message.edit_text)[0] == messages.schedule.pick_time
+    text = _texts(cb.message.edit_text)[0]
+    assert messages.schedule.pick_time in text
+    # The day's appointment list is shown above the grid (empty day here).
+    assert messages.schedule.day_list_empty in text
     # Nothing booked yet → every slot is marked free.
     labels = _button_texts(_markup(cb.message.edit_text))
     assert all("🔴" not in label for label in labels)
@@ -325,6 +385,31 @@ async def test_pick_day_marks_booked_slot(
     labels = _button_texts(_markup(cb.message.edit_text))
     assert "🔴 14:00" in labels
     assert "🟢 09:00" in labels
+
+
+async def test_pick_day_off_grid_marks_both_overlapped_slots(
+    messages: BotMessages, session_factory: async_sessionmaker[AsyncSession]
+):
+    # An off-grid booking (14:10, hourly grid) overlaps both 14:00 and 15:00; the
+    # non-overlapping 13:00 stays free.
+    await _seed_specialist(session_factory)
+    client_id = await _seed_client(session_factory)
+    # 14:10 local (+05) on 2030-01-15 → 09:10 UTC.
+    await _seed_appt(
+        session_factory,
+        client_id=client_id,
+        starts_at=datetime(2030, 1, 15, 9, 10, tzinfo=UTC),
+    )
+    h = _handlers(messages, session_factory)
+    cb = _fake_callback("sched:day:2030:1:15")
+    state = _state(data={"flow": "create", "client_id": client_id})
+    await h.pick_day(cb, state, _SP)
+    labels = _button_texts(_markup(cb.message.edit_text))
+    assert "🔴 14:00" in labels
+    assert "🔴 15:00" in labels
+    assert "🟢 13:00" in labels
+    # The off-grid booking is listed in the text above the grid.
+    assert "14:10" in _texts(cb.message.edit_text)[0]
 
 
 async def test_pick_day_excludes_rescheduled_appointment(

@@ -74,6 +74,9 @@ class ScheduleMessages:
     comment_suffix: str
     pick_date: str
     pick_time: str
+    day_list_title: str
+    day_list_line: str
+    day_list_empty: str
     ask_custom_time: str
     bad_time: str
     ask_comment: str
@@ -482,6 +485,9 @@ def load_messages(path: Path) -> BotMessages:
             comment_suffix=_require(data, "schedule.comment_suffix"),
             pick_date=_require(data, "schedule.pick_date"),
             pick_time=_require(data, "schedule.pick_time"),
+            day_list_title=_require(data, "schedule.day_list_title"),
+            day_list_line=_require(data, "schedule.day_list_line"),
+            day_list_empty=_require(data, "schedule.day_list_empty"),
             ask_custom_time=_require(data, "schedule.ask_custom_time"),
             bad_time=_require(data, "schedule.bad_time"),
             ask_comment=_require(data, "schedule.ask_comment"),

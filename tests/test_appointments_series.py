@@ -152,6 +152,61 @@ async def test_two_slots_same_weekday_both_mark_taken(session: AsyncSession):
     assert {"14:00", "16:00"} <= taken
 
 
+async def test_exclude_slot_id_drops_own_repeat_keeps_others(session: AsyncSession):
+    # The slot being edited (14:00) must not flag itself as taken, while a sibling
+    # slot (16:00) and a real one-off (10:00) on the same day still count.
+    schedule_repo = SqlAlchemyRecurringScheduleRepo(session)
+    slot_repo = SqlAlchemyRecurringSlotRepo(session)
+    schedule = await create_schedule(
+        schedule_repo,
+        specialist_id=_SPECIALIST,
+        client_id=_CLIENT,
+        comment="регулярная",
+        now=_NOW,
+    )
+    assert schedule.id is not None
+    edited = await add_slot(
+        slot_repo,
+        schedule_id=schedule.id,
+        weekday=0,
+        time_hhmm="14:00",
+        tz=_TZ,
+        now=_NOW,
+        start_date=_TODAY,
+    )
+    await add_slot(
+        slot_repo,
+        schedule_id=schedule.id,
+        weekday=0,
+        time_hhmm="16:00",
+        tz=_TZ,
+        now=_NOW,
+        start_date=_TODAY,
+    )
+    repo = SqlAlchemyAppointmentsRepo(session)
+    await create_appointment(
+        repo,
+        specialist_id=_SPECIALIST,
+        client_id=_CLIENT,
+        day=date(2026, 6, 22),
+        hhmm="10:00",
+        comment=None,
+        tz=_TZ,
+        now=_NOW,
+    )
+    ctx = await _ctx(session)
+    taken = await taken_slot_times(
+        repo,
+        specialist_id=_SPECIALIST,
+        day=date(2026, 6, 22),
+        tz=_TZ,
+        exclude_slot_id=edited.id,
+        series=ctx,
+    )
+    assert "14:00" not in taken
+    assert {"10:00", "16:00"} <= taken
+
+
 # --- 5.2 day / week ---------------------------------------------------------
 
 

@@ -57,13 +57,15 @@ async def taken_slot_times(  # noqa: PLR0913
     day: date,
     tz: str,
     exclude_id: int | None = None,
+    exclude_slot_id: int | None = None,
     series: SeriesContext | None = None,
 ) -> set[str]:
     """Wall-clock `HH:MM` times the specialist already has booked on `day`.
 
     `exclude_id` drops the appointment being rescheduled so its own current slot
-    is not flagged as taken. When `series` is given, future repeats of active
-    series also count as taken (with this date's skips/moves applied).
+    is not flagged as taken; `exclude_slot_id` likewise drops the recurring slot
+    being edited. When `series` is given, future repeats of active series also count
+    as taken (with this date's skips/moves applied).
     """
     start = day_start_utc(day, tz)
     end = day_start_utc(day + timedelta(days=1), tz)
@@ -82,6 +84,7 @@ async def taken_slot_times(  # noqa: PLR0913
                 day,
                 tz,
                 series.today,
+                exclude_slot_id=exclude_slot_id,
             )
     return taken
 

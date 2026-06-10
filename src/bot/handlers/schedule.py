@@ -44,6 +44,7 @@ from src.domain.schedule import (
     generate_slots,
     next_occurrence_utc,
     next_weekday_on_or_after,
+    occupied_grid_slots,
     parse_hhmm,
     parse_working_days,
     today_in_tz,
@@ -117,6 +118,8 @@ _BTN_BACK = "⬅️ Назад"
 # Slot occupancy markers: free vs already booked by this specialist at that time.
 _SLOT_FREE = "🟢"
 _SLOT_TAKEN = "🔴"
+# The recurring slot currently being edited — its own time is neither free nor taken.
+_SLOT_CURRENT = "🟡"
 # Today's cell in the calendar is highlighted (Telegram can't colour buttons).
 _TODAY_MARK = "🟢"
 _CB_NOOP = "sched:noop"
@@ -396,6 +399,73 @@ def _render_day(day: date, appts: list[Appointment], m: ScheduleMessages) -> str
     # (no duplicate text list).
     header = m.day_title.format(date=format_ru_date(day))
     return header if appts else f"{header}\n\n{m.day_empty}"
+
+
+def render_day_appointments_list(
+    day: date,
+    appts: list[Appointment],
+    names: dict[int, str],
+    tz: str,
+    m: ScheduleMessages,
+) -> str:
+    """Text list of a day's appointments shown above the slot grid in pickers.
+
+    An off-grid appointment (e.g. 14:10) appears here even though the grid has no
+    button for its exact time — a safety net the slot markers alone cannot give.
+    """
+    title = m.day_list_title.format(date=format_ru_date(day))
+    if not appts:
+        return f"{title}\n{m.day_list_empty}"
+    lines = [
+        m.day_list_line.format(
+            time=f"{utc_to_wall(appt.starts_at, tz):%H:%M}",
+            child=names.get(appt.client_id, m.dash),
+            comment=_comment_part(appt.comment, m),
+        )
+        for appt in sorted(appts, key=lambda appt: appt.starts_at)
+    ]
+    return "\n".join([title, *lines])
+
+
+async def _picker_day_view(  # noqa: PLR0913
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    specialist: Specialist,
+    day: date,
+    grid: list[str],
+    m: ScheduleMessages,
+    exclude_id: int | None = None,
+    exclude_slot_id: int | None = None,
+) -> tuple[str, set[str]]:
+    """Day's appointment list (text shown above the grid) + occupied grid cells.
+
+    Shared by every slot picker: occupancy counts real bookings plus future repeats
+    of active series (`exclude_id`/`exclude_slot_id` drop the appointment/slot being
+    edited), then `occupied_grid_slots` widens each start to the grid cells whose
+    interval it overlaps.
+    """
+    assert specialist.id is not None  # noqa: S101 — middleware guarantees existence
+    tz = specialist.timezone
+    async with session_factory() as session:
+        series = await _series_context(session, specialist.id, tz)
+        repo = SqlAlchemyAppointmentsRepo(session)
+        taken = await taken_slot_times(
+            repo,
+            specialist_id=specialist.id,
+            day=day,
+            tz=tz,
+            exclude_id=exclude_id,
+            exclude_slot_id=exclude_slot_id,
+            series=series,
+        )
+        appts = await list_specialist_day(
+            repo, specialist_id=specialist.id, day=day, tz=tz, series=series
+        )
+        names = await client_name_map(
+            SqlAlchemyClientsRepo(session), specialist_id=specialist.id
+        )
+    occupied = occupied_grid_slots(grid, taken, specialist.slot_minutes)
+    return render_day_appointments_list(day, appts, names, tz, m), occupied
 
 
 def _day_keyboard(  # noqa: PLR0913
@@ -1024,18 +1094,17 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         slots = generate_slots(
             specialist.day_start, specialist.day_end, specialist.slot_minutes
         )
-        async with self._session_factory() as session:
-            series = await _series_context(session, specialist_id, specialist.timezone)
-            taken = await taken_slot_times(
-                SqlAlchemyAppointmentsRepo(session),
-                specialist_id=specialist_id,
-                day=chosen,
-                tz=specialist.timezone,
-                exclude_id=data.get("appointment_id"),
-                series=series,
-            )
+        day_list, occupied = await _picker_day_view(
+            self._session_factory,
+            specialist=specialist,
+            day=chosen,
+            grid=slots,
+            m=self._m,
+            exclude_id=data.get("appointment_id"),
+        )
         await _callback_message(callback).edit_text(
-            self._m.pick_time, reply_markup=build_slots_keyboard(slots, taken, self._m)
+            f"{day_list}\n\n{self._m.pick_time}",
+            reply_markup=build_slots_keyboard(slots, occupied, self._m),
         )
         await callback.answer()
 
@@ -1755,12 +1824,23 @@ def _weekday_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _recur_slot_marker(slot: str, taken: set[str], current: str | None) -> str:
+    # The edited slot's own time wins over taken/free so it reads as "current".
+    if slot == current:
+        return _SLOT_CURRENT
+    return _SLOT_TAKEN if slot in taken else _SLOT_FREE
+
+
 def build_recur_slots_keyboard(
-    slots: list[str], taken: set[str], m: ScheduleMessages
+    slots: list[str],
+    taken: set[str],
+    m: ScheduleMessages,
+    *,
+    current: str | None = None,
 ) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(
-            text=f"{_SLOT_TAKEN if slot in taken else _SLOT_FREE} {slot}",
+            text=f"{_recur_slot_marker(slot, taken, current)} {slot}",
             callback_data=f"recur:tslot:{slot.replace(':', '')}",
         )
         for slot in slots
@@ -2203,16 +2283,47 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
     async def pick_weekday(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
     ) -> None:
-        await state.update_data(weekday=_last_int(callback.data))
+        weekday = _last_int(callback.data)
+        await state.update_data(weekday=weekday)
+        data = await state.get_data()
         specialist = await self._load_settings(specialist_id)
-        slots = generate_slots(
+        grid = generate_slots(
             specialist.day_start, specialist.day_end, specialist.slot_minutes
         )
+        # Occupancy is computed on the date the slot will actually land on — the
+        # nearest matching weekday ≥ today, the same one add_slot picks for start_date.
+        today = today_in_tz(datetime.now(UTC), specialist.timezone)
+        target_day = next_weekday_on_or_after(today, weekday)
+        # Only editing a slot's day (cfg_day) excludes its own contribution and marks
+        # its current time; creation flows (rcreate / cfg_add) show plain 🟢/🔴.
+        exclude_slot_id, current = self._edit_slot_markers(data, weekday)
+        day_list, occupied = await _picker_day_view(
+            self._session_factory,
+            specialist=specialist,
+            day=target_day,
+            grid=grid,
+            m=self._sm,
+            exclude_slot_id=exclude_slot_id,
+        )
         await _callback_message(callback).edit_text(
-            self._m.pick_time,
-            reply_markup=build_recur_slots_keyboard(slots, set(), self._sm),
+            f"{day_list}\n\n{self._sm.pick_time}",
+            reply_markup=build_recur_slots_keyboard(
+                grid, occupied, self._sm, current=current
+            ),
         )
         await callback.answer()
+
+    @staticmethod
+    def _edit_slot_markers(
+        data: dict[str, Any], weekday: int
+    ) -> tuple[int | None, str | None]:
+        # cfg_day keeps the slot's time and only moves its weekday, so its current
+        # time (stashed by start_slot_day) is highlighted on the target day — but only
+        # when the chosen weekday is the slot's own (otherwise it lands elsewhere).
+        if data.get("flow") != "cfg_day":
+            return None, None
+        current = data["edit_time"] if data.get("edit_weekday") == weekday else None
+        return data["slot_id"], current
 
     async def pick_slot(
         self, callback: CallbackQuery, state: FSMContext, specialist_id: int
@@ -2441,9 +2552,23 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         grid = generate_slots(
             specialist.day_start, specialist.day_end, specialist.slot_minutes
         )
+        # Occupancy on the nearest date of the slot's own weekday; its own time is
+        # marked "current" and excluded from the taken set.
+        today = today_in_tz(datetime.now(UTC), specialist.timezone)
+        target_day = next_weekday_on_or_after(today, slot.weekday)
+        day_list, occupied = await _picker_day_view(
+            self._session_factory,
+            specialist=specialist,
+            day=target_day,
+            grid=grid,
+            m=self._sm,
+            exclude_slot_id=slot.id,
+        )
         await _callback_message(callback).edit_text(
-            self._m.pick_time,
-            reply_markup=build_recur_slots_keyboard(grid, set(), self._sm),
+            f"{day_list}\n\n{self._sm.pick_time}",
+            reply_markup=build_recur_slots_keyboard(
+                grid, occupied, self._sm, current=slot.time_hhmm
+            ),
         )
         await callback.answer()
 
@@ -2456,7 +2581,14 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             await callback.answer(self._m.not_found, show_alert=True)
             return
         await state.clear()
-        await state.update_data(flow="cfg_day", slot_id=slot_id)
+        # Stash the slot's current weekday/time so pick_weekday can mark its own time
+        # 🟡 when the chosen day is unchanged, without re-loading the slot.
+        await state.update_data(
+            flow="cfg_day",
+            slot_id=slot_id,
+            edit_weekday=slot.weekday,
+            edit_time=slot.time_hhmm,
+        )
         await _callback_message(callback).edit_text(
             self._m.pick_weekday, reply_markup=_weekday_keyboard()
         )
@@ -2722,18 +2854,16 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         grid = generate_slots(
             specialist.day_start, specialist.day_end, specialist.slot_minutes
         )
-        async with self._session_factory() as session:
-            ctx = await _series_context(session, specialist_id, specialist.timezone)
-            taken = await taken_slot_times(
-                SqlAlchemyAppointmentsRepo(session),
-                specialist_id=specialist_id,
-                day=chosen,
-                tz=specialist.timezone,
-                series=ctx,
-            )
+        day_list, occupied = await _picker_day_view(
+            self._session_factory,
+            specialist=specialist,
+            day=chosen,
+            grid=grid,
+            m=self._sm,
+        )
         await _callback_message(callback).edit_text(
-            self._m.pick_time,
-            reply_markup=build_recur_slots_keyboard(grid, taken, self._sm),
+            f"{day_list}\n\n{self._sm.pick_time}",
+            reply_markup=build_recur_slots_keyboard(grid, occupied, self._sm),
         )
         await callback.answer()
 

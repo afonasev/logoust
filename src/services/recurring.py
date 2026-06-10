@@ -194,12 +194,17 @@ def slot_taken_times(  # noqa: PLR0913, PLR0917
     day: date,
     tz: str,
     today: date,
+    *,
+    exclude_slot_id: int | None = None,
 ) -> set[str]:
     """Wall-clock `HH:MM` slots occupied by this slot on `day` (future days only).
 
     A date moved to another day frees its original slot here and occupies the slot
-    on the day it lands (occupancy reflects this date's skip/move).
+    on the day it lands (occupancy reflects this date's skip/move). `exclude_slot_id`
+    drops the slot being edited so its own current time is not flagged as taken.
     """
+    if exclude_slot_id is not None and slot.id == exclude_slot_id:
+        return set()
     return {
         f"{utc_to_wall(occ.starts_at, tz):%H:%M}"
         for occ in occurrences_landing_in(

@@ -84,7 +84,7 @@ src/
 ## Поток данных: онбординг
 
 ```
-admin@shell ──► make create_invite ──► cli/create_invite.main()
+admin@shell ──► make create-invite ──► cli/create_invite.main()
                                         │
                                         ▼
                                 services.invites.create_invite(repo)

@@ -8,17 +8,17 @@
 
 ### Requirement: Создание приглашения специалиста через CLI
 
-Система **SHALL** предоставлять команду `make create_invite`, которая создаёт в таблице `specialists` новую запись с уникальным криптостойким `invite_token`, без `telegram_chat_id` и без `welcomed_at`, и печатает в stdout ровно одну строку — Telegram deep-link для специалиста.
+Система **SHALL** предоставлять команду `make create-invite`, которая создаёт в таблице `specialists` новую запись с уникальным криптостойким `invite_token`, без `telegram_chat_id` и без `welcomed_at`, и печатает в stdout ровно одну строку — Telegram deep-link для специалиста.
 
 #### Scenario: Успешное создание приглашения
 
-- **WHEN** администратор запускает `make create_invite` при корректных настройках (`TELEGRAM_BOT_USERNAME`, `DATABASE_URL`)
+- **WHEN** администратор запускает `make create-invite` при корректных настройках (`TELEGRAM_BOT_USERNAME`, `DATABASE_URL`)
 - **THEN** в таблице `specialists` появляется новая запись с непустым `invite_token`, `telegram_chat_id IS NULL`, `welcomed_at IS NULL`, `created_at = текущее время`
 - **AND** в stdout выводится ровно одна строка вида `https://t.me/<TELEGRAM_BOT_USERNAME>?start=<token>`, где `<token>` совпадает с `invite_token` созданной записи
 
 #### Scenario: Каждое приглашение получает свой токен
 
-- **WHEN** `make create_invite` запускается дважды подряд
+- **WHEN** `make create-invite` запускается дважды подряд
 - **THEN** в таблице `specialists` появляются две разные записи с разными значениями `invite_token`
 
 ### Requirement: Запуск бота применяет миграции

@@ -1,0 +1,5 @@
+# Daily SQLite backup for logoust-assistant.
+# 03:45 UTC — offset from guitar-for-everyone (03:30) so the two backups
+# do not contend for disk IO. Installed to /etc/cron.d/ by scripts/deploy.sh.
+SHELL=/bin/bash
+45 3 * * * logoust /opt/logoust-assistant/scripts/backup_db.sh

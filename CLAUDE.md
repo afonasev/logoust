@@ -16,9 +16,12 @@ We are developing a smart assistant for the Logoust speech therapy office. Our g
 - `make init` — install deps and set up pre-commit hooks
 - `make check` — format + lint + type-check + test; run before marking any task done
 - `make run` — apply migrations and start the Telegram bot (long-polling)
-- `make create_invite` — create a specialist invite and print the deep-link to stdout
+- `make create-invite` — create a specialist invite locally and print the deep-link to stdout
+- `make create-invite-prod` — create a specialist invite on the VPS (prints prod deep-link)
 - `make format` / `make lint` / `make type-check` / `make test` — individual steps
 - `make upgrade` — upgrade Python, lockfile, pre-commit hooks
+- `make deploy` — deploy code to the VPS (rsync + uv sync + migrate + restart)
+- `make backup` — snapshot local DB into `backups/`; `make backup-prod` — pull VPS backups into `backups/vps/`
 - `make clean` — remove caches and `__pycache__`
 - Use `uv` for deps management — not `pip`
 

@@ -10,6 +10,7 @@
 | [architecture.md](./architecture.md) | Слои Clean Architecture, поток данных, правила зависимостей |
 | [database.md](./database.md) | Схема БД, таблицы, индексы, миграции |
 | [bot.md](./bot.md) | Структура aiogram-приложения: dispatcher, router'ы, хендлеры, каталог текстов |
+| [deployment.md](./deployment.md) | Деплой на VPS: раскладка, systemd-юнит, cron-бэкап, логи, чек-лист настройки |
 | [decisions/](./decisions/) | Ключевые технические решения и их обоснование (по файлу на решение) |
 
 ## Аудитория

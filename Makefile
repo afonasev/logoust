@@ -49,10 +49,27 @@ run: ## Run service
 run-reload: ## Run service with auto-reload on code/migration changes
 	uv run watchfiles "sh -c 'alembic upgrade head && exec python -m src'" src alembic
 
-.PHONY: create_invite
-create_invite: ## Create a specialist invite and print the deep-link
+.PHONY: create-invite
+create-invite: ## Create a specialist invite locally and print the deep-link
 	uv run alembic upgrade head
 	uv run python -m src.cli.create_invite
+
+.PHONY: create-invite-prod
+create-invite-prod: ## Create a specialist invite on the VPS (prints prod deep-link)
+	bash scripts/create_invite_prod.sh
+
+.PHONY: deploy
+deploy: ## Deploy code to the VPS (rsync + uv sync + migrate + restart)
+	bash scripts/deploy.sh
+
+.PHONY: backup
+backup: ## Snapshot local logoust.db into backups/
+	mkdir -p backups
+	cp logoust.db backups/logoust_$$(date +%Y-%m-%d).db
+
+.PHONY: backup-prod
+backup-prod: ## Pull DB backups from the VPS into backups/vps/
+	bash scripts/pull_backups.sh
 
 .PHONY: clean
 clean: ## Clean up generated files and caches

@@ -414,9 +414,9 @@ async def _seed_unlinked_client(
 
 async def _seed_empty_subscription(
     factory: async_sessionmaker[AsyncSession], client_id: int
-) -> None:
+) -> int:
     async with factory() as session:
-        await SqlAlchemySubscriptionsRepo(session).add(
+        sub = await SqlAlchemySubscriptionsRepo(session).add(
             Subscription(
                 id=None,
                 client_id=client_id,
@@ -427,10 +427,16 @@ async def _seed_empty_subscription(
                 created_at=_NOW,
             )
         )
+    assert sub.id is not None
+    return sub.id
 
 
 def _callbacks(markup: object) -> list[str | None]:
     return [b.callback_data for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+
+
+def _button_texts(markup: object) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
 
 
 async def test_payment_pass_alerts_specialist_with_send_button(
@@ -533,20 +539,53 @@ async def test_consumption_pass_reports_deductions(
     assert specialist.consumption_last_run_on == today_in_tz(_CONS_NOW, _TZ)
 
 
-async def test_consumption_pass_missed_has_no_buttons(
+async def test_consumption_pass_missed_no_subscription_button_to_client(
     session_factory: async_sessionmaker[AsyncSession],
 ):
     await _seed_specialist(session_factory)
     await _welcome_specialist(session_factory, chat_id=900)
     client_id = await _seed_linked_client(session_factory, chat_id=555)
-    # No subscription → the meeting is reported as a ❗ line, with no buttons.
+    # No subscription → ❗-button leads to the client card.
     await _seed_today_appointment(session_factory, client_id, "10:00")
     bot = AsyncMock()
     await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
     bot.send_message.assert_awaited_once()
-    assert bot.send_message.await_args.kwargs["reply_markup"] is None
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert _callbacks(markup) == [f"clients:card:{client_id}"]
+    # The reason rides in the button caption, not the message body.
+    assert "активного абонемента нет" in _button_texts(markup)[0]
+
+
+async def test_consumption_pass_missed_exhausted_button_to_subscription(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    # Active subscription with remaining == 0 → ❗-button leads to its card.
+    sub_id = await _seed_empty_subscription(session_factory, client_id)
+    await _seed_today_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
+    bot.send_message.assert_awaited_once()
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert _callbacks(markup) == [f"subs:card:{sub_id}"]
+    assert "абонемент закончился" in _button_texts(markup)[0]
+
+
+async def test_consumption_pass_missed_body_has_no_text_lines(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    await _welcome_specialist(session_factory, chat_id=900)
+    client_id = await _seed_linked_client(session_factory, chat_id=555)
+    await _seed_today_appointment(session_factory, client_id, "10:00")
+    bot = AsyncMock()
+    await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
     text = bot.send_message.await_args.args[1]
+    # Block header stays; the per-meeting ❗ reason lives only in the button caption.
     assert _messages().consumption.missed_header in text
+    assert "активного абонемента нет" not in text
 
 
 async def test_consumption_pass_empty_is_silent_but_stamps(

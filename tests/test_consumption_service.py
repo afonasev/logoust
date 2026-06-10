@@ -198,6 +198,8 @@ async def test_missed_no_subscription(session_factory):
     assert not report.deducted
     assert len(report.missed) == 1
     assert report.missed[0].reason is MissReason.NO_SUBSCRIPTION
+    assert report.missed[0].client_id == client_id
+    assert report.missed[0].subscription_id is None
 
 
 async def test_missed_exhausted(session_factory):
@@ -217,6 +219,8 @@ async def test_missed_exhausted(session_factory):
     assert not report.deducted
     assert len(report.missed) == 1
     assert report.missed[0].reason is MissReason.EXHAUSTED
+    assert report.missed[0].client_id == client_id
+    assert report.missed[0].subscription_id == sub_id
     assert await _remaining(factory, sub_id) == 0
 
 

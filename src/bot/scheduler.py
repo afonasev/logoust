@@ -42,6 +42,7 @@ from src.infrastructure.subscriptions_repo import (
 )
 from src.services.consumption import (
     ConsumptionReport,
+    MissedEntry,
     MissReason,
     run_consumption_if_due,
 )
@@ -270,13 +271,12 @@ async def _run_consumption_for_specialist(
         )
 
 
-def render_consumption_report(
-    report: ConsumptionReport, specialist: Specialist, messages: BotMessages
-) -> str:
-    """Report text: charged-subscriptions header + the ❗ list of uncharged meetings.
+def render_consumption_report(report: ConsumptionReport, messages: BotMessages) -> str:
+    """Report text: only the block headers — both lists are rendered as buttons.
 
-    The charged subscriptions themselves are buttons (see `_consumption_keyboard`);
-    here we only add the header so the message reads even without tapping.
+    Charged subscriptions and ❗ uncharged meetings are buttons (see
+    `_consumption_keyboard`); here we keep just the headers so the message reads
+    (which blocks are present) even without tapping.
     """
     m = messages.consumption
     lines = [m.title]
@@ -284,35 +284,45 @@ def render_consumption_report(
         lines.append(m.deducted_header)
     if report.missed:
         lines.append(m.missed_header)
-        for miss in report.missed:
-            wall = utc_to_wall(miss.starts_at, specialist.timezone)
-            template = (
-                m.missed_no_subscription
-                if miss.reason is MissReason.NO_SUBSCRIPTION
-                else m.missed_exhausted
-            )
-            lines.append(template.format(child=miss.child_name, time=f"{wall:%H:%M}"))
     return "\n".join(lines)
 
 
-def _consumption_keyboard(
-    report: ConsumptionReport, messages: BotMessages
-) -> InlineKeyboardMarkup | None:
-    if not report.deducted:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=messages.consumption.deducted_btn.format(
-                        child=entry.child_name, remaining=entry.remaining
-                    ),
-                    callback_data=f"subs:card:{entry.subscription_id}",
-                )
-            ]
-            for entry in report.deducted
-        ]
+def _missed_button(
+    miss: MissedEntry, specialist: Specialist, messages: BotMessages
+) -> InlineKeyboardButton:
+    """One ❗-meeting button: EXHAUSTED → subscription card, else client card."""
+    wall = utc_to_wall(miss.starts_at, specialist.timezone)
+    if miss.reason is MissReason.EXHAUSTED:
+        assert miss.subscription_id is not None  # noqa: S101 — set on EXHAUSTED
+        text = messages.consumption.missed_exhausted
+        callback_data = f"subs:card:{miss.subscription_id}"
+    else:
+        text = messages.consumption.missed_no_subscription
+        callback_data = f"clients:card:{miss.client_id}"
+    return InlineKeyboardButton(
+        text=text.format(child=miss.child_name, time=f"{wall:%H:%M}"),
+        callback_data=callback_data,
     )
+
+
+def _consumption_keyboard(
+    report: ConsumptionReport, specialist: Specialist, messages: BotMessages
+) -> InlineKeyboardMarkup | None:
+    if report.is_empty:
+        return None
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=messages.consumption.deducted_btn.format(
+                    child=entry.child_name, remaining=entry.remaining
+                ),
+                callback_data=f"subs:card:{entry.subscription_id}",
+            )
+        ]
+        for entry in report.deducted
+    ]
+    rows.extend([_missed_button(miss, specialist, messages)] for miss in report.missed)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def deliver_consumption_report(
@@ -325,8 +335,8 @@ async def deliver_consumption_report(
     """
     if specialist.telegram_chat_id is None:  # pragma: no cover — candidates welcomed
         return
-    text = render_consumption_report(report, specialist, messages)
-    markup = _consumption_keyboard(report, messages)
+    text = render_consumption_report(report, messages)
+    markup = _consumption_keyboard(report, specialist, messages)
     # Telling the specialist may itself fail (they blocked the bot); swallow it —
     # the deductions are already committed and must not be rolled back.
     with suppress(TelegramForbiddenError, TelegramBadRequest):

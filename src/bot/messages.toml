@@ -399,8 +399,9 @@ title = "🧾 Итоги дня по абонементам"
 deducted_header = "Списано по одной встрече:"
 deducted_btn = "➖ {child} · осталось {remaining}"  # noqa: RUF001
 missed_header = "❗ Прошли, но не списано:"
-missed_no_subscription = "❗ {child} ({time}) — активного абонемента нет"  # noqa: RUF001
-missed_exhausted = "❗ {child} ({time}) — абонемент закончился"  # noqa: RUF001
+# Подписи кнопок ❗-встреч в отчёте (текстовых строк в теле сообщения больше нет).
+missed_no_subscription = "❗ {child} {time} — активного абонемента нет"  # noqa: RUF001
+missed_exhausted = "❗ {child} {time} — абонемент закончился"  # noqa: RUF001
 now_empty = "Списывать нечего."
 now_done = "Готово, списания обновлены."
 

@@ -62,11 +62,18 @@ class DeductedEntry:
 
 @dataclass(frozen=True, slots=True)
 class MissedEntry:
-    """A passed meeting left uncharged — the report shows it as a ❗ line."""
+    """A passed meeting left uncharged — the report shows it as a ❗ button.
+
+    Carries both navigation targets: `client_id` (always) and `subscription_id`
+    (only EXHAUSTED — the finished subscription the specialist can extend). The
+    bot layer picks the callback by `reason` (design.md, решение 1).
+    """
 
     child_name: str
     starts_at: datetime
     reason: MissReason
+    client_id: int
+    subscription_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +197,13 @@ async def _consume_one(  # noqa: PLR0913
     sub = await subscriptions_repo.get_active(occ.client_id, specialist.id)
     if sub is None:
         report.missed.append(
-            MissedEntry(child, occ.starts_at, MissReason.NO_SUBSCRIPTION)
+            MissedEntry(
+                child,
+                occ.starts_at,
+                MissReason.NO_SUBSCRIPTION,
+                client_id=occ.client_id,
+                subscription_id=None,
+            )
         )
         return
     assert sub.id is not None  # noqa: S101 — persisted active subscription
@@ -233,7 +246,15 @@ def _record_outcome(
         assert result.remaining is not None  # noqa: S101 — set on DEDUCTED
         report.deducted.append(DeductedEntry(subscription_id, child, result.remaining))
     elif result.outcome is DeductionOutcome.EXHAUSTED:
-        report.missed.append(MissedEntry(child, occ.starts_at, MissReason.EXHAUSTED))
+        report.missed.append(
+            MissedEntry(
+                child,
+                occ.starts_at,
+                MissReason.EXHAUSTED,
+                client_id=occ.client_id,
+                subscription_id=subscription_id,
+            )
+        )
 
 
 async def _materialize(

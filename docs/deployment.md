@@ -114,6 +114,54 @@ Telegram отдаёт `getUpdates` только одному клиенту: д�
 подтверждает только что процесс жив; при сомнениях смотри стартовые строки в
 `journalctl -u logoust-assistant -f`.
 
+## Блокировка IP Telegram провайдером
+
+Провайдер этого VPS (Москва) **выборочно режет IP-диапазоны Telegram** на 443.
+DNS отдаёт для `api.telegram.org` адрес из заблокированного диапазона → бот виснет
+на `get_me()`, падает с кодом 1 и крашлупится (`Restart=on-failure`). Симптом —
+в логах `aiogram.exceptions.TelegramNetworkError: Request timeout error` и растущий
+счётчик `NRestarts`.
+
+Диагностика прямо с сервера:
+
+```bash
+# рабочий ли выход вообще (должен ответить быстро):
+curl -4 -s -o /dev/null -w '%{http_code} %{time_total}s\n' --max-time 12 https://1.1.1.1/
+# какой IP отдаёт DNS и доступен ли он на 443:
+getent ahosts api.telegram.org
+curl -4 -s -o /dev/null -w '%{http_code} %{time_total}s\n' --max-time 12 https://api.telegram.org/
+```
+
+Два способа обхода (по возрастанию надёжности):
+
+### Быстрый разблок: пин рабочего IP в `/etc/hosts`
+
+Среди IP Telegram часть остаётся открытой. Найти живой и запинить на него имя:
+
+```bash
+echo '149.154.167.220 api.telegram.org' >> /etc/hosts
+systemctl restart logoust-assistant.service
+```
+
+**Хрупко:** это ручное состояние сервера (а `/etc/hosts` тут под управлением
+Ansible — следующий прогон может его перетереть), и конкретный IP могут закрыть
+позже. Годится как аварийная мера, не как постоянное решение.
+
+### Надёжно: прокси через `TELEGRAM_PROXY_URL`
+
+Бот умеет ходить к Bot API через прокси (см. `src/bot/bot_factory.py`). Прокси
+сам резолвит `api.telegram.org` со своей (нефильтрующей) стороны, поэтому смена
+или блокировка IP Telegram бот больше не ломает. Включается переменной в
+прод-`.env`:
+
+```
+TELEGRAM_PROXY_URL=socks5://user:pass@proxy-host:1080
+```
+
+Схемы: `http` / `socks4` / `socks5` (через `aiohttp-socks`). Нужна внешняя точка
+выхода, не фильтрующая Telegram (свой VPS за рубежом с SOCKS, VPN-прокси и т.п.).
+Подробнее о выборе — `docs/decisions/2026-06-11_telegram-ip-block-proxy.md`.
+
 ## Чек-лист первичной настройки
 
 Одноразовая ручная настройка (повторяемая часть — юнит и cron — раскатывается

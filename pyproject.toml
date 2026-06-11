@@ -5,6 +5,7 @@ description = ""
 requires-python = ">=3.13"
 dependencies = [
     "aiogram>=3,<4",
+    "aiohttp-socks",
     "aiosqlite",
     "alembic",
     "greenlet",

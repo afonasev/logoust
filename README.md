@@ -49,6 +49,7 @@ Clean Architecture под `src/`:
    - `TELEGRAM_BOT_TOKEN` — токен бота из BotFather (обязательная).
    - `TELEGRAM_BOT_USERNAME` — username бота без `@` (обязательная). Нужен CLI для печати deep-link.
    - `DATABASE_URL` — по умолчанию `sqlite+aiosqlite:///./logoust.db`.
+   - `TELEGRAM_PROXY_URL` — необязательная: прокси к Bot API (`http`/`socks4`/`socks5`), если сеть хоста фильтрует IP Telegram.
 3. `make init` — установить зависимости и pre-commit-хуки.
 4. `make create-invite` — создать приглашение и получить deep-link для специалиста.
 5. `make run` — применить миграции и запустить бота.

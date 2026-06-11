@@ -118,6 +118,7 @@ Async везде: aiogram async, SQLAlchemy `AsyncSession`, CLI оборачив
 | ---------------------- | ----- | ------------------------------------- | ---------- |
 | `TELEGRAM_BOT_TOKEN`   | `SecretStr` | — (обязательная)                 | Токен бота из BotFather. |
 | `TELEGRAM_BOT_USERNAME`| `str` | — (обязательная)                      | Username бота без `@`, нужен CLI для deep-link. |
+| `TELEGRAM_PROXY_URL`   | `str` \| `None` | `None`                       | Прокси к Bot API (`http`/`socks4`/`socks5`), когда сеть хоста фильтрует IP Telegram. Прокси сам резолвит `api.telegram.org`. |
 | `DATABASE_URL`         | `str` | `sqlite+aiosqlite:///./logoust.db`    | Async-URL. Alembic читает sync-вариант. |
 | `LOG_FORMAT`           | `str` | `text`                                | `text` или `json`. |
 | `LOG_LEVEL`            | `str` | `INFO`                                | Стандартные уровни logging. |

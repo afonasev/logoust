@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: SecretStr
     TELEGRAM_BOT_USERNAME: str
 
+    # Route Bot API traffic through a proxy when the host network filters
+    # Telegram's IPs. Scheme is http/socks4/socks5; the proxy resolves
+    # api.telegram.org itself, so a rotated/blocked API IP no longer breaks us.
+    TELEGRAM_PROXY_URL: str | None = None
+
     DATABASE_URL: str = "sqlite+aiosqlite:///./logoust.db"
 
     LOG_FORMAT: str = "text"

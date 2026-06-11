@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.bot.bot_factory import build_bot
 from src.bot.dispatcher import build_dispatcher
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import (
@@ -69,7 +70,9 @@ async def main() -> None:
     messages = load_messages(DEFAULT_MESSAGES_PATH)
     engine = build_engine(settings.DATABASE_URL)
     session_factory = build_session_factory(engine)
-    bot = Bot(token=settings.TELEGRAM_BOT_TOKEN.get_secret_value())
+    bot = build_bot(
+        settings.TELEGRAM_BOT_TOKEN.get_secret_value(), settings.TELEGRAM_PROXY_URL
+    )
     dp = build_dispatcher(messages, session_factory)
     # The minute-scheduler is a background task tied to polling's lifetime, not a
     # gather peer: aiogram's start_polling handles SIGINT/SIGTERM and *returns* on

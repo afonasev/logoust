@@ -9,7 +9,7 @@ dependencies = [
     "alembic",
     "greenlet",
     "pydantic-settings",
-    "sqlalchemy>=2.0,<3",
+    "sqlalchemy>=2.0.51,<3",
     "structlog>=24.0.0",
 ]
 

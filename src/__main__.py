@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.bot_factory import build_bot
 from src.bot.dispatcher import build_dispatcher
+from src.bot.keyboard_refresh import KeyboardRefreshMiddleware
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import (
     run_consumption_pass,
@@ -73,6 +74,11 @@ async def main() -> None:
     bot = build_bot(
         settings.TELEGRAM_BOT_TOKEN.get_secret_value(), settings.TELEGRAM_PROXY_URL
     )
+    # Session-level request middleware: only the outgoing API call can carry a fresh
+    # reply-keyboard, so the keyboard-refresh piggyback lives on the bot session, not
+    # the dispatcher (a dispatcher middleware can't alter a handler's already-sent
+    # answer).
+    bot.session.middleware(KeyboardRefreshMiddleware(messages, session_factory))
     dp = build_dispatcher(messages, session_factory)
     # The minute-scheduler is a background task tied to polling's lifetime, not a
     # gather peer: aiogram's start_polling handles SIGINT/SIGTERM and *returns* on

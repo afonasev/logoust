@@ -11,6 +11,7 @@ from src.services.digest import DigestMessages
 class StartMessages:
     welcome: str
     already_welcomed: str
+    already_linked: str
     unknown_token: str
     no_token: str
 
@@ -426,6 +427,7 @@ def load_messages(path: Path) -> BotMessages:
         start=StartMessages(
             welcome=_require(data, "start.welcome").strip(),
             already_welcomed=_require(data, "start.already_welcomed"),
+            already_linked=_require(data, "start.already_linked"),
             unknown_token=_require(data, "start.unknown_token"),
             no_token=_require(data, "start.no_token"),
         ),

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.client_audit import record_client_message
 from src.bot.deeplink import CLIENT_TOKEN_PREFIX
 from src.bot.handlers.clients import build_main_keyboard
+from src.bot.keyboard_refresh import keyboard_version
 from src.bot.messages import BotMessages
 from src.domain.audit import AuditEvent, DeliveryStatus
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
@@ -137,6 +138,44 @@ async def _link_client_and_reply(
     )
 
 
+async def _greet_known_or_no_token(
+    message: Message,
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bare `/start`: recognise the sender by chat_id and reply by role.
+
+    Specialist → re-send the welcome with a fresh keyboard and record the current
+    version; else a linked client → confirm; else the unchanged `no_token`. No new
+    specialist rows are ever created. The caller ensures `message.from_user` is set.
+    """
+    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    chat_id = message.from_user.id
+    async with session_factory() as session:
+        specialist = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(chat_id)
+    if specialist is not None:
+        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        await message.answer(
+            messages.start.already_welcomed,
+            reply_markup=build_main_keyboard(messages),
+        )
+        # Fresh keyboard delivered → record its version so the middleware skips it.
+        async with session_factory() as session:
+            await SqlAlchemySpecialistsRepo(session).set_keyboard_version(
+                specialist.id, keyboard_version(messages)
+            )
+        logger.info(
+            "specialist.keyboard_refreshed", extra={"specialist_id": specialist.id}
+        )
+        return
+    async with session_factory() as session:
+        client = await SqlAlchemyClientsRepo(session).find_by_chat_id(chat_id)
+    if client is not None:
+        await message.answer(messages.start.already_linked)
+        return
+    await message.answer(messages.start.no_token)
+
+
 def make_start_handler(
     messages: BotMessages,
     session_factory: async_sessionmaker[AsyncSession],
@@ -147,7 +186,7 @@ def make_start_handler(
 
         token = command.args
         if not token:
-            await message.answer(messages.start.no_token)
+            await _greet_known_or_no_token(message, messages, session_factory)
             return
 
         if token.startswith(CLIENT_TOKEN_PREFIX):

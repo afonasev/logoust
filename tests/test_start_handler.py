@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 from aiogram.exceptions import TelegramForbiddenError
@@ -12,6 +13,7 @@ from src.bot.handlers.start import (
     make_start_handler,
     make_token_handler,
 )
+from src.bot.keyboard_refresh import keyboard_version
 from src.bot.messages import BotMessages
 from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.client import ClientStatus
@@ -70,6 +72,53 @@ async def test_no_token_branch(
     msg = _fake_message()
     await handler(msg, _cmd(None))
     msg.answer.assert_awaited_once_with(messages.start.no_token)
+
+
+async def test_bare_start_specialist_refreshes_keyboard(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemySpecialistsRepo(session)
+    specialist = await create_invite(repo)
+    handler = make_start_handler(messages, session_factory)
+    # Onboard the default user (id=42) so find_by_chat_id recognises them.
+    await handler(_fake_message(), _cmd(specialist.invite_token))
+
+    msg = _fake_message()
+    await handler(msg, _cmd(None))
+    assert msg.answer.await_args.args[0] == messages.start.already_welcomed
+    assert msg.answer.await_args.kwargs["reply_markup"] is not None
+    refreshed = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(42)
+    assert refreshed is not None
+    assert refreshed.keyboard_version == keyboard_version(messages)
+
+
+async def test_bare_start_client_already_linked(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemyClientsRepo(session)
+    client = await add_client(
+        repo,
+        NewClient(
+            specialist_id=1,
+            child_name="Маша",
+            contact_name="Мама",
+            contact_telegram="masha",
+        ),
+    )
+    assert client.id is not None
+    ts = datetime.now(UTC)
+    await repo.link_telegram(
+        client.id, telegram_chat_id=42, username=None, linked_at=ts, updated_at=ts
+    )
+
+    handler = make_start_handler(messages, session_factory)
+    msg = _fake_message()
+    await handler(msg, _cmd(None))
+    msg.answer.assert_awaited_once_with(messages.start.already_linked)
 
 
 async def test_unknown_token_branch(

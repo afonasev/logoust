@@ -65,6 +65,8 @@ def test_initial_migration_creates_specialists_table(
         "consumption_enabled",
         "consumption_time",
         "consumption_last_run_on",
+        # Added by 0017 (delivered reply-keyboard version).
+        "keyboard_version",
     }
     assert set(columns) == expected
 
@@ -877,6 +879,48 @@ def test_consumption_migration_adds_table_and_backfills(
     assert "subscription_deductions" not in insp.get_table_names()
     specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
     assert "consumption_enabled" not in specialist_columns
+    engine.dispose()
+
+
+def test_keyboard_version_migration_adds_nullable_column(
+    alembic_config: tuple[Config, str],
+    monkeypatch,
+):
+    cfg, sync_url = alembic_config
+    async_url = sync_url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "DATABASE_URL", async_url)
+
+    # Stop before 0017 and seed a specialist that predates keyboard_version.
+    command.upgrade(cfg, "0016")
+    engine = create_engine(sync_url, poolclass=NullPool)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO specialists (invite_token, created_at) "
+                "VALUES ('tok', '2026-05-01')"
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "keyboard_version" in specialist_columns
+
+    # No backfill: the pre-existing specialist stays NULL ("stale", gets refreshed).
+    with engine.connect() as conn:
+        value = conn.execute(
+            text("SELECT keyboard_version FROM specialists WHERE invite_token = 'tok'")
+        ).scalar_one()
+    assert value is None
+
+    command.downgrade(cfg, "0016")
+    insp = inspect(engine)
+    specialist_columns = {c["name"] for c in insp.get_columns("specialists")}
+    assert "keyboard_version" not in specialist_columns
     engine.dispose()
 
 

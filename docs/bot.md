@@ -52,7 +52,8 @@
 **`/start [<token>]`.** Разбор токена:
 
 - префикс `cli_` → привязка клиента (`link_client_by_token`, idempotent rebind `chat_id`/`linked_at`; `from_user.username` автозаполняет пустой `contact_telegram`; ответы `clients.linked` / `clients.link_unknown`);
-- иначе — онбординг специалиста: ищет по токену, идемпотентно проставляет `chat_id`/`username`/`welcomed_at`, четыре ветки (`welcomed`, `already_welcomed`, `unknown_token`, `no_token`).
+- токен без префикса → онбординг специалиста: ищет по токену, идемпотентно проставляет `chat_id`/`username`/`welcomed_at`, три ветки (`welcomed`, `already_welcomed`, `unknown_token`);
+- **без payload** (`_greet_known_or_no_token`) — узнаёт отправителя по `chat_id`: привязанный специалист → `already_welcomed` со свежей `build_main_keyboard` и фиксацией текущей `keyboard_version`; иначе привязанный клиент (`ClientsRepo.find_by_chat_id`) → `already_linked`; иначе → `no_token`. Новых записей специалистов не создаёт.
 
 **Текст с кодом/ссылкой** (`make_token_handler`) — fallback на вставленный голый токен или deep-link целиком. Сначала `extract_client_token` (ловит `cli_`-payload → привязка клиента), затем `extract_token` (специалистский онбординг). На сообщения, не похожие на токен, молчит. Зарегистрирован после `/start`.
 
@@ -177,6 +178,13 @@
 
 Других команд бота (включая `/help`) сознательно нет — приветствие не должно врать о возможностях.
 
+### Автообновление reply-клавиатуры — `src/bot/keyboard_refresh.py`
+
+Reply-клавиатуру нельзя «отредактировать» — Telegram обновляет её только новым сообщением с актуальным `reply_markup`. Чтобы новые кнопки появлялись после деплоя **без** повторного `/start <token>` и **без** лишних сообщений, версия набора кнопок пристёгивается к обычному ответу.
+
+- `keyboard_version(messages)` — детерминированный хеш подписей кнопок `build_main_keyboard`; меняется при добавлении/удалении/переименовании кнопки и стабилен при перезапуске без правок меню.
+- `KeyboardRefreshMiddleware` — это **session request-middleware бота** (не dispatcher-middleware: подменить `reply_markup` в уже отправленном хендлером ответе можно лишь на уровне исходящего API-вызова). Регистрируется в `__main__.main()` на `bot.session`. Перехватывает исходящий `SendMessage` без своего `reply_markup`: если чат принадлежит специалисту с устаревшей `keyboard_version` — подкладывает `build_main_keyboard` и **после успешной отправки** пишет текущую версию в `specialists.keyboard_version`. При сбое доставки версия не бампится — обновление повторится при следующем действии. Сообщения с собственным `reply_markup` (inline-разметка) и не-`SendMessage` методы пропускаются без изменений.
+
 ## Навигация после необратимых действий
 
 После необратимого действия с записью (удаление разовой, перенос/остановка/пропуск даты серии, отмена флоу) бот **не** показывает тупиковый экран с единственной кнопкой «Назад». Единый хелпер `Navigator.open_after_action` (через тонкий шим `schedule._post_action`):
@@ -193,9 +201,10 @@
 Обязательные ключи (отсутствие → `RuntimeError` на старте, до приёма апдейтов):
 
 - `[start].welcome` — приветствие при первом валидном `/start <token>`.
-- `[start].already_welcomed` — ответ на повторный `/start` уже использованного токена.
+- `[start].already_welcomed` — ответ на повторный `/start` уже использованного токена и на голый `/start` от привязанного специалиста (со свежей клавиатурой).
+- `[start].already_linked` — ответ на голый `/start` от привязанного клиента («вы уже подключены»).
 - `[start].unknown_token` — ответ, если токен не найден.
-- `[start].no_token` — ответ, если `/start` пришёл без payload.
+- `[start].no_token` — ответ на голый `/start` от неизвестного пользователя.
 - `[clients].*` — секция текстов управления клиентами: `button`, заголовки меню и списков (`menu_title`, `list_active_title`, `list_archived_title`, `empty_active`, `empty_archived`), шаблон карточки `card` и метки статуса (`status_active`/`status_archived`, `dash`), приглашения визарда (`ask_child_name`, `ask_contact_name`, `ask_phone`, `ask_telegram`) и подтверждения/ошибки (`added`, `archive_confirm`, `archived`, `restored`, `updated`, `cancelled`, `empty_required`, `need_contact_channel`, `edit_prompt`, `not_found`), а также приглашение клиента в бота (`invite_button`, `invite_button_linked`, `invite_forward`, `linked`, `link_unknown`, `tg_linked_badge` — бейдж «в боте» в поле Telegram карточки) и подписи кнопки абонемента на карточке (`btn_subscription_create`, `btn_subscription_open` с `{remaining}`) и блок отложенных уведомлений (`dnotify_title`, `dnotify_line` с `{when}`/`{text}`, `dnotify_cancel` с `{when}`). Короткие подписи inline-кнопок живут константами в `clients.py` (навигационная «обвязка», не сценарные тексты).
 - `[schedule].*` — секция записей: `button`, день/неделя/история (`day_title`, `day_empty`, `week_title`, `week_empty`, `history_title`, `history_empty`), записи клиента (`client_future_empty`, `client_history_title`, `client_history_empty`), инлайн-блок будущих в карточке клиента (`card_future_title`, `card_appt_line`), шаблоны строк (`line`, `line_full`, `day_header`, `comment_suffix`), шаблон карточки `card`, тексты пикера и FSM (`pick_date`, `pick_time`, `ask_custom_time`, `bad_time`, `ask_comment`), подтверждения (`created`, `rescheduled`, `deleted`, `not_found`, `confirm_delete`) и подписи кнопок (`btn_*`). Шаг уведомления: предпросмотр и Да/Нет (`notify_ask`, `notify_yes`, `notify_no`), тексты клиенту (`notify_created`/`notify_rescheduled`/`notify_cancelled`, `notify_series_*`), исходы (`notify_sent`, `notify_failed`, `notify_not_linked`, `notify_skipped`); выбор момента и отложенная отправка (`notify_when_ask`, `notify_when_now`, `notify_when_preset` с `{time}`, `notify_when_custom`, `notify_custom_time_ask`, `notify_custom_cancel`, `notify_deferred_queued`/`notify_deferred_superseded` с `{when}`, `notify_session_stale`, `notify_deferred_failed` с `{child}` — сообщение специалисту о сбое отложенной доставки). Подписи навигации календаря (`◀`/`▶`, дни недели) и маркеры занятости слотов (🟢/🔴) — константы в `schedule.py`.
 - `[recurring].*` — секция регулярных записей (ключи переписаны под двухуровневые карточки и мульти-слот): `mark` (🔁-пометка повтора), приглашения и FSM (`pick_weekday`, `pick_move_date`, `pick_time`, `ask_custom_time`, `bad_time`, `ask_comment`), `line`; визард создания (`add_more`, `btn_add_more`, `btn_done`); карточка расписания (`schedule_card`, `rule_line`, `empty_window`, `occ_btn`, `btn_configure`, `btn_stop`); карточка встречи (`meeting_card`, `btn_move`, `btn_skip`, `btn_comment`, `btn_to_schedule`); настройка (`configure_title`, `slot_btn`, `slot_actions_title`, `btn_slot_time`, `btn_slot_day`, `btn_slot_delete`, `btn_add_day`, `slot_removed`, `edited`); подтверждения и исходы (`confirm_stop`, `btn_confirm_stop`, `stopped`, `cancelled`, `skip_confirm`, `btn_confirm_skip`, `skipped`, `moved`, `ask_occ_comment`, `comment_set`, `created`, `not_found`). Прежние ключи одноуровневой карточки серии удалены (`card`, `btn_edit`, `btn_move_date`, `btn_skip_date`).
@@ -221,6 +230,7 @@
 - `specialist.welcomed` — первый успешный `/start <token>`.
 - `specialist.invite_replayed` — повтор `/start` для уже привязанного токена.
 - `specialist.invite_unknown` — `/start` с неизвестным токеном.
+- `specialist.keyboard_refreshed` — специалисту доставлена свежая reply-клавиатура и зафиксирована новая `keyboard_version` (в `extra`: `specialist_id`). Пишется и из голого `/start`, и из `KeyboardRefreshMiddleware`.
 - `client.created` / `client.field_updated` / `client.archived` / `client.restored` — бизнес-события картотеки (в `extra`: `specialist_id`, `client_id`).
 - `client.invite_created` / `client.linked` — выдача приглашения и привязка Telegram клиента (в `extra`: `specialist_id`, `client_id`). `client.link_unknown` — переход по неизвестному `cli_`-токену (в `extra`: `token_prefix`).
 - `appointment.created` / `appointment.rescheduled` / `appointment.deleted` — бизнес-события записей (в `extra`: `specialist_id`, `appointment_id`, для создания ещё `client_id`).

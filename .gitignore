@@ -60,7 +60,6 @@ ENV/
 # git worktrees
 .worktrees/
 .superpowers/
-.claude/worktrees/
 
 # Playwright CLI artifacts
 .playwright-cli/

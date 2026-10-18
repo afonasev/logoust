@@ -2,7 +2,7 @@
 
 Every code path that sends a message to a *client* (notifications, reminders,
 link confirmations, future ones) MUST record a `message` audit row through this
-helper with the actual delivery outcome — see `.claude/rules/bot.md`. Keeping one
+helper with the actual delivery outcome — see `.agents/rules/bot.md`. Keeping one
 funnel is what makes "all client messages are audited" enforceable rather than a
 promise each new feature has to remember.
 """

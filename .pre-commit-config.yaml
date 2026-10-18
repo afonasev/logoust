@@ -60,6 +60,8 @@ repos:
         types: [ python ]
         pass_filenames: false
       - id: pytest
+        # Полный набор — только по отдельной команде человека.
+        stages: [manual]
         name: pytest
         entry: uv run pytest
         language: system

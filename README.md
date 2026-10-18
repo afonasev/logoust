@@ -60,7 +60,7 @@ Clean Architecture под `src/`:
 - `make run-reload` — то же, но с авто-перезапуском при изменениях в `src/` и `alembic/` (для разработки).
 - `make create-invite` — создать приглашение специалиста локально и напечатать deep-link.
 - `make create-invite-prod` — создать приглашение специалиста на VPS и напечатать deep-link прод-бота (через алиас `logoust`, без ручного захода на сервер).
-- `make check` — формат + линт + type-check + тесты (требуется до commit).
+- `make check` — формат + линт + type-check + все тесты (только по отдельной явной команде на полный прогон).
 - `make format` / `make lint` / `make type-check` / `make test` — отдельные шаги.
 - `make upgrade` — обновить Python, lockfile, pre-commit.
 - `make deploy` — выкатить код на VPS (rsync + `uv sync` + миграции + рестарт сервиса). Требует SSH-алиас `logoust` в `~/.ssh/config`. Подробности — [docs/deployment.md](./docs/deployment.md).
@@ -68,9 +68,14 @@ Clean Architecture под `src/`:
 - `make backup-prod` — скачать серверные бэкапы БД в `backups/vps/` (через алиас `logoust`).
 - `make clean` — удалить кэши и `__pycache__`.
 
+Правила работы через Codex — [AGENTS.md](./AGENTS.md); карта миграции и настройки — [docs/codex-migration.md](./docs/codex-migration.md). Полный pytest hook запускается вручную после отдельной команды на full; остальные pre-commit-проверки остаются автоматическими.
+
 ## Структура проекта
 
 ```
+AGENTS.md          # правила работы Codex
+.agents/           # правила по типам файлов и repo skills
+.codex/            # настройки Codex проекта
 src/
   domain/          # сущности, протоколы
   services/        # use-cases

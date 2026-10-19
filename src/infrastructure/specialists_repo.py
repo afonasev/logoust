@@ -92,6 +92,9 @@ class SpecialistORM(Base):
     deferred_notify_time: Mapped[str] = mapped_column(
         String(5), nullable=False, default=DEFAULT_DEFERRED_NOTIFY_TIME
     )
+    # Хеш последнего набора кнопок постоянной клавиатуры, доставленного этому
+    # специалисту. NULL ⇒ ещё не доставляли ⇒ при первом действии получит свежую.
+    keyboard_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     def __repr__(self) -> str:
         return f"<SpecialistORM id={self.id} token={self.invite_token[:6]}…>"
@@ -124,6 +127,7 @@ def to_domain(orm: SpecialistORM) -> Specialist:
         consumption_last_run_on=orm.consumption_last_run_on,
         subscription_presets=orm.subscription_presets,
         deferred_notify_time=orm.deferred_notify_time,
+        keyboard_version=orm.keyboard_version,
     )
 
 
@@ -163,6 +167,13 @@ class SqlAlchemySpecialistsRepo:
     async def get(self, specialist_id: int) -> Specialist | None:
         orm = await self._session.get(SpecialistORM, specialist_id)
         return to_domain(orm) if orm is not None else None
+
+    async def set_keyboard_version(self, specialist_id: int, version: str) -> None:
+        orm = await self._session.get(SpecialistORM, specialist_id)
+        if orm is None:  # pragma: no cover - callers always pass a loaded specialist
+            return
+        orm.keyboard_version = version
+        await self._session.commit()
 
     async def update_settings(
         self, specialist_id: int, fields: Mapping[str, object]

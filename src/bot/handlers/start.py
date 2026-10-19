@@ -11,8 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.bot.client_audit import record_client_message
 from src.bot.deeplink import CLIENT_TOKEN_PREFIX
 from src.bot.handlers.clients import build_main_keyboard
+from src.bot.keyboard_refresh import keyboard_version
 from src.bot.messages import BotMessages
 from src.domain.audit import AuditEvent, DeliveryStatus
+from src.domain.client import Client
 from src.infrastructure.clients_repo import SqlAlchemyClientsRepo
 from src.infrastructure.message_templates_repo import SqlAlchemyMessageTemplatesRepo
 from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
@@ -79,13 +81,12 @@ async def _consume_and_reply(
         )
 
     if result is ConsumeResult.WELCOMED:
-        await message.answer(
-            messages.start.welcome, reply_markup=build_main_keyboard(messages)
+        await _send_specialist_keyboard(
+            message, messages.start.welcome, messages, session_factory
         )
     elif result is ConsumeResult.ALREADY_WELCOMED:
-        await message.answer(
-            messages.start.already_welcomed,
-            reply_markup=build_main_keyboard(messages),
+        await _send_specialist_keyboard(
+            message, messages.start.already_welcomed, messages, session_factory
         )
     else:
         await message.answer(messages.start.unknown_token)
@@ -119,22 +120,88 @@ async def _link_client_and_reply(
             key="linked",
             default=messages.clients.linked,
         )
-    assert client.id is not None  # noqa: S101 — linked clients are persisted
+    await _send_client_confirmation(
+        message, client, text, AuditEvent.WELCOME, session_factory
+    )
+
+
+async def _send_client_confirmation(
+    message: Message,
+    client: Client,
+    text: str,
+    event: AuditEvent,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    assert client.id is not None  # noqa: S101 — client is persisted
     status, error = DeliveryStatus.SENT, None
     try:
         await message.answer(text)
     except (TelegramForbiddenError, TelegramBadRequest) as exc:
         status, error = DeliveryStatus.FAILED, str(exc)
-    # The link confirmation is a client-facing message — journal it like the rest.
     await record_client_message(
         session_factory,
         specialist_id=client.specialist_id,
         client_id=client.id,
-        event=AuditEvent.WELCOME,
+        event=event,
         text=text,
         status=status,
         error=error,
     )
+
+
+async def _send_specialist_keyboard(
+    message: Message,
+    text: str,
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await message.answer(text, reply_markup=build_main_keyboard(messages))
+    assert message.from_user is not None  # noqa: S101 — checked by caller
+    async with session_factory() as session:
+        repo = SqlAlchemySpecialistsRepo(session)
+        specialist = await repo.find_by_chat_id(message.from_user.id)
+        # Использованный инвайт может повторить другой аккаунт. Ответ
+        # постороннему не означает доставку клавиатуры владельцу приглашения.
+        if specialist is None:
+            return
+        assert specialist.id is not None  # noqa: S101 — persisted specialist
+        await repo.set_keyboard_version(specialist.id, keyboard_version(messages))
+    logger.info("specialist.keyboard_refreshed", extra={"specialist_id": specialist.id})
+
+
+async def _greet_known_or_no_token(
+    message: Message,
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bare `/start`: recognise the sender by chat_id and reply by role.
+
+    Specialist → re-send the welcome with a fresh keyboard and record the current
+    version; else a linked client → confirm; else the unchanged `no_token`. No new
+    specialist rows are ever created. The caller ensures `message.from_user` is set.
+    """
+    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    chat_id = message.from_user.id
+    async with session_factory() as session:
+        specialist = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(chat_id)
+    if specialist is not None:
+        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        await _send_specialist_keyboard(
+            message, messages.start.already_welcomed, messages, session_factory
+        )
+        return
+    async with session_factory() as session:
+        client = await SqlAlchemyClientsRepo(session).find_by_chat_id(chat_id)
+    if client is not None:
+        await _send_client_confirmation(
+            message,
+            client,
+            messages.start.already_linked,
+            AuditEvent.CONNECTION_CONFIRMED,
+            session_factory,
+        )
+        return
+    await message.answer(messages.start.no_token)
 
 
 def make_start_handler(
@@ -147,7 +214,7 @@ def make_start_handler(
 
         token = command.args
         if not token:
-            await message.answer(messages.start.no_token)
+            await _greet_known_or_no_token(message, messages, session_factory)
             return
 
         if token.startswith(CLIENT_TOKEN_PREFIX):

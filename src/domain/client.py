@@ -132,6 +132,10 @@ class ClientsRepo(Protocol):
         self, token: str
     ) -> Client | None: ...
 
+    async def find_by_chat_id(  # pragma: no cover
+        self, chat_id: int
+    ) -> Client | None: ...
+
     async def link_telegram(  # pragma: no cover
         self,
         client_id: int,

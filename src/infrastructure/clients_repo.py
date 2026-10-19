@@ -209,6 +209,19 @@ class SqlAlchemyClientsRepo:
         orm = result.scalar_one_or_none()
         return to_domain(orm) if orm is not None else None
 
+    async def find_by_chat_id(self, chat_id: int) -> Client | None:
+        # telegram_chat_id не уникален (один аккаунт → несколько карточек), поэтому
+        # берём любую привязанную карточку — нам важен лишь факт «это клиент».
+        stmt = (
+            select(ClientORM)
+            .where(ClientORM.telegram_chat_id == chat_id)
+            .order_by(ClientORM.id)
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        orm = result.scalars().first()
+        return to_domain(orm) if orm is not None else None
+
     async def link_telegram(
         self,
         client_id: int,

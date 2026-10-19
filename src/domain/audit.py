@@ -19,6 +19,7 @@ class AuditEvent(enum.Enum):
     NOTIFY_RESCHEDULED = "notify_rescheduled"
     NOTIFY_CANCELLED = "notify_cancelled"
     WELCOME = "welcome"
+    CONNECTION_CONFIRMED = "connection_confirmed"
     REMINDER = "reminder"
     PAYMENT_REMINDER = "payment_reminder"
     # action-события (ключевые действия специалиста).

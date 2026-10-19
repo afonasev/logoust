@@ -1,2 +1,4 @@
+approval_policy = "never"
+approvals_reviewer = "user"
 # Defaults новых запусков; явный выбор человека важнее.
 # Ограниченная разработка: gpt-6-luna / medium, выбор в чате.

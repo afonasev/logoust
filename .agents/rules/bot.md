@@ -26,7 +26,7 @@
   регулярной: создание/перенос/отмена).
 - `src/bot/scheduler.py::_deliver` — авто-напоминания клиенту (и ручной запуск
   `src/bot/handlers/settings.py::send_reminders_now` доставляет той же воронкой).
-- `src/bot/handlers/start.py::_link_client_and_reply` — подтверждение привязки.
+- `src/bot/handlers/start.py::_send_client_confirmation` — подтверждение привязки и ответ уже подключённому клиенту на `/start` (успех и сбой).
 
 ### Что НЕ журналируется этим правилом
 

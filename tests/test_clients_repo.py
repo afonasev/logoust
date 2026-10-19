@@ -218,6 +218,39 @@ async def test_find_by_invite_token_roundtrip(session: AsyncSession):
     assert await repo.find_by_invite_token("missing") is None
 
 
+async def test_find_by_chat_id_finds_linked_client(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    saved = await repo.add(_make())
+    assert saved.id is not None
+    ts = datetime.now(UTC)
+    await repo.link_telegram(
+        saved.id, telegram_chat_id=555, username=None, linked_at=ts, updated_at=ts
+    )
+    found = await repo.find_by_chat_id(555)
+    assert found is not None
+    assert found.id == saved.id
+
+
+async def test_find_by_chat_id_returns_none_for_unknown(session: AsyncSession):
+    repo = SqlAlchemyClientsRepo(session)
+    assert await repo.find_by_chat_id(404) is None
+
+
+async def test_find_by_chat_id_tolerates_multiple_cards(session: AsyncSession):
+    # One Telegram account can be bound to several client cards (chat_id is not
+    # unique); find_by_chat_id must return one rather than raise.
+    repo = SqlAlchemyClientsRepo(session)
+    ts = datetime.now(UTC)
+    for name in ("Аня", "Боря"):
+        saved = await repo.add(_make(child_name=name))
+        assert saved.id is not None
+        await repo.link_telegram(
+            saved.id, telegram_chat_id=777, username=None, linked_at=ts, updated_at=ts
+        )
+    found = await repo.find_by_chat_id(777)
+    assert found is not None
+
+
 def test_to_domain_maps_fields():
     now = datetime(2026, 6, 4, tzinfo=UTC)
     orm = ClientORM(

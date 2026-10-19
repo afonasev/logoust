@@ -31,5 +31,19 @@
     "No real Telegram API delivery",
     "No production DB migration",
     "No deploy"
-  ]
+  ],
+  "integration": {
+    "main_baseline": "7261c1b",
+    "reason": "PR #7 merged after dependency QA; retain keyboard refresh and /start behavior",
+    "tests": 891,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "coverage_percent": 100.0,
+    "body_report_seconds": 43.86,
+    "ruff": "PASS",
+    "format": "PASS",
+    "ty": "PASS",
+    "runtime_ast_vs_main": "PASS"
+  }
 }

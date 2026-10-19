@@ -71,3 +71,10 @@ Pre-commit: pre-commit-hooks v6.0.0 уже актуален; validate-pyproject 
 Непроверенные gates: Linux/VPS runtime, Telegram-доставка с реальным токеном, человеческая приёмка и deployment. Их отсутствие не подменяется локальным PASS.
 
 Источники: [обновление lockfile uv](https://docs.astral.sh/uv/concepts/projects/sync/), [SQLAlchemy 2.1 migration](https://docs.sqlalchemy.org/en/21/changelog/migration_21.html), [aiogram 3.31.0 changelog](https://docs.aiogram.dev/en/v3.31.0/changelog.html), [синтаксис подавлений ty](https://docs.astral.sh/ty/suppression/).
+
+
+## Совмещение с PR #7 перед merge
+
+Перед merge PR #8 в main появился PR #7 (main 7261c1b): распознавание /start и обновление клавиатуры. Ветка зависимостей совмещена с этим snapshot. Единственный текстовый конфликт в src/bot/handlers/start.py разрешён сохранением актуального helper _send_client_confirmation и его аудита; новые noqa в start.py и keyboard_refresh.py мигрированы к эквивалентным Ruff names.
+
+Ruff, formatter, ty и сравнение runtime AST с main 7261c1b — PASS. Повторный полный pytest: **891 passed**, **100.00% statement/branch coverage**, 43.86 s. Полный повтор обоснован изменением исходного snapshot: общие зависимости теперь проверены вместе с новой клавиатурой и дополнительными сценариями /start. Рабочая БД и production не затронуты.

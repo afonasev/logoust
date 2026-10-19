@@ -107,7 +107,7 @@ class RecurringSlotRepo(Protocol):
         self, slot_id: int, *, materialized_through: date
     ) -> None: ...
 
-    async def update_rule(  # noqa: PLR0913  # pragma: no cover
+    async def update_rule(  # ruff: ignore[too-many-arguments]  # pragma: no cover
         self,
         slot_id: int,
         specialist_id: int,
@@ -122,7 +122,7 @@ class RecurringSlotRepo(Protocol):
 
 class RecurringSlotOverrideRepo(Protocol):
     # Protocol method bodies are unimplemented placeholders by design.
-    async def upsert(  # noqa: PLR0913  # pragma: no cover
+    async def upsert(  # ruff: ignore[too-many-arguments]  # pragma: no cover
         self,
         slot_id: int,
         original_date: date,

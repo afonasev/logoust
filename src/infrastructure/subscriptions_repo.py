@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast, overload
 
 from sqlalchemy import (
     DateTime,
@@ -22,6 +23,9 @@ from src.domain.deduction import (
 )
 from src.domain.subscription import Subscription, SubscriptionStatus
 from src.infrastructure.db import Base
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 
 class SubscriptionORM(Base):
@@ -188,6 +192,14 @@ class SqlAlchemySubscriptionsRepo:
         return result.scalar_one_or_none()
 
 
+@overload
+def _as_utc(value: datetime) -> datetime: ...
+
+
+@overload
+def _as_utc(value: None) -> None: ...
+
+
 def _as_utc(value: datetime | None) -> datetime | None:
     # SQLite drops tzinfo on read; we store aware UTC, so re-attach it (mirrors
     # appointments_repo._as_utc) — else wall-clock conversion would shift the value.
@@ -245,7 +257,7 @@ def deduction_to_domain(orm: SubscriptionDeductionORM) -> SubscriptionDeduction:
         appointment_starts_at=_as_utc(orm.appointment_starts_at),
         appointment_comment=orm.appointment_comment,
         closing_comment=orm.closing_comment,
-        created_at=_as_utc(orm.created_at),  # type: ignore[arg-type] — never None
+        created_at=_as_utc(orm.created_at),
         cancelled_at=_as_utc(orm.cancelled_at),
     )
 
@@ -403,7 +415,7 @@ class SqlAlchemySubscriptionDeductionsRepo:
             .values(remaining=SubscriptionORM.remaining - 1)
         )
         result = await self._session.execute(stmt)
-        return result.rowcount > 0
+        return cast("CursorResult", result).rowcount > 0
 
     async def _remaining(self, subscription_id: int) -> int | None:
         stmt = select(SubscriptionORM.remaining).where(

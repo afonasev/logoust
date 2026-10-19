@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import overload
 
 from sqlalchemy import (
     Boolean,
@@ -22,6 +23,14 @@ from src.domain.recurring import (
     RecurringSlotOverride,
 )
 from src.infrastructure.db import Base
+
+
+@overload
+def _as_utc(value: datetime) -> datetime: ...
+
+
+@overload
+def _as_utc(value: None) -> None: ...
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -124,8 +133,8 @@ def schedule_to_domain(orm: RecurringScheduleORM) -> RecurringSchedule:
         client_id=orm.client_id,
         comment=orm.comment,
         active=bool(orm.active),
-        created_at=_as_utc(orm.created_at),  # type: ignore[arg-type]
-        updated_at=_as_utc(orm.updated_at),  # type: ignore[arg-type]
+        created_at=_as_utc(orm.created_at),
+        updated_at=_as_utc(orm.updated_at),
     )
 
 
@@ -138,8 +147,8 @@ def slot_to_domain(orm: RecurringSlotORM) -> RecurringSlot:
         active=bool(orm.active),
         start_date=orm.start_date,
         materialized_through=orm.materialized_through,
-        created_at=_as_utc(orm.created_at),  # type: ignore[arg-type]
-        updated_at=_as_utc(orm.updated_at),  # type: ignore[arg-type]
+        created_at=_as_utc(orm.created_at),
+        updated_at=_as_utc(orm.updated_at),
     )
 
 
@@ -151,7 +160,7 @@ def override_to_domain(orm: RecurringSlotOverrideORM) -> RecurringSlotOverride:
         skipped=bool(orm.skipped),
         moved_to=_as_utc(orm.moved_to),
         comment=orm.comment,
-        created_at=_as_utc(orm.created_at),  # type: ignore[arg-type]
+        created_at=_as_utc(orm.created_at),
     )
 
 
@@ -296,7 +305,7 @@ class SqlAlchemyRecurringSlotRepo:
         orm.materialized_through = materialized_through
         await self._session.commit()
 
-    async def update_rule(  # noqa: PLR0913
+    async def update_rule(  # ruff: ignore[too-many-arguments]
         self,
         slot_id: int,
         specialist_id: int,
@@ -341,7 +350,7 @@ class SqlAlchemyRecurringSlotOverrideRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def upsert(  # noqa: PLR0913
+    async def upsert(  # ruff: ignore[too-many-arguments]
         self,
         slot_id: int,
         original_date: date,

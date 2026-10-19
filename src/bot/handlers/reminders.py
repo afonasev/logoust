@@ -129,7 +129,7 @@ class ReminderHandlers:
         text = self._m.specialist_declined.format(
             child=child, date=format_ru_date(wall.date()), time=f"{wall:%H:%M}"
         )
-        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
         appointment_id = appointment.id if appointment is not None else None
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[

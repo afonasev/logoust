@@ -27,7 +27,7 @@ def test_parse_placeholders_reduces_dotted_and_indexed_names():
 
 
 def test_parse_placeholders_raises_on_unbalanced_braces():
-    with pytest.raises(ValueError):  # noqa: PT011 — any ValueError is the contract
+    with pytest.raises(ValueError):  # ruff: ignore[pytest-raises-too-broad] — any ValueError is the contract
         parse_placeholders("сломанная скобка {date")
 
 
@@ -49,7 +49,7 @@ def test_validate_rejects_disallowed_placeholder():
 
 
 def test_validate_rejects_missing_required_placeholder():
-    violations = validate_template("appt_reminder", "Напоминаем о записи {date}")  # noqa: RUF001
+    violations = validate_template("appt_reminder", "Напоминаем о записи {date}")  # ruff: ignore[ambiguous-unicode-character-string]
     assert len(violations) == 1
     assert violations[0].kind is TemplateViolation.MISSING_REQUIRED
     assert violations[0].placeholders == ("time",)

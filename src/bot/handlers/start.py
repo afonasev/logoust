@@ -68,7 +68,7 @@ async def _consume_and_reply(
 
     The caller must ensure `message.from_user` is not None.
     """
-    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — guaranteed by caller
     async with session_factory() as session:
         repo = SqlAlchemySpecialistsRepo(session)
         result = await consume_invite(
@@ -101,7 +101,7 @@ async def _link_client_and_reply(
 
     The caller must ensure `message.from_user` is not None.
     """
-    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — guaranteed by caller
     async with session_factory() as session:
         client = await link_client_by_token(
             SqlAlchemyClientsRepo(session),
@@ -119,7 +119,7 @@ async def _link_client_and_reply(
             key="linked",
             default=messages.clients.linked,
         )
-    assert client.id is not None  # noqa: S101 — linked clients are persisted
+    assert client.id is not None  # ruff: ignore[assert] — linked clients are persisted
     status, error = DeliveryStatus.SENT, None
     try:
         await message.answer(text)

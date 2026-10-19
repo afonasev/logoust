@@ -33,12 +33,12 @@ unsafe-fixes = true
 # Comprehensive rule set for strict checking
 select = ["ALL"]
 ignore = [
-    "E501",   # Line too long (formatter handles this)
-    "CPY001", # Missing copyright notice at top of file
-    "COM812", # he following rule may cause conflicts when used with the formatter
+    "line-too-long",   # Line too long (formatter handles this)
+    "missing-copyright-notice", # Missing copyright notice at top of file
+    "missing-trailing-comma", # he following rule may cause conflicts when used with the formatter
     "ANN",    # type annotation (use TY)
     "D",      # Missing docstring
-    "DOC201", # `return` is not documented in docstring
+    "docstring-missing-returns", # `return` is not documented in docstring
 ]
 
 [tool.ruff.format]
@@ -54,21 +54,21 @@ max-nested-blocks = 3
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = [
-    "F401", # Allow unused imports in __init__.py
+    "unused-import", # Allow unused imports in __init__.py
 ]
 "alembic/env.py" = [
-    "INP001", # Alembic env.py is a script, not part of a package
+    "implicit-namespace-package", # Alembic env.py is a script, not part of a package
 ]
 "alembic/versions/*.py" = [
-    "INP001", # Alembic migrations are scripts, not part of a package
+    "implicit-namespace-package", # Alembic migrations are scripts, not part of a package
 ]
 "tests/**/*.py" = [
-    "S101",    # Allow assert in tests
-    "S105",    # Hardcoded strings in test data are not passwords
-    "S106",    # Same — keyword args carry test fixtures, not credentials
-    "PLR2004", # Allow magic values in tests
-    "PLC0415", # Allow local imports inside test functions (lazy setup)
-    "PLC2701", # Allow importing module-internal helpers under test
+    "assert",    # Allow assert in tests
+    "hardcoded-password-string",    # Hardcoded strings in test data are not passwords
+    "hardcoded-password-func-arg",    # Same — keyword args carry test fixtures, not credentials
+    "magic-value-comparison", # Allow magic values in tests
+    "import-outside-top-level", # Allow local imports inside test functions (lazy setup)
+    "import-private-name", # Allow importing module-internal helpers under test
     "FBT",     # Allow boolean args in tests
 ]
 
@@ -142,6 +142,7 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.6.0",
-    "ruff==0.15.8",
+    "ruff==0.17.1",
+    "ty==0.0.89",
     "watchfiles",
 ]

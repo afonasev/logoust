@@ -2,10 +2,12 @@ from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
 from aiogram.exceptions import TelegramForbiddenError
+from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.messages import DEFAULT_MESSAGES_PATH, BotMessages, load_messages
 from src.bot.scheduler import (
+    _consumption_keyboard,
     run_consumption_pass,
     run_digest_pass,
     run_outbox_pass,
@@ -28,6 +30,7 @@ from src.infrastructure.specialists_repo import SqlAlchemySpecialistsRepo
 from src.infrastructure.subscriptions_repo import SqlAlchemySubscriptionsRepo
 from src.services.appointments import create_appointment
 from src.services.clients import NewClient, add_client
+from src.services.consumption import ConsumptionReport
 from src.services.invites import create_invite
 from src.services.subscriptions import create_subscription
 
@@ -137,7 +140,7 @@ async def test_reminder_failure_records_failed_audit(
     await _seed_appointment(session_factory, client_id, "10:00")
     bot = AsyncMock()
     bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     await run_reminder_pass(bot, session_factory, _messages(), _NOW)
@@ -170,7 +173,7 @@ async def test_delivery_failure_does_not_stop_pass(
     await _seed_appointment(session_factory, b, "11:00")
     bot = AsyncMock()
     bot.send_message.side_effect = [
-        TelegramForbiddenError(method=None, message="blocked"),  # type: ignore[arg-type]
+        TelegramForbiddenError(method=None, message="blocked"),  # ty: ignore[invalid-argument-type]
         None,
     ]
     await run_reminder_pass(bot, session_factory, _messages(), _NOW)
@@ -234,7 +237,7 @@ async def test_digest_pass_skips_non_due_specialist(
     bot.send_message.assert_not_awaited()
 
 
-async def _enqueue_due(  # noqa: PLR0913
+async def _enqueue_due(  # ruff: ignore[too-many-arguments]
     factory: async_sessionmaker[AsyncSession],
     *,
     client_id: int,
@@ -328,7 +331,7 @@ async def test_outbox_pass_failure_notifies_specialist(
     bot = AsyncMock()
     # The client send fails; the follow-up message to the specialist succeeds.
     bot.send_message.side_effect = [
-        TelegramForbiddenError(method=None, message="blocked"),  # type: ignore[arg-type]
+        TelegramForbiddenError(method=None, message="blocked"),  # ty: ignore[invalid-argument-type]
         None,
     ]
     await run_outbox_pass(bot, session_factory, _messages(), _OUTBOX_NOW)
@@ -381,7 +384,7 @@ async def test_digest_pass_logs_failure(
     await _seed_today_appointment(session_factory, client_id, "14:00")
     bot = AsyncMock()
     bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     # The pass swallows the delivery error; the day is still marked done.
@@ -431,12 +434,12 @@ async def _seed_empty_subscription(
     return sub.id
 
 
-def _callbacks(markup: object) -> list[str | None]:
-    return [b.callback_data for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+def _callbacks(markup: InlineKeyboardMarkup) -> list[str | None]:
+    return [b.callback_data for row in markup.inline_keyboard for b in row]
 
 
-def _button_texts(markup: object) -> list[str]:
-    return [b.text for row in markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+def _button_texts(markup: InlineKeyboardMarkup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
 
 
 async def test_payment_pass_alerts_specialist_with_send_button(
@@ -612,7 +615,7 @@ async def test_consumption_pass_delivery_failure_keeps_deduction(
     await _seed_today_appointment(session_factory, client_id, "10:00")
     bot = AsyncMock()
     bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
@@ -635,3 +638,13 @@ async def test_consumption_pass_skips_disabled_specialist(
     bot = AsyncMock()
     await run_consumption_pass(bot, session_factory, _messages(), _CONS_NOW)
     bot.send_message.assert_not_awaited()
+
+
+async def test_empty_consumption_report_has_no_keyboard(
+    session_factory: async_sessionmaker[AsyncSession],
+):
+    await _seed_specialist(session_factory)
+    async with session_factory() as session:
+        specialist = await SqlAlchemySpecialistsRepo(session).get(_SP)
+    assert specialist is not None
+    assert _consumption_keyboard(ConsumptionReport(), specialist, _messages()) is None

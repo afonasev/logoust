@@ -281,10 +281,10 @@ class SubscriptionsHandlers:
     async def _card_view(
         self, subscription: Subscription, specialist_id: int
     ) -> tuple[str, InlineKeyboardMarkup]:
-        assert subscription.id is not None  # noqa: S101 — persisted subscription
+        assert subscription.id is not None  # ruff: ignore[assert] — persisted subscription
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
             client = await SqlAlchemyClientsRepo(session).get_for_specialist(
                 subscription.client_id, specialist_id
             )
@@ -304,7 +304,7 @@ class SubscriptionsHandlers:
     async def _presets(self, specialist_id: int) -> list[int]:
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-        assert specialist is not None  # noqa: S101 — middleware guarantees it
+        assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
         return presets_list(specialist.subscription_presets)
 
     # --- lists: active & closed -----------------------------------------------
@@ -342,7 +342,7 @@ class SubscriptionsHandlers:
                 SqlAlchemyClientsRepo(session), specialist_id=specialist_id
             )
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
         if page_num == 0 and not page.items:
             text = self._m.list_closed_empty
         else:
@@ -468,7 +468,7 @@ class SubscriptionsHandlers:
                 # Invariant guard: an active subscription already exists — open it
                 # instead of creating a second one.
                 subscription = await repo.get_active(client_id, specialist_id)
-        assert subscription is not None  # noqa: S101 — created or pre-existing active
+        assert subscription is not None  # ruff: ignore[assert] — created or pre-existing active
         return subscription
 
     async def cancel_create(self, callback: CallbackQuery, state: FSMContext) -> None:
@@ -567,7 +567,7 @@ class SubscriptionsHandlers:
                 subscription_id=sid,
                 specialist_id=specialist_id,
             )
-        assert subscription is not None  # noqa: S101 — just decremented it
+        assert subscription is not None  # ruff: ignore[assert] — just decremented it
         text, keyboard = await self._card_view(subscription, specialist_id)
         await _callback_message(callback).edit_text(text, reply_markup=keyboard)
         await callback.answer(self._m.decremented)
@@ -644,7 +644,7 @@ class SubscriptionsHandlers:
     ) -> tuple[str, InlineKeyboardMarkup]:
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
             subscription = await get_card(
                 SqlAlchemySubscriptionsRepo(session),
                 subscription_id=deduction.subscription_id,

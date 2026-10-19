@@ -110,7 +110,7 @@ async def _add_slot(
 # --- helper to build a plain in-memory slot for pure occurrence-math tests ----
 
 
-def _slot(  # noqa: PLR0913
+def _slot(  # ruff: ignore[too-many-arguments]
     *,
     slot_id: int = 1,
     schedule_id: int = 1,

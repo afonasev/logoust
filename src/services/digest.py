@@ -63,7 +63,7 @@ def render_digest(
     return "\n".join([header, *lines])
 
 
-async def collect_today_digest(  # noqa: PLR0913
+async def collect_today_digest(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -79,7 +79,7 @@ async def collect_today_digest(  # noqa: PLR0913
     Shared by the scheduled pass and the manual "send now" action so both produce
     the identical list (real rows + virtual slot repeats landing today).
     """
-    assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
+    assert specialist.id is not None  # ruff: ignore[assert] — caller passes a persisted specialist
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     series = await load_series_context(
@@ -100,7 +100,7 @@ async def collect_today_digest(  # noqa: PLR0913
     return render_digest(occurrences, names, wall_today, tz, messages)
 
 
-async def send_digest_if_due(  # noqa: PLR0913
+async def send_digest_if_due(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -120,8 +120,8 @@ async def send_digest_if_due(  # noqa: PLR0913
     """
     if not is_digest_due(specialist, now):
         return False
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
-    assert specialist.telegram_chat_id is not None  # noqa: S101 — candidates are welcomed
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
+    assert specialist.telegram_chat_id is not None  # ruff: ignore[assert] — candidates are welcomed
     text = await collect_today_digest(
         specialist,
         now,

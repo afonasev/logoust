@@ -67,7 +67,7 @@ def render_reminder_text(
     )
 
 
-async def run_reminders_if_due(  # noqa: PLR0913
+async def run_reminders_if_due(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -83,7 +83,7 @@ async def run_reminders_if_due(  # noqa: PLR0913
     """Remind linked clients of tomorrow's appointments when the pass is due."""
     if not is_reminder_due(specialist, now):
         return []
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
     to_send = await _collect_reminders(
         specialist,
         now,
@@ -101,7 +101,7 @@ async def run_reminders_if_due(  # noqa: PLR0913
     return to_send
 
 
-async def run_reminders_now(  # noqa: PLR0913
+async def run_reminders_now(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -120,7 +120,7 @@ async def run_reminders_now(  # noqa: PLR0913
     день отрабатывает как обычно. Per-occurrence дедуп держит журнал (`insert_pending`),
     не дневной флаг, так что уже напомненные сегодня клиенты повторно ничего не получают.
     """
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
     return await _collect_reminders(
         specialist,
         now,
@@ -134,7 +134,7 @@ async def run_reminders_now(  # noqa: PLR0913
     )
 
 
-async def _collect_reminders(  # noqa: PLR0913
+async def _collect_reminders(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -151,7 +151,7 @@ async def _collect_reminders(  # noqa: PLR0913
     Shared by the gated daily pass and the manual run — it touches only the journal
     (`insert_pending` for per-occurrence dedup) and never `reminder_last_run_on`.
     """
-    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
+    assert specialist.id is not None  # ruff: ignore[assert] — caller guarantees a persisted id
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     series = await load_series_context(
@@ -179,7 +179,7 @@ async def _collect_reminders(  # noqa: PLR0913
     )
 
 
-async def _journal_and_collect(  # noqa: PLR0913, PLR0917
+async def _journal_and_collect(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     occurrences: list[Appointment],
     clients: dict[int, Client],
     specialist: Specialist,
@@ -188,7 +188,7 @@ async def _journal_and_collect(  # noqa: PLR0913, PLR0917
     reminders_repo: RemindersRepo,
     messages: ReminderMessages,
 ) -> list[ReminderToSend]:
-    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
+    assert specialist.id is not None  # ruff: ignore[assert] — caller guarantees a persisted id
     to_send: list[ReminderToSend] = []
     for occ in occurrences:
         client = clients.get(occ.client_id)
@@ -207,7 +207,7 @@ async def _journal_and_collect(  # noqa: PLR0913, PLR0917
         )
         if not await reminders_repo.insert_pending(reminder):
             continue  # already reminded for this occurrence
-        assert reminder.id is not None  # noqa: S101 — set on a successful insert
+        assert reminder.id is not None  # ruff: ignore[assert] — set on a successful insert
         to_send.append(
             ReminderToSend(
                 reminder_id=reminder.id,
@@ -220,7 +220,7 @@ async def _journal_and_collect(  # noqa: PLR0913, PLR0917
     return to_send
 
 
-async def apply_reminder_response(  # noqa: PLR0913
+async def apply_reminder_response(  # ruff: ignore[too-many-arguments]
     reminders_repo: RemindersRepo,
     clients_repo: ClientsRepo,
     *,

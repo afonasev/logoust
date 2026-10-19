@@ -29,7 +29,7 @@ class EnqueueResult:
     superseded_due_at: datetime | None
 
 
-async def enqueue_deferred(  # noqa: PLR0913
+async def enqueue_deferred(  # ruff: ignore[too-many-arguments]
     repo: ScheduledMessagesRepo,
     *,
     specialist_id: int,

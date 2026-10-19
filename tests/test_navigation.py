@@ -16,7 +16,7 @@ def _navigator(calls: list[tuple[str, str]]) -> Navigator:
     # Each builder records (name, back) so a test can see which one fired, and
     # returns a recognisable screen.
     def builder(name: str):
-        async def _b(  # noqa: RUF029
+        async def _b(  # ruff: ignore[unused-async]
             specialist_id: int, back: str
         ) -> tuple[str, InlineKeyboardMarkup]:
             calls.append((name, back))

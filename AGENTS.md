@@ -11,7 +11,7 @@
 ## Проект и архитектура
 
 Logoust Assistant — Telegram-помощник логопедического кабинета: расписание, клиенты, абонементы и напоминания.
-Python 3.13, `uv`, aiogram, SQLAlchemy 2.0, SQLite; технический индекс — `docs/README.md`.
+Python 3.13, `uv`, aiogram, SQLAlchemy 2.1, SQLite; технический индекс — `docs/README.md`.
 
 - `src/domain/` — чистые сущности и протоколы, без SQLAlchemy и адаптеров.
 - `src/services/` — use-cases; зависят только от domain.

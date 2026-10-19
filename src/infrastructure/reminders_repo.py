@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import (
     Date,
@@ -15,6 +16,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from src.domain.reminder import AppointmentReminder, ReminderStatus
 from src.infrastructure.db import Base
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -100,7 +104,7 @@ class SqlAlchemyRemindersRepo:
         )
         result = await self._session.execute(stmt)
         await self._session.commit()
-        if result.rowcount <= 0:
+        if cast("CursorResult", result).rowcount <= 0:
             return False
         loaded = await self._session.execute(
             select(AppointmentReminderORM.id).where(

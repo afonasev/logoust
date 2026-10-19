@@ -61,7 +61,7 @@ def _schedule(**overrides: object) -> RecurringSchedule:
         "updated_at": _NOW,
     }
     base.update(overrides)
-    return RecurringSchedule(**base)  # type: ignore[arg-type]
+    return RecurringSchedule(**base)
 
 
 def _slot(schedule_id: int, **overrides: object) -> RecurringSlot:
@@ -77,7 +77,7 @@ def _slot(schedule_id: int, **overrides: object) -> RecurringSlot:
         "updated_at": _NOW,
     }
     base.update(overrides)
-    return RecurringSlot(**base)  # type: ignore[arg-type]
+    return RecurringSlot(**base)
 
 
 # --- RecurringScheduleRepo --------------------------------------------------

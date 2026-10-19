@@ -171,7 +171,7 @@ async def _seed_schedule(
     return schedule.id
 
 
-async def _seed_slot(  # noqa: PLR0913
+async def _seed_slot(  # ruff: ignore[too-many-arguments]
     factory: async_sessionmaker[AsyncSession],
     *,
     schedule_id: int,
@@ -199,7 +199,7 @@ async def _seed_slot(  # noqa: PLR0913
     return slot.id
 
 
-async def _upsert_override(  # noqa: PLR0913
+async def _upsert_override(  # ruff: ignore[too-many-arguments]
     factory: async_sessionmaker[AsyncSession],
     *,
     slot_id: int,

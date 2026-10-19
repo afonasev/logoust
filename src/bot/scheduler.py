@@ -72,7 +72,7 @@ async def run_reminder_pass(
     async with session_factory() as session:
         candidates = await SqlAlchemySpecialistsRepo(session).list_reminder_candidates()
     for specialist in candidates:
-        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
         async with session_factory() as session:
             # Each specialist may override the reminder text; resolve per pass.
             client_text = await resolve_template(
@@ -107,7 +107,7 @@ async def run_digest_pass(
     async with session_factory() as session:
         candidates = await SqlAlchemySpecialistsRepo(session).list_digest_candidates()
     for specialist in candidates:
-        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
         async with session_factory() as session:
             try:
                 await send_digest_if_due(
@@ -149,7 +149,7 @@ async def run_payment_reminder_pass(
             session
         ).list_payment_reminder_candidates()
     for specialist in candidates:
-        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
         await _run_payment_for_specialist(
             bot, session_factory, messages, specialist, now
         )
@@ -162,7 +162,7 @@ async def _run_payment_for_specialist(
     specialist: Specialist,
     now: datetime,
 ) -> None:
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
     async with session_factory() as session:
         # Preview is the same fixed client text for every alert of this specialist.
         preview = await resolve_template(
@@ -242,7 +242,7 @@ async def run_consumption_pass(
             session
         ).list_consumption_candidates()
     for specialist in candidates:
-        assert specialist.id is not None  # noqa: S101 — candidates are persisted
+        assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
         await _run_consumption_for_specialist(
             bot, session_factory, messages, specialist, now
         )
@@ -293,7 +293,7 @@ def _missed_button(
     """One ❗-meeting button: EXHAUSTED → subscription card, else client card."""
     wall = utc_to_wall(miss.starts_at, specialist.timezone)
     if miss.reason is MissReason.EXHAUSTED:
-        assert miss.subscription_id is not None  # noqa: S101 — set on EXHAUSTED
+        assert miss.subscription_id is not None  # ruff: ignore[assert] — set on EXHAUSTED
         text = messages.consumption.missed_exhausted
         callback_data = f"subs:card:{miss.subscription_id}"
     else:
@@ -368,7 +368,7 @@ async def _deliver_outbox(
     session_factory: async_sessionmaker[AsyncSession],
     now: datetime,
 ) -> None:
-    assert message.id is not None  # noqa: S101 — due rows are persisted
+    assert message.id is not None  # ruff: ignore[assert] — due rows are persisted
     async with session_factory() as session:
         client = await SqlAlchemyClientsRepo(session).get_for_specialist(
             message.client_id, message.specialist_id
@@ -398,7 +398,7 @@ async def _deliver_outbox(
     )
 
 
-async def _outbox_failed(  # noqa: PLR0913
+async def _outbox_failed(  # ruff: ignore[too-many-arguments]
     bot: Bot,
     messages: BotMessages,
     message: ScheduledClientMessage,
@@ -408,7 +408,7 @@ async def _outbox_failed(  # noqa: PLR0913
     client: Client,
     exc: Exception,
 ) -> None:
-    assert message.id is not None  # noqa: S101 — due rows are persisted
+    assert message.id is not None  # ruff: ignore[assert] — due rows are persisted
     extra = {"specialist_id": message.specialist_id, "client_id": message.client_id}
     async with session_factory() as session:
         await SqlAlchemyScheduledMessagesRepo(session).mark_failed(message.id, now)

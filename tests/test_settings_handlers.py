@@ -116,7 +116,7 @@ def test_render_settings_shows_timezone_label():
     text = render_settings(specialist, m)
     assert "Екатеринбург" in text  # default tz label
     assert "09:00" in text
-    assert "Пн, Вт, Ср, Чт, Пт" in text  # noqa: RUF001 — default working days
+    assert "Пн, Вт, Ср, Чт, Пт" in text  # ruff: ignore[ambiguous-unicode-character-string] — default working days
 
 
 def test_render_settings_shows_no_working_days_hint():
@@ -626,7 +626,7 @@ async def test_send_digest_now_delivery_failure_alerts(
     h = _handlers(messages, session_factory)
     cb = _fake_callback("settings:digest_now")
     cb.bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     await h.send_digest_now(cb, _SP)
@@ -1031,7 +1031,7 @@ async def test_send_reminders_now_failure_does_not_abort_rest(
     cb = _fake_callback("settings:reminder_now")
     # First delivery fails; the funnel logs FAILED and the pass continues.
     cb.bot.send_message.side_effect = [
-        TelegramForbiddenError(method=None, message="blocked"),  # type: ignore[arg-type]
+        TelegramForbiddenError(method=None, message="blocked"),  # ty: ignore[invalid-argument-type]
         None,
     ]
     await h.send_reminders_now(cb, _SP)
@@ -1055,7 +1055,7 @@ def test_render_settings_shows_payment_state():
     )
     m = load_messages(DEFAULT_MESSAGES_PATH).settings
     text = render_settings(specialist, m)
-    assert "Напоминание об оплате" in text  # noqa: RUF001
+    assert "Напоминание об оплате" in text  # ruff: ignore[ambiguous-unicode-character-string]
     assert "12:00" in text  # default payment_reminder_time
 
 

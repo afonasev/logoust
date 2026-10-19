@@ -56,7 +56,7 @@ class PaymentHandlers:
                 key="payment_reminder",
                 default=template_default(self._messages, "payment_reminder"),
             )
-        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
         extra = {"specialist_id": specialist_id, "client_id": client_id}
         try:
             await callback.bot.send_message(client.telegram_chat_id, text)

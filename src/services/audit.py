@@ -46,7 +46,7 @@ async def record_action(
     return entry
 
 
-async def record_message(  # noqa: PLR0913
+async def record_message(  # ruff: ignore[too-many-arguments]
     repo: AuditRepo,
     *,
     specialist_id: int,

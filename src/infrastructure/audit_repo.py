@@ -67,7 +67,7 @@ class SqlAlchemyAuditRepo:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def record(  # noqa: PLR0913
+    async def record(  # ruff: ignore[too-many-arguments]
         self,
         *,
         specialist_id: int,

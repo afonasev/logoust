@@ -17,7 +17,7 @@ def _specialist(**overrides: object) -> Specialist:
         "consumption_time": "20:00",
     }
     base.update(overrides)
-    return Specialist(**base)  # type: ignore[arg-type]
+    return Specialist(**base)  # ty: ignore[invalid-argument-type]
 
 
 def test_due_at_consumption_time():

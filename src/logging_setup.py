@@ -1,9 +1,10 @@
+from collections.abc import MutableMapping
 import logging
 import logging.handlers
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -15,8 +16,8 @@ _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def clean_record(
-    _logger: Any, _method: str, event_dict: dict[str, Any]
-) -> dict[str, Any]:
+    _logger: Any, _method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     event_dict.pop("color_message", None)
     if isinstance(event := event_dict.get("event"), str):
         event_dict["event"] = _IP_PREFIX_RE.sub("", event)
@@ -40,11 +41,11 @@ def _shared_processors(*, json: bool = False) -> list[structlog.types.Processor]
 def _dev_renderer() -> structlog.dev.ConsoleRenderer:
     base = structlog.dev.ConsoleRenderer(colors=True, pad_event_to=0)
     col_map = {c.key: c for c in base.columns}
-    lf = col_map["level"].formatter
+    lf = cast("structlog.dev.LogLevelColumnFormatter", col_map["level"].formatter)
     col_map["level"] = structlog.dev.Column(
         key="level",
         formatter=structlog.dev.LogLevelColumnFormatter(
-            level_styles=lf.level_styles,
+            level_styles=cast("dict[str, str]", lf.level_styles),
             reset_style=lf.reset_style,
             width=0,
         ),

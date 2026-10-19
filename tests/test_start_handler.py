@@ -355,7 +355,7 @@ async def test_link_confirmation_delivery_failure_records_failed(
     token = await _client_token(session)
     handler = make_start_handler(messages, session_factory)
     msg = _fake_message()
-    msg.answer.side_effect = TelegramForbiddenError(method=None, message="blocked")  # type: ignore[arg-type]
+    msg.answer.side_effect = TelegramForbiddenError(method=None, message="blocked")  # ty: ignore[invalid-argument-type]
     await handler(msg, _cmd(f"cli_{token}"))  # the failure must not propagate
     async with session_factory() as s:
         rows = await SqlAlchemyAuditRepo(s).list_for_specialist(1, limit=10, offset=0)

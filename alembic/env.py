@@ -4,10 +4,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from src.config import settings
-import src.infrastructure.appointments_repo  # noqa: F401  # register ORM models
-import src.infrastructure.clients_repo  # noqa: F401  # register ORM models
+import src.infrastructure.appointments_repo  # ruff: ignore[unused-import]  # register ORM models
+import src.infrastructure.clients_repo  # ruff: ignore[unused-import]  # register ORM models
 from src.infrastructure.db import Base
-import src.infrastructure.specialists_repo  # noqa: F401  # register ORM models
+import src.infrastructure.specialists_repo  # ruff: ignore[unused-import]  # register ORM models
 
 config = context.config
 

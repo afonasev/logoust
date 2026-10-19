@@ -90,7 +90,7 @@ class ConsumptionReport:
 ReportFn = Callable[[ConsumptionReport], Awaitable[None]]
 
 
-async def run_consumption_if_due(  # noqa: PLR0913
+async def run_consumption_if_due(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -107,7 +107,7 @@ async def run_consumption_if_due(  # noqa: PLR0913
     """Run the evening pass when due, report the outcome, stamp the day done."""
     if not is_consumption_due(specialist, now):
         return  # not due → do not stamp; this day still gets its real pass later
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
     result = await run_consumption(
         specialist,
         now,
@@ -128,7 +128,7 @@ async def run_consumption_if_due(  # noqa: PLR0913
     )
 
 
-async def run_consumption(  # noqa: PLR0913
+async def run_consumption(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -141,7 +141,7 @@ async def run_consumption(  # noqa: PLR0913
     override_repo: RecurringSlotOverrideRepo,
 ) -> ConsumptionReport:
     """Deduct today's passed meetings (no gate, no stamp); used also by "send now"."""
-    assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
+    assert specialist.id is not None  # ruff: ignore[assert] — caller passes a persisted specialist
     tz = specialist.timezone
     series = await load_series_context(
         schedule_repo,
@@ -176,7 +176,7 @@ async def run_consumption(  # noqa: PLR0913
     return report
 
 
-async def _consume_one(  # noqa: PLR0913
+async def _consume_one(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     occ: Appointment,
     now: datetime,
@@ -187,7 +187,7 @@ async def _consume_one(  # noqa: PLR0913
     deductions_repo: SubscriptionDeductionsRepo,
     report: ConsumptionReport,
 ) -> None:
-    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
+    assert specialist.id is not None  # ruff: ignore[assert] — caller guarantees a persisted id
     child = names.get(occ.client_id, _DASH)
     appointment_id = occ.id
     if appointment_id is None:  # virtual repeat → freeze into a real row first
@@ -206,7 +206,7 @@ async def _consume_one(  # noqa: PLR0913
             )
         )
         return
-    assert sub.id is not None  # noqa: S101 — persisted active subscription
+    assert sub.id is not None  # ruff: ignore[assert] — persisted active subscription
     result = await deductions_repo.add_auto(
         subscription_id=sub.id,
         appointment_id=appointment_id,
@@ -243,7 +243,7 @@ def _record_outcome(
     earlier/concurrent pass and the idempotency lock did its job (design.md, реш. 1).
     """
     if result.outcome is DeductionOutcome.DEDUCTED:
-        assert result.remaining is not None  # noqa: S101 — set on DEDUCTED
+        assert result.remaining is not None  # ruff: ignore[assert] — set on DEDUCTED
         report.deducted.append(DeductedEntry(subscription_id, child, result.remaining))
     elif result.outcome is DeductionOutcome.EXHAUSTED:
         report.missed.append(

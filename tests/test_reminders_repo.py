@@ -26,7 +26,7 @@ def _reminder(**overrides: object) -> AppointmentReminder:
         "responded_at": None,
     }
     base.update(overrides)
-    return AppointmentReminder(**base)  # type: ignore[arg-type]
+    return AppointmentReminder(**base)
 
 
 async def test_insert_pending_sets_id_and_is_idempotent(session: AsyncSession):

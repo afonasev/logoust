@@ -80,10 +80,10 @@ _FIELD_LABELS = {
     "note": "Заметка",
 }
 
-_BTN_ADD = "➕ Добавить"  # noqa: RUF001
+_BTN_ADD = "➕ Добавить"  # ruff: ignore[ambiguous-unicode-character-string]
 _BTN_ARCHIVED = "🗄 Архив"
 _BTN_EDIT = "✏️ Изменить"
-_BTN_ARCHIVE = "📦 В архив"  # noqa: RUF001
+_BTN_ARCHIVE = "📦 В архив"  # ruff: ignore[ambiguous-unicode-character-string]
 _BTN_ARCHIVE_YES = "📦 Да, в архив"
 _BTN_RESTORE = "↩️ Вернуть"
 _BTN_BACK = "⬅️ Назад"
@@ -130,7 +130,7 @@ def build_main_keyboard(messages: BotMessages) -> ReplyKeyboardMarkup:
     )
 
 
-def _appt_label(  # noqa: PLR0913
+def _appt_label(  # ruff: ignore[too-many-arguments]
     appt: Appointment,
     tz: str,
     sm: ScheduleMessages,
@@ -153,7 +153,7 @@ def _appt_label(  # noqa: PLR0913
     )
 
 
-def _client_row(  # noqa: PLR0913
+def _client_row(  # ruff: ignore[too-many-arguments]
     client: Client,
     nearest: dict[int, Appointment],
     tz: str,
@@ -193,7 +193,7 @@ def _client_row(  # noqa: PLR0913
     return [client_btn, second]
 
 
-def _active_keyboard(  # noqa: PLR0913
+def _active_keyboard(  # ruff: ignore[too-many-arguments]
     page: ClientsPage,
     nearest: dict[int, Appointment],
     tz: str,
@@ -282,8 +282,8 @@ def _appt_callback(appt: Appointment, back: str) -> str:
     # A virtual slot occurrence (id is None) opens the single-meeting card; a real
     # row opens its appointment card.
     if appt.id is None:
-        assert appt.slot_id is not None  # noqa: S101 — virtual rows carry a slot
-        assert appt.origin_date is not None  # noqa: S101
+        assert appt.slot_id is not None  # ruff: ignore[assert] — virtual rows carry a slot
+        assert appt.origin_date is not None  # ruff: ignore[assert]
         # Carry the origin (e.g. the client card) so the meeting card returns there.
         return f"recur:occ:{appt.slot_id}:{appt.origin_date.isoformat()}~{back}"
     return f"sched:card:{appt.id}~{back}"
@@ -383,7 +383,7 @@ def _deferred_buttons(
     ]
 
 
-def _card_keyboard(  # noqa: PLR0913
+def _card_keyboard(  # ruff: ignore[too-many-arguments]
     client: Client,
     appts: list[Appointment],
     tz: str,
@@ -587,7 +587,7 @@ class SpecialistMiddleware(BaseMiddleware):
             )
         if specialist is None:
             return None
-        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        assert specialist.id is not None  # ruff: ignore[assert] — persisted specialists have id
         # Freeze any passed recurring occurrences into history on interaction
         # (no scheduler). Idempotent + daily-guarded, so it is cheap to repeat.
         async with self._session_factory() as session:
@@ -604,7 +604,7 @@ class SpecialistMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients router
+class ClientsHandlers:  # ruff: ignore[too-many-public-methods] — handler aggregator for the clients router
     def __init__(
         self,
         messages: BotMessages,
@@ -640,7 +640,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 page_size=_ACTIVE_PAGE_SIZE,
             )
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
             series = await self._series_context(
                 session, specialist_id, specialist.timezone
             )
@@ -751,10 +751,10 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
     ) -> tuple[str, InlineKeyboardMarkup]:
         # Card = general info + the client's upcoming appointments as buttons
         # (tap to reschedule / cancel on the appointment card).
-        assert client.id is not None  # noqa: S101 — persisted clients always have id
+        assert client.id is not None  # ruff: ignore[assert] — persisted clients always have id
         async with self._session_factory() as session:
             specialist = await SqlAlchemySpecialistsRepo(session).get(specialist_id)
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
             series = await self._series_context(
                 session, specialist_id, specialist.timezone
             )
@@ -821,7 +821,7 @@ class ClientsHandlers:  # noqa: PLR0904 — handler aggregator for the clients r
                 client_id, specialist_id
             )
         # Navigation only ever targets a client we just acted on, so it still exists.
-        assert client is not None  # noqa: S101
+        assert client is not None  # ruff: ignore[assert]
         return await self._card_view(client, specialist_id, back)
 
     # --- navigation builders (re-open a target from another router) -----------

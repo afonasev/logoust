@@ -1432,7 +1432,7 @@ async def test_notify_now_failed_on_forbidden(
     h = _handlers(messages, session_factory)
     cb = _fake_callback("sched:ntfnow")
     cb.bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     await h.notify_now(cb, _state(data=_notify_data(client_id=client_id)), _SP)
@@ -1447,7 +1447,7 @@ async def test_notify_now_bad_request(
     h = _handlers(messages, session_factory)
     cb = _fake_callback("sched:ntfnow")
     cb.bot.send_message.side_effect = TelegramBadRequest(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="chat not found",
     )
     await h.notify_now(cb, _state(data=_notify_data(client_id=client_id)), _SP)

@@ -14,7 +14,7 @@ from src.infrastructure.audit_repo import SqlAlchemyAuditRepo
 from src.services.audit import record_message
 
 
-async def record_client_message(  # noqa: PLR0913
+async def record_client_message(  # ruff: ignore[too-many-arguments]
     session_factory: async_sessionmaker[AsyncSession],
     *,
     specialist_id: int,

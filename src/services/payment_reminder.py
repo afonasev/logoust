@@ -58,7 +58,7 @@ class PaymentReminderAlert:
 AlertFn = Callable[[PaymentReminderAlert], Awaitable[None]]
 
 
-async def run_payment_reminders_if_due(  # noqa: PLR0913
+async def run_payment_reminders_if_due(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     *,
@@ -74,7 +74,7 @@ async def run_payment_reminders_if_due(  # noqa: PLR0913
     """Alert the specialist about exhausted subscriptions for tomorrow's clients."""
     if not is_payment_reminder_due(specialist, now):
         return  # not due → do not stamp; this day still gets its real pass later
-    assert specialist.id is not None  # noqa: S101 — candidates are persisted
+    assert specialist.id is not None  # ruff: ignore[assert] — candidates are persisted
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     earliest = await _earliest_by_client(
@@ -101,7 +101,7 @@ async def run_payment_reminders_if_due(  # noqa: PLR0913
     await specialists_repo.mark_payment_reminder_run(specialist.id, today)
 
 
-async def _earliest_by_client(  # noqa: PLR0913
+async def _earliest_by_client(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     now: datetime,
     tz: str,
@@ -112,7 +112,7 @@ async def _earliest_by_client(  # noqa: PLR0913
     override_repo: RecurringSlotOverrideRepo,
 ) -> dict[int, Appointment]:
     """Tomorrow's occurrences grouped by client → the earliest one per client."""
-    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
+    assert specialist.id is not None  # ruff: ignore[assert] — caller guarantees a persisted id
     series = await load_series_context(
         schedule_repo,
         slot_repo,
@@ -135,7 +135,7 @@ async def _earliest_by_client(  # noqa: PLR0913
     return earliest
 
 
-async def _alert_if_needed(  # noqa: PLR0913
+async def _alert_if_needed(  # ruff: ignore[too-many-arguments]
     specialist: Specialist,
     client_id: int,
     occ: Appointment,
@@ -145,7 +145,7 @@ async def _alert_if_needed(  # noqa: PLR0913
     clients_repo: ClientsRepo,
     alert: AlertFn,
 ) -> None:
-    assert specialist.id is not None  # noqa: S101 — caller guarantees a persisted id
+    assert specialist.id is not None  # ruff: ignore[assert] — caller guarantees a persisted id
     sub = await subscriptions_repo.get_active(client_id, specialist.id)
     if sub is None or not subscription_needs_payment_reminder(sub):
         return
@@ -160,7 +160,7 @@ async def _alert_if_needed(  # noqa: PLR0913
             starts_at=occ.starts_at,
         )
     )
-    assert sub.id is not None  # noqa: S101 — persisted active subscription
+    assert sub.id is not None  # ruff: ignore[assert] — persisted active subscription
     await subscriptions_repo.mark_payment_reminded(sub.id, now)
     logger.info(
         "subscription.payment_reminder_alerted",

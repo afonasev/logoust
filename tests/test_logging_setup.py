@@ -71,7 +71,8 @@ def test_setup_logging_with_file_handler(monkeypatch, tmp_path: Path):
         h.close()
 
 
-@pytest.fixture(autouse=True)
+# Each test changes the process-wide root logger; always restore it afterwards.
+@pytest.fixture(autouse=True)  # ruff: ignore[pytest-fixture-autouse]
 def _reset_logging_after_test():
     yield
     root = logging.getLogger()

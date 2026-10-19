@@ -50,7 +50,7 @@ def _ensure_not_past(day: date, tz: str, now: datetime) -> None:
         raise PastDateError
 
 
-async def taken_slot_times(  # noqa: PLR0913
+async def taken_slot_times(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
@@ -116,7 +116,7 @@ def _free_slots(slots: list[str], taken: set[str], *, adjacent: bool) -> list[st
     ]
 
 
-async def list_free_windows(  # noqa: PLR0913
+async def list_free_windows(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist: Specialist,
@@ -135,7 +135,7 @@ async def list_free_windows(  # noqa: PLR0913
     a future neighbour. Empty `working_days` yields an empty list (the caller shows
     a "not configured" hint instead).
     """
-    assert specialist.id is not None  # noqa: S101 — caller passes a persisted specialist
+    assert specialist.id is not None  # ruff: ignore[assert] — caller passes a persisted specialist
     tz = specialist.timezone
     today = today_in_tz(now, tz)
     working = set(parse_working_days(specialist.working_days))
@@ -168,7 +168,7 @@ def group_by_day(appointments: list[Appointment], tz: str) -> list[DayGroup]:
     return groups
 
 
-async def create_appointment(  # noqa: PLR0913
+async def create_appointment(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
@@ -211,7 +211,7 @@ async def create_appointment(  # noqa: PLR0913
     return saved
 
 
-async def reschedule_appointment(  # noqa: PLR0913
+async def reschedule_appointment(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     appointment_id: int,
@@ -357,7 +357,7 @@ async def _nearest_appt_day(
     return utc_to_wall(rows[0].starts_at, tz).date()
 
 
-async def adjacent_shown_day(  # noqa: PLR0913
+async def adjacent_shown_day(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
@@ -391,7 +391,7 @@ async def adjacent_shown_day(  # noqa: PLR0913
     return min(candidates) if forward else max(candidates)
 
 
-async def schedule_landing_day(  # noqa: PLR0913
+async def schedule_landing_day(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
@@ -536,7 +536,7 @@ async def nearest_future_by_client(
     return nearest
 
 
-async def list_client_future(  # noqa: PLR0913
+async def list_client_future(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,
@@ -567,7 +567,7 @@ async def list_client_future(  # noqa: PLR0913
     return sorted([*rows, *extra], key=lambda appt: appt.starts_at)
 
 
-async def list_client_history_page(  # noqa: PLR0913
+async def list_client_history_page(  # ruff: ignore[too-many-arguments]
     repo: AppointmentsRepo,
     *,
     specialist_id: int,

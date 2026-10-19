@@ -54,7 +54,7 @@ class AuditEntry:
 
 class AuditRepo(Protocol):
     # Protocol method bodies are unimplemented placeholders by design.
-    async def record(  # noqa: PLR0913  # pragma: no cover
+    async def record(  # ruff: ignore[too-many-arguments]  # pragma: no cover
         self,
         *,
         specialist_id: int,

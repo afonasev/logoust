@@ -1,0 +1,49 @@
+{
+  "baseline": "610b37c",
+  "branch": "codex/update-dependencies-20261019",
+  "python": "3.13.11",
+  "pytest": {
+    "command": "uv run --locked pytest tests -n auto",
+    "tests": 869,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "body_report_seconds": 21.78,
+    "coverage_percent": 100.0
+  },
+  "initial_pytest": {
+    "tests_passed": 868,
+    "result": "FAIL",
+    "coverage_percent": 99.97,
+    "reason": "empty consumption keyboard branch not exercised; covered by added test"
+  },
+  "checks": {
+    "ruff": "PASS",
+    "ruff_format": "PASS",
+    "ty": "PASS",
+    "pre_commit_all_files": "PASS",
+    "existing_assertions_preserved": "PASS",
+    "runtime_ast_control_flow_preserved": "PASS"
+  },
+  "uv_lock_sha256": "a1dc250c16c741ca10375d8470753dbb23dd31850f6cc832be34004410e56a84",
+  "limitations": [
+    "macOS arm64 only",
+    "No real Telegram API delivery",
+    "No production DB migration",
+    "No deploy"
+  ],
+  "integration": {
+    "main_baseline": "7261c1b",
+    "reason": "PR #7 merged after dependency QA; retain keyboard refresh and /start behavior",
+    "tests": 891,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "coverage_percent": 100.0,
+    "body_report_seconds": 43.86,
+    "ruff": "PASS",
+    "format": "PASS",
+    "ty": "PASS",
+    "runtime_ast_vs_main": "PASS"
+  }
+}

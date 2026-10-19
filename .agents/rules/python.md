@@ -12,7 +12,7 @@
 - Constants: `UPPER_SNAKE_CASE` (rare, use settings instead)
 - Database tables: lowercase plural in `__tablename__`
 
-## Database Models (SQLAlchemy 2.0)
+## Database Models (SQLAlchemy 2.x)
 - Use `Mapped` type annotation for all columns (not `Column()`)
 - Use `mapped_column()` with explicit SQLAlchemy types: `Integer`, `String(200)`, `Text`
 - Use `lambda: datetime.now(UTC)` for datetime defaults (not `func.now()`)
@@ -80,3 +80,6 @@
 - `C901/PLR0912` — max complexity 8; extract helpers early, don't wait for lint to force it
 - `SIM117` — nested `with` → combine: `with A() as a, B() as b:`
 - `PLC0415` — all imports must be at module top level
+
+- Ruff 0.17: сохраняй локальные исключения в синтаксисе `# ruff: ignore[rule-name]`; числовые коды заменены именами без изменения смысла.
+- ty 0.0.89: используй `# ty: ignore[rule-name]` для намеренных локальных исключений; mypy-коды в `# type: ignore[arg-type]` больше не подавляют диагностику ty. Не добавляй глобальные исключения вместо исправления типов.

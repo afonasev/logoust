@@ -111,7 +111,7 @@ async def _seed_subscription(
 async def _run(factory: async_sessionmaker[AsyncSession], specialist, now=_NOW):
     collected: list[PaymentReminderAlert] = []
 
-    async def alert(payload: PaymentReminderAlert) -> None:  # noqa: RUF029
+    async def alert(payload: PaymentReminderAlert) -> None:  # ruff: ignore[unused-async]
         collected.append(payload)
 
     async with factory() as session:

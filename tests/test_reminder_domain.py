@@ -18,7 +18,7 @@ def _specialist(**overrides: object) -> Specialist:
         "reminder_time": "12:00",
     }
     base.update(overrides)
-    return Specialist(**base)  # type: ignore[arg-type]
+    return Specialist(**base)  # ty: ignore[invalid-argument-type]
 
 
 def test_due_at_reminder_time():

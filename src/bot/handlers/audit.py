@@ -107,7 +107,7 @@ class AuditHandlers:
             specialist = await get_settings(
                 SqlAlchemySpecialistsRepo(session), specialist_id
             )
-            assert specialist is not None  # noqa: S101 — middleware guarantees it
+            assert specialist is not None  # ruff: ignore[assert] — middleware guarantees it
             names = await client_name_map(
                 SqlAlchemyClientsRepo(session), specialist_id=specialist_id
             )

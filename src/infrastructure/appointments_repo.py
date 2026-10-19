@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import (
     Date,
@@ -16,6 +17,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from src.domain.appointment import Appointment
 from src.infrastructure.db import Base
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import CursorResult
 
 
 class AppointmentORM(Base):
@@ -257,7 +261,7 @@ class SqlAlchemyAppointmentsRepo:
         )
         result = await self._session.execute(stmt)
         await self._session.commit()
-        return result.rowcount > 0
+        return cast("CursorResult", result).rowcount > 0
 
     async def delete(self, appointment_id: int, specialist_id: int) -> bool:
         stmt = delete(AppointmentORM).where(
@@ -266,7 +270,7 @@ class SqlAlchemyAppointmentsRepo:
         )
         result = await self._session.execute(stmt)
         await self._session.commit()
-        return result.rowcount > 0
+        return cast("CursorResult", result).rowcount > 0
 
     async def _get_owned(
         self, appointment_id: int, specialist_id: int

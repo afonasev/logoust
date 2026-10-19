@@ -260,7 +260,7 @@ async def extend_subscription(
         purchased=subscription.purchased + meetings,
         remaining=subscription.remaining + meetings,
     )
-    assert updated is not None  # noqa: S101 — just fetched it under the same owner
+    assert updated is not None  # ruff: ignore[assert] — just fetched it under the same owner
     # Продление — единственный путь, переводящий remaining 0 → >0, поэтому
     # сбрасываем payment_reminded_at именно здесь: при следующем обнулении остатка
     # напоминание сработает заново (см. design.md, решение 4). «Вычесть» (decrement)

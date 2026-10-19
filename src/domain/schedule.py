@@ -12,17 +12,17 @@ from zoneinfo import ZoneInfo
 # Curated list of Russian timezones offered in settings. IANA values keep
 # `zoneinfo` correct forever; labels carry a Moscow-relative hint for the UI.
 RUSSIAN_TIMEZONES: list[tuple[str, str]] = [
-    ("Europe/Kaliningrad", "Калининград (МСК-1)"),  # noqa: RUF001
-    ("Europe/Moscow", "Москва (МСК)"),  # noqa: RUF001
-    ("Europe/Samara", "Самара (МСК+1)"),  # noqa: RUF001
-    ("Asia/Yekaterinburg", "Екатеринбург (МСК+2)"),  # noqa: RUF001
-    ("Asia/Omsk", "Омск (МСК+3)"),  # noqa: RUF001
-    ("Asia/Krasnoyarsk", "Красноярск (МСК+4)"),  # noqa: RUF001
-    ("Asia/Irkutsk", "Иркутск (МСК+5)"),  # noqa: RUF001
-    ("Asia/Yakutsk", "Якутск (МСК+6)"),  # noqa: RUF001
-    ("Asia/Vladivostok", "Владивосток (МСК+7)"),  # noqa: RUF001
-    ("Asia/Magadan", "Магадан (МСК+8)"),  # noqa: RUF001
-    ("Asia/Kamchatka", "Камчатка (МСК+9)"),  # noqa: RUF001
+    ("Europe/Kaliningrad", "Калининград (МСК-1)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Europe/Moscow", "Москва (МСК)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Europe/Samara", "Самара (МСК+1)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Yekaterinburg", "Екатеринбург (МСК+2)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Omsk", "Омск (МСК+3)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Krasnoyarsk", "Красноярск (МСК+4)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Irkutsk", "Иркутск (МСК+5)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Yakutsk", "Якутск (МСК+6)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Vladivostok", "Владивосток (МСК+7)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Magadan", "Магадан (МСК+8)"),  # ruff: ignore[ambiguous-unicode-character-string]
+    ("Asia/Kamchatka", "Камчатка (МСК+9)"),  # ruff: ignore[ambiguous-unicode-character-string]
 ]
 
 _TIMEZONE_VALUES = frozenset(value for value, _ in RUSSIAN_TIMEZONES)
@@ -82,7 +82,7 @@ RU_WEEKDAYS_EVERY: list[str] = [
 ]
 
 # Short weekday headers for the inline calendar, Monday-first.
-RU_WEEKDAYS_SHORT: list[str] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]  # noqa: RUF001
+RU_WEEKDAYS_SHORT: list[str] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]  # ruff: ignore[ambiguous-unicode-character-string]
 
 _HHMM_RE = re.compile(r"([0-9]{1,2}):([0-9]{2})")
 _MINUTES_IN_HOUR = 60

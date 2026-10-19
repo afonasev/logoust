@@ -70,7 +70,7 @@ async def _consume_and_reply(
 
     The caller must ensure `message.from_user` is not None.
     """
-    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — guaranteed by caller
     async with session_factory() as session:
         repo = SqlAlchemySpecialistsRepo(session)
         result = await consume_invite(
@@ -102,7 +102,7 @@ async def _link_client_and_reply(
 
     The caller must ensure `message.from_user` is not None.
     """
-    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — guaranteed by caller
     async with session_factory() as session:
         client = await link_client_by_token(
             SqlAlchemyClientsRepo(session),
@@ -132,7 +132,7 @@ async def _send_client_confirmation(
     event: AuditEvent,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    assert client.id is not None  # noqa: S101 — client is persisted
+    assert client.id is not None  # ruff: ignore[assert] — client is persisted
     status, error = DeliveryStatus.SENT, None
     try:
         await message.answer(text)
@@ -156,7 +156,7 @@ async def _send_specialist_keyboard(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await message.answer(text, reply_markup=build_main_keyboard(messages))
-    assert message.from_user is not None  # noqa: S101 — checked by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — checked by caller
     async with session_factory() as session:
         repo = SqlAlchemySpecialistsRepo(session)
         specialist = await repo.find_by_chat_id(message.from_user.id)
@@ -164,7 +164,7 @@ async def _send_specialist_keyboard(
         # постороннему не означает доставку клавиатуры владельцу приглашения.
         if specialist is None:
             return
-        assert specialist.id is not None  # noqa: S101 — persisted specialist
+        assert specialist.id is not None  # ruff: ignore[assert] — persisted specialist
         await repo.set_keyboard_version(specialist.id, keyboard_version(messages))
     logger.info("specialist.keyboard_refreshed", extra={"specialist_id": specialist.id})
 
@@ -180,12 +180,12 @@ async def _greet_known_or_no_token(
     version; else a linked client → confirm; else the unchanged `no_token`. No new
     specialist rows are ever created. The caller ensures `message.from_user` is set.
     """
-    assert message.from_user is not None  # noqa: S101 — guaranteed by caller
+    assert message.from_user is not None  # ruff: ignore[assert] — guaranteed by caller
     chat_id = message.from_user.id
     async with session_factory() as session:
         specialist = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(chat_id)
     if specialist is not None:
-        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        assert specialist.id is not None  # ruff: ignore[assert] — persisted specialists have id
         await _send_specialist_keyboard(
             message, messages.start.already_welcomed, messages, session_factory
         )

@@ -70,7 +70,7 @@ def _effective_comment(
     return schedule.comment
 
 
-def _occurrence(  # noqa: PLR0913, PLR0917
+def _occurrence(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     slot: RecurringSlot,
     schedule: RecurringSchedule,
     origin_date: date,
@@ -113,7 +113,7 @@ def _effective_starts_at(
     return wall_to_utc(day, slot.time_hhmm, tz)
 
 
-def occurrences_landing_in(  # noqa: PLR0913, PLR0917
+def occurrences_landing_in(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     slot: RecurringSlot,
     schedule: RecurringSchedule,
     overrides: list[RecurringSlotOverride],
@@ -157,7 +157,7 @@ def occurrences_landing_in(  # noqa: PLR0913, PLR0917
     return result
 
 
-def occurrences_in_window(  # noqa: PLR0913, PLR0917
+def occurrences_in_window(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     schedule: RecurringSchedule,
     slots: list[RecurringSlot],
     overrides: dict[int, list[RecurringSlotOverride]],
@@ -187,7 +187,7 @@ def occurrences_in_window(  # noqa: PLR0913, PLR0917
     return sorted(result, key=lambda occ: occ.starts_at)
 
 
-def slot_taken_times(  # noqa: PLR0913, PLR0917
+def slot_taken_times(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     slot: RecurringSlot,
     schedule: RecurringSchedule,
     overrides: list[RecurringSlotOverride],
@@ -268,7 +268,7 @@ def _overrides_by_slot(
     return grouped
 
 
-async def load_series_context(  # noqa: PLR0913
+async def load_series_context(  # ruff: ignore[too-many-arguments]
     schedule_repo: RecurringScheduleRepo,
     slot_repo: RecurringSlotRepo,
     override_repo: RecurringSlotOverrideRepo,
@@ -329,7 +329,7 @@ async def create_schedule(
     return saved
 
 
-async def add_slot(  # noqa: PLR0913
+async def add_slot(  # ruff: ignore[too-many-arguments]
     slot_repo: RecurringSlotRepo,
     *,
     schedule_id: int,
@@ -362,7 +362,7 @@ async def add_slot(  # noqa: PLR0913
     return saved
 
 
-async def edit_slot(  # noqa: PLR0913
+async def edit_slot(  # ruff: ignore[too-many-arguments]
     slot_repo: RecurringSlotRepo,
     *,
     slot_id: int,
@@ -461,7 +461,7 @@ def _find_override(
     return next((o for o in overrides if o.original_date == original_date), None)
 
 
-async def skip_occurrence(  # noqa: PLR0913
+async def skip_occurrence(  # ruff: ignore[too-many-arguments]
     slot_repo: RecurringSlotRepo,
     override_repo: RecurringSlotOverrideRepo,
     *,
@@ -493,7 +493,7 @@ async def skip_occurrence(  # noqa: PLR0913
     return ov
 
 
-async def move_occurrence(  # noqa: PLR0913
+async def move_occurrence(  # ruff: ignore[too-many-arguments]
     slot_repo: RecurringSlotRepo,
     override_repo: RecurringSlotOverrideRepo,
     *,
@@ -526,7 +526,7 @@ async def move_occurrence(  # noqa: PLR0913
     return ov
 
 
-async def set_occurrence_comment(  # noqa: PLR0913
+async def set_occurrence_comment(  # ruff: ignore[too-many-arguments]
     slot_repo: RecurringSlotRepo,
     override_repo: RecurringSlotOverrideRepo,
     *,
@@ -583,7 +583,7 @@ async def set_schedule_comment(
 # --- materialisation --------------------------------------------------------
 
 
-async def settle(  # noqa: PLR0913
+async def settle(  # ruff: ignore[too-many-arguments]
     schedule_repo: RecurringScheduleRepo,
     slot_repo: RecurringSlotRepo,
     override_repo: RecurringSlotOverrideRepo,
@@ -612,7 +612,7 @@ async def settle(  # noqa: PLR0913
     )
     for schedule_id, schedule in schedules.items():
         for slot in await slot_repo.list_for_schedule(schedule_id):
-            assert slot.id is not None  # noqa: S101 — persisted slots have an id
+            assert slot.id is not None  # ruff: ignore[assert] — persisted slots have an id
             if slot.materialized_through >= today:
                 continue
             await _settle_slot(
@@ -629,7 +629,7 @@ async def settle(  # noqa: PLR0913
             )
 
 
-async def _settle_slot(  # noqa: PLR0913, PLR0917
+async def _settle_slot(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     appt_repo: AppointmentsRepo,
     slot: RecurringSlot,
     schedule: RecurringSchedule,

@@ -18,7 +18,7 @@ _TOKEN_BYTES = 16  # secrets.token_urlsafe(16) → 22-char URL-safe token
 class ConsumeResult(enum.Enum):
     WELCOMED = "welcomed"
     ALREADY_WELCOMED = "already_welcomed"
-    UNKNOWN_TOKEN = "unknown_token"  # noqa: S105 — enum value, not a credential
+    UNKNOWN_TOKEN = "unknown_token"  # ruff: ignore[hardcoded-password-string] — enum value, not a credential
 
 
 async def create_invite(repo: SpecialistsRepo) -> Specialist:

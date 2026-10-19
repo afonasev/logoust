@@ -383,7 +383,7 @@ def _callback_message(callback: CallbackQuery) -> Message:
     return cast("Message", msg)
 
 
-class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings router
+class SettingsHandlers:  # ruff: ignore[too-many-public-methods] — handler aggregator for the settings router
     def __init__(
         self,
         messages: BotMessages,
@@ -489,7 +489,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         if report.is_empty:
             await callback.answer(self._m.consumption_now_empty, show_alert=True)
             return
-        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
         await deliver_consumption_report(
             callback.bot, self._messages, specialist, report
         )
@@ -505,7 +505,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         if specialist is None:  # pragma: no cover - middleware guarantees existence
             await callback.answer(self._m.not_found, show_alert=True)
             return
-        assert specialist.telegram_chat_id is not None  # noqa: S101 — welcomed in settings
+        assert specialist.telegram_chat_id is not None  # ruff: ignore[assert] — welcomed in settings
         async with self._session_factory() as session:
             text = await collect_today_digest(
                 specialist,
@@ -520,7 +520,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         if text is None:
             await callback.answer(self._m.digest_now_empty, show_alert=True)
             return
-        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
         try:
             await callback.bot.send_message(specialist.telegram_chat_id, text)
         except (TelegramForbiddenError, TelegramBadRequest):
@@ -563,7 +563,7 @@ class SettingsHandlers:  # noqa: PLR0904 — handler aggregator for the settings
         if not to_send:
             await callback.answer(self._m.reminders_now_empty, show_alert=True)
             return
-        assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+        assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
         for item in to_send:
             await deliver_reminder(
                 callback.bot, self._messages, item, self._session_factory

@@ -330,7 +330,7 @@ def _grouped_line(
     )
 
 
-def _render_grouped(  # noqa: PLR0913
+def _render_grouped(  # ruff: ignore[too-many-arguments]
     title: str,
     groups: list[DayGroup],
     names: dict[int, str],
@@ -365,7 +365,7 @@ def _card_button(
     ]
 
 
-def _appt_row(  # noqa: PLR0913
+def _appt_row(  # ruff: ignore[too-many-arguments]
     appt: Appointment,
     names: dict[int, str],
     tz: str,
@@ -386,8 +386,8 @@ def _appt_row(  # noqa: PLR0913
     status = rem.status_mark(statuses.get((appt.client_id, appt.starts_at)))
     label = f"{status}{mark}{time} · {child}{_comment_part(appt.comment, m)}"
     if appt.id is None:
-        assert appt.slot_id is not None  # noqa: S101 — virtual rows carry a slot
-        assert appt.origin_date is not None  # noqa: S101
+        assert appt.slot_id is not None  # ruff: ignore[assert] — virtual rows carry a slot
+        assert appt.origin_date is not None  # ruff: ignore[assert]
         # Carry the day view as the origin so the meeting card returns here.
         callback = f"recur:occ:{appt.slot_id}:{appt.origin_date.isoformat()}~{back}"
         return [InlineKeyboardButton(text=label, callback_data=callback)]
@@ -427,7 +427,7 @@ def render_day_appointments_list(
     return "\n".join([title, *lines])
 
 
-async def _picker_day_view(  # noqa: PLR0913
+async def _picker_day_view(  # ruff: ignore[too-many-arguments]
     session_factory: async_sessionmaker[AsyncSession],
     *,
     specialist: Specialist,
@@ -444,7 +444,7 @@ async def _picker_day_view(  # noqa: PLR0913
     edited), then `occupied_grid_slots` widens each start to the grid cells whose
     interval it overlaps.
     """
-    assert specialist.id is not None  # noqa: S101 — middleware guarantees existence
+    assert specialist.id is not None  # ruff: ignore[assert] — middleware guarantees existence
     tz = specialist.timezone
     async with session_factory() as session:
         series = await _series_context(session, specialist.id, tz)
@@ -468,7 +468,7 @@ async def _picker_day_view(  # noqa: PLR0913
     return render_day_appointments_list(day, appts, names, tz, m), occupied
 
 
-def _day_keyboard(  # noqa: PLR0913
+def _day_keyboard(  # ruff: ignore[too-many-arguments]
     day: date,
     appts: list[Appointment],
     names: dict[int, str],
@@ -606,7 +606,7 @@ def _delete_confirm_keyboard(
     )
 
 
-async def _post_action(  # noqa: PLR0913
+async def _post_action(  # ruff: ignore[too-many-arguments]
     navigator: Navigator | None,
     message: Message,
     *,
@@ -617,7 +617,7 @@ async def _post_action(  # noqa: PLR0913
 ) -> None:
     # Thin module-level shim so both handler aggregators share one call site for the
     # post-action contract. The navigator is wired in build_router before any update.
-    assert navigator is not None  # noqa: S101
+    assert navigator is not None  # ruff: ignore[assert]
     await navigator.open_after_action(
         message,
         result_text=result_text,
@@ -637,7 +637,7 @@ async def _open_card(
     # Re-open the entity card as the freshest screen — done only once the whole
     # notify scenario has finished (or immediately when no notify step applies), so
     # the card never flashes mid-flow (see the post-action ordering decision).
-    assert navigator is not None  # noqa: S101 — wired in build_router before any update
+    assert navigator is not None  # ruff: ignore[assert] — wired in build_router before any update
     text, keyboard = await navigator.render(specialist_id, card_back)
     await target.answer(text, reply_markup=keyboard)
 
@@ -796,7 +796,7 @@ def _format_send_when(due_at: datetime, tz: str) -> str:
     return f"{format_ru_short(wall.date())} в {wall:%H:%M}"
 
 
-async def _store_notify(  # noqa: PLR0913
+async def _store_notify(  # ruff: ignore[too-many-arguments]
     state: FSMContext,
     *,
     event: str,
@@ -809,8 +809,8 @@ async def _store_notify(  # noqa: PLR0913
     # delivered later — no re-render at send time (see design.md, decision 2).
     # `card_back` is the navigator token of the entity card to re-open once the whole
     # notify scenario finishes (so the card is the last, freshest screen — no jump).
-    assert client.id is not None  # noqa: S101 — persisted clients always have an id
-    assert client.telegram_chat_id is not None  # noqa: S101 — linked, checked by caller
+    assert client.id is not None  # ruff: ignore[assert] — persisted clients always have an id
+    assert client.telegram_chat_id is not None  # ruff: ignore[assert] — linked, checked by caller
     await state.update_data(
         **{
             _NOTIFY_DATA_KEY: {
@@ -825,7 +825,7 @@ async def _store_notify(  # noqa: PLR0913
     )
 
 
-async def _ask_notify(  # noqa: PLR0913, PLR0917
+async def _ask_notify(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     target: Message,
     state: FSMContext,
     event: str,
@@ -862,7 +862,7 @@ async def _ask_notify(  # noqa: PLR0913, PLR0917
     return True
 
 
-async def _ask_series_notify(  # noqa: PLR0913, PLR0917
+async def _ask_series_notify(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     target: Message,
     state: FSMContext,
     event: str,
@@ -898,7 +898,7 @@ async def _ask_series_notify(  # noqa: PLR0913, PLR0917
     return True
 
 
-async def _send_notify(  # noqa: PLR0913
+async def _send_notify(  # ruff: ignore[too-many-arguments]
     callback: CallbackQuery,
     chat_id: int,
     text: str,
@@ -911,7 +911,7 @@ async def _send_notify(  # noqa: PLR0913
     # outcome, report success. Failure (client blocked the bot / chat gone) is
     # swallowed — the appointment operation stays applied; the caller shows the
     # outcome. The audit row is written either way (the "not delivered" fact too).
-    assert callback.bot is not None  # noqa: S101 — callbacks always carry a bot
+    assert callback.bot is not None  # ruff: ignore[assert] — callbacks always carry a bot
     audit_event = _NOTIFY_AUDIT_EVENTS[event]
     try:
         await callback.bot.send_message(chat_id, text)
@@ -942,7 +942,7 @@ async def _send_notify(  # noqa: PLR0913
 # --- handlers -----------------------------------------------------------------
 
 
-class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule router
+class ScheduleHandlers:  # ruff: ignore[too-many-public-methods] — handler aggregator for the schedule router
     def __init__(
         self,
         messages: BotMessages,
@@ -963,7 +963,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             specialist = await get_settings(
                 SqlAlchemySpecialistsRepo(session), specialist_id
             )
-        assert specialist is not None  # noqa: S101 — middleware guarantees existence
+        assert specialist is not None  # ruff: ignore[assert] — middleware guarantees existence
         return specialist
 
     async def _child_name(self, specialist_id: int, client_id: int) -> str:
@@ -1022,7 +1022,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
                 appt_id, specialist_id
             )
         # Navigation only targets a card we just created/moved, so it still exists.
-        assert appt is not None  # noqa: S101
+        assert appt is not None  # ruff: ignore[assert]
         if not inner:  # default: the appointment's own day
             inner = (
                 f"sched:day_view:{utc_to_wall(appt.starts_at, tz).date().isoformat()}"
@@ -1214,7 +1214,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         client = await self._load_client(specialist_id, data["client_id"])
         await state.clear()
         await target.answer(self._m.created)
-        assert appt.id is not None  # noqa: S101 — created appointments have an id
+        assert appt.id is not None  # ruff: ignore[assert] — created appointments have an id
         # Defer the appointment card to the end of the notify scenario (back to the
         # client card the creation started from).
         card_back = f"sched:card:{appt.id}~clients:card:{data['client_id']}"
@@ -1261,7 +1261,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             return
         client = await self._load_client(specialist_id, moved.client_id)
         await target.answer(self._m.rescheduled)
-        assert moved.id is not None  # noqa: S101 — rescheduled appointments have an id
+        assert moved.id is not None  # ruff: ignore[assert] — rescheduled appointments have an id
         # Defer the appointment card to the end of the notify scenario; its Back
         # returns to the origin we came from (client card / day), else the new day.
         origin = data.get("back") or f"sched:day_view:{data['day']}"
@@ -1537,7 +1537,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
             message, state, specialist, notify, hhmm, edit=False
         )
 
-    async def _enqueue_and_report(  # noqa: PLR0913
+    async def _enqueue_and_report(  # ruff: ignore[too-many-arguments]
         self,
         target: Message,
         state: FSMContext,
@@ -1547,7 +1547,7 @@ class ScheduleHandlers:  # noqa: PLR0904 — handler aggregator for the schedule
         *,
         edit: bool,
     ) -> None:
-        assert specialist.id is not None  # noqa: S101 — middleware guarantees existence
+        assert specialist.id is not None  # ruff: ignore[assert] — middleware guarantees existence
         tz = specialist.timezone
         now = datetime.now(UTC)
         due_at = next_occurrence_utc(hhmm, now, tz)
@@ -1897,7 +1897,7 @@ def _rule_lines(slots: list[RecurringSlot], rm: RecurringMessages) -> str:
     )
 
 
-def render_schedule_card(  # noqa: PLR0913, PLR0917
+def render_schedule_card(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     schedule: RecurringSchedule,
     child: str,
     slots: list[RecurringSlot],
@@ -1915,7 +1915,7 @@ def render_schedule_card(  # noqa: PLR0913, PLR0917
     return text
 
 
-def render_meeting_card(  # noqa: PLR0913, PLR0917
+def render_meeting_card(  # ruff: ignore[too-many-arguments, too-many-positional-arguments]
     child: str,
     occ_date: date,
     occ_time: str,
@@ -1943,8 +1943,8 @@ def _schedule_card_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     self_back = f"recur:sched:{schedule_id}"
     for occ in occurrences:
-        assert occ.slot_id is not None  # noqa: S101 — occurrences carry a slot
-        assert occ.origin_date is not None  # noqa: S101
+        assert occ.slot_id is not None  # ruff: ignore[assert] — occurrences carry a slot
+        assert occ.origin_date is not None  # ruff: ignore[assert]
         wall = utc_to_wall(occ.starts_at, tz)
         label = rm.occ_btn.format(
             date=format_ru_short(wall.date()),
@@ -2120,7 +2120,7 @@ def _parse_slot_date(head: str) -> tuple[int, date]:
     return int(raw_id), date.fromisoformat(raw_date)
 
 
-class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurring router
+class RecurringHandlers:  # ruff: ignore[too-many-public-methods] — handler aggregator for the recurring router
     def __init__(
         self,
         messages: BotMessages,
@@ -2141,7 +2141,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
             specialist = await get_settings(
                 SqlAlchemySpecialistsRepo(session), specialist_id
             )
-        assert specialist is not None  # noqa: S101 — middleware guarantees existence
+        assert specialist is not None  # ruff: ignore[assert] — middleware guarantees existence
         return specialist
 
     async def _child_name(self, specialist_id: int, client_id: int) -> str:
@@ -2238,7 +2238,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
                 comment=comment,
                 now=now,
             )
-        assert schedule.id is not None  # noqa: S101 — saved schedules have an id
+        assert schedule.id is not None  # ruff: ignore[assert] — saved schedules have an id
         specialist = await self._load_settings(specialist_id)
         async with self._session_factory() as session:
             slot_repo = SqlAlchemyRecurringSlotRepo(session)
@@ -2394,7 +2394,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
     async def _render_schedule_card(
         self, specialist_id: int, schedule: RecurringSchedule, back: str
     ) -> tuple[str, InlineKeyboardMarkup]:
-        assert schedule.id is not None  # noqa: S101 — loaded schedules have an id
+        assert schedule.id is not None  # ruff: ignore[assert] — loaded schedules have an id
         specialist = await self._load_settings(specialist_id)
         tz = specialist.timezone
         today = today_in_tz(datetime.now(UTC), tz)
@@ -2402,7 +2402,10 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         async with self._session_factory() as session:
             override_repo = SqlAlchemyRecurringSlotOverrideRepo(session)
             overrides = {
-                slot.id: await override_repo.list_for_slot(slot.id) for slot in slots
+                cast("int", slot.id): await override_repo.list_for_slot(
+                    cast("int", slot.id)
+                )
+                for slot in slots
             }
         occurrences = occurrences_in_window(
             schedule, slots, overrides, today, today + timedelta(days=14), tz, today
@@ -2423,7 +2426,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         schedule_id = _last_int(head)
         schedule = await self._load_schedule(schedule_id, specialist_id)
         # Navigation only targets a schedule we just acted on, so it still exists.
-        assert schedule is not None  # noqa: S101
+        assert schedule is not None  # ruff: ignore[assert]
         return await self._render_schedule_card(specialist_id, schedule, inner)
 
     async def show_schedule(self, callback: CallbackQuery, specialist_id: int) -> None:
@@ -2442,11 +2445,11 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
     async def _render_meeting_card(
         self, specialist_id: int, slot: RecurringSlot, origin_date: date, back: str
     ) -> tuple[str, InlineKeyboardMarkup]:
-        assert slot.id is not None  # noqa: S101 — loaded slots have an id
+        assert slot.id is not None  # ruff: ignore[assert] — loaded slots have an id
         specialist = await self._load_settings(specialist_id)
         tz = specialist.timezone
         schedule = await self._load_schedule(slot.schedule_id, specialist_id)
-        assert schedule is not None  # noqa: S101 — owned slot has an owned schedule
+        assert schedule is not None  # ruff: ignore[assert] — owned slot has an owned schedule
         override = await self._load_override(slot.id, origin_date)
         back = back or f"sched:day_view:{origin_date.isoformat()}"
         child = await self._child_name(specialist_id, schedule.client_id)
@@ -2487,7 +2490,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         head, inner = _split_back(back)
         slot_id, origin_date = _parse_slot_date(head)
         slot = await self._load_slot(slot_id, specialist_id)
-        assert slot is not None  # noqa: S101 — navigation targets an existing slot
+        assert slot is not None  # ruff: ignore[assert] — navigation targets an existing slot
         return await self._render_meeting_card(specialist_id, slot, origin_date, inner)
 
     async def show_meeting(self, callback: CallbackQuery, specialist_id: int) -> None:
@@ -2691,7 +2694,7 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         # After a per-slot edit/add/delete that keeps the schedule active: offer to
         # tell the client the new weekly rule (event "m" → notify_series_changed).
         schedule = await self._load_schedule(schedule_id, specialist_id)
-        assert schedule is not None  # noqa: S101 — just-edited schedule still exists
+        assert schedule is not None  # ruff: ignore[assert] — just-edited schedule still exists
         slots = await self._load_slots(schedule_id)
         client = await self._load_client(specialist_id, schedule.client_id)
         card_back = f"recur:sched:{schedule_id}"
@@ -2901,9 +2904,9 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         else:
             await target.answer(self._m.moved)
         slot = await self._load_slot(data["slot_id"], specialist_id)
-        assert slot is not None  # noqa: S101 — move succeeded, so the slot exists
+        assert slot is not None  # ruff: ignore[assert] — move succeeded, so the slot exists
         schedule = await self._load_schedule(slot.schedule_id, specialist_id)
-        assert schedule is not None  # noqa: S101
+        assert schedule is not None  # ruff: ignore[assert]
         client = await self._load_client(specialist_id, schedule.client_id)
         shown = await _ask_notify(
             target,
@@ -2961,9 +2964,9 @@ class RecurringHandlers:  # noqa: PLR0904 — handler aggregator for the recurri
         await target.edit_text(self._m.skipped)
         specialist = await self._load_settings(specialist_id)
         slot = await self._load_slot(slot_id, specialist_id)
-        assert slot is not None  # noqa: S101 — skip succeeded, so the slot exists
+        assert slot is not None  # ruff: ignore[assert] — skip succeeded, so the slot exists
         schedule = await self._load_schedule(slot.schedule_id, specialist_id)
-        assert schedule is not None  # noqa: S101
+        assert schedule is not None  # ruff: ignore[assert]
         client = await self._load_client(specialist_id, schedule.client_id)
         starts_at = wall_to_utc(origin_date, slot.time_hhmm, specialist.timezone)
         shown = await _ask_notify(

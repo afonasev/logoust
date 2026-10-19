@@ -138,7 +138,7 @@ async def _run_if_due(
 ) -> list[ConsumptionReport]:
     collected: list[ConsumptionReport] = []
 
-    async def report(payload: ConsumptionReport) -> None:  # noqa: RUF029
+    async def report(payload: ConsumptionReport) -> None:  # ruff: ignore[unused-async]
         collected.append(payload)
 
     async with factory() as session:

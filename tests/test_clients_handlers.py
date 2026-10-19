@@ -1130,7 +1130,7 @@ async def test_middleware_injects_specialist_id(
     middleware = SpecialistMiddleware(session_factory)
     captured: dict[str, Any] = {}
 
-    async def handler(_event: object, data: dict[str, Any]) -> str:  # noqa: RUF029
+    async def handler(_event: object, data: dict[str, Any]) -> str:  # ruff: ignore[unused-async]
         captured["specialist_id"] = data["specialist_id"]
         return "ok"
 
@@ -1146,7 +1146,7 @@ async def test_middleware_drops_unknown_user(
     middleware = SpecialistMiddleware(session_factory)
     called = False
 
-    async def handler(_event: object, _data: dict[str, Any]) -> str:  # noqa: RUF029
+    async def handler(_event: object, _data: dict[str, Any]) -> str:  # ruff: ignore[unused-async]
         nonlocal called
         called = True
         return "ok"

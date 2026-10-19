@@ -95,5 +95,5 @@ class KeyboardRefreshMiddleware(BaseRequestMiddleware):
             )
         if specialist is None or specialist.keyboard_version == self._version:
             return None
-        assert specialist.id is not None  # noqa: S101 — persisted specialists have id
+        assert specialist.id is not None  # ruff: ignore[assert] — persisted specialists have id
         return specialist.id

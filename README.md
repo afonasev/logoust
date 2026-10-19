@@ -22,13 +22,15 @@ Smart-помощник логопедического кабинета Logoust. 
 
 - **Python 3.13**, async-first.
 - **aiogram 3** — Telegram-бот в режиме long-polling.
-- **SQLAlchemy 2.0** (async) + **aiosqlite** — ORM и драйвер. По умолчанию SQLite.
+- **SQLAlchemy 2.1** (async) + **aiosqlite** — ORM и драйвер. По умолчанию SQLite.
 - **Alembic** — миграции (sync, отдельный URL).
 - **pydantic-settings** — конфиг из `.env`.
 - **structlog** — структурированные логи.
 - **pytest** + **pytest-asyncio** + **pytest-cov** — тесты, требование 100% покрытия.
-- **Ruff** — форматтер и линтер; **ty** — type-checker.
+- **Ruff 0.17.1** — форматтер и линтер; **ty 0.0.89** — type-checker (оба закреплены в dev-зависимостях).
 - **uv** — менеджер зависимостей и виртуального окружения.
+
+Срез обновления зависимостей и результаты проверки: [2026-10-19_dependency-refresh.md](./docs/decisions/2026-10-19_dependency-refresh.md).
 
 ## Архитектура
 

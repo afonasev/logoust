@@ -95,7 +95,7 @@ async def test_send_payment_reminder_failure_records_failed(
     h = PaymentHandlers(messages, session_factory)
     cb = _fake_callback(f"pay:send:{client_id}")
     cb.bot.send_message.side_effect = TelegramForbiddenError(
-        method=None,  # type: ignore[arg-type]
+        method=None,  # ty: ignore[invalid-argument-type]
         message="blocked",
     )
     await h.send_payment_reminder(cb, _SP)

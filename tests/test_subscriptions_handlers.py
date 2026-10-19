@@ -789,7 +789,7 @@ async def test_client_card_shows_create_button(
     await _seed_specialist(session_factory)
     client = await _seed_client(session_factory)
     h = ClientsHandlers(messages, session_factory)
-    _, keyboard = await h._card_view(client, _SP)  # noqa: SLF001
+    _, keyboard = await h._card_view(client, _SP)  # ruff: ignore[private-member-access]
     assert messages.clients.btn_subscription_create in _button_texts(keyboard)
 
 
@@ -807,7 +807,7 @@ async def test_client_card_shows_open_button_with_remaining(
             meetings=5,
         )
     h = ClientsHandlers(messages, session_factory)
-    _, keyboard = await h._card_view(client, _SP)  # noqa: SLF001
+    _, keyboard = await h._card_view(client, _SP)  # ruff: ignore[private-member-access]
     expected = messages.clients.btn_subscription_open.format(remaining=5)
     assert expected in _button_texts(keyboard)
 
@@ -818,5 +818,5 @@ async def test_archived_client_card_hides_subscription_button(
     await _seed_specialist(session_factory)
     client = await _seed_client(session_factory, status=ClientStatus.ARCHIVED)
     h = ClientsHandlers(messages, session_factory)
-    _, keyboard = await h._card_view(client, _SP)  # noqa: SLF001
+    _, keyboard = await h._card_view(client, _SP)  # ruff: ignore[private-member-access]
     assert not any(c.startswith("subs:") for c in _callbacks(keyboard))

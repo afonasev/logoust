@@ -1,17 +1,12 @@
 # logoust_assistant — рабочие правила
 
-## Завершение конкретной сессии (решение пользователя 2026-10-11)
+## Working boundaries
 
-- В финальном ответе явно напиши: «Сессию можно архивировать без потери данных», если в этой сессии больше действий не планируется, работа и нужные доказательства сохранены в Git/устойчивом хранилище, ресурсы освобождены, а продолжение не зависит от несохранённых файлов, процессов или контекста только этого чата. Укажи commit/ветку или путь сохранения, когда это нужно для продолжения.
-- Если работа ещё требует действия, явно напиши «Следующий шаг: …»: конкретное действие, кто его выполняет (агент или человек), ожидаемая команда/решение и сохранённая точка продолжения. Если архивировать пока нельзя, назови конкретную причину и что нужно сохранить или завершить; не оставляй неопределённое «готово».
-- Архивирование чата, человеческая приёмка результата, merge, build и deploy — отдельные действия. Рекомендация архивировать чат не подменяет незакрытые gates и не разрешает автоматически архивировать OpenSpec change, публиковать результат или удалять несохранённую работу.
-
-## Визуальные решения показывать сразу (решение пользователя 2026-10-17)
-
-- Правило действует во всех проектах, ветках/worktree и будущих проектах. Если идею, предложение или различия можно показать визуально, сразу показывай реальные макеты, концепты, превью или наглядные схемы. Никогда не заменяй их словесным описанием будущего вида вроде «предлагаю синий утончённый силуэт» и не ограничивайся обещанием подготовить визуал позже.
-- При нечётком визуальном запросе самостоятельно подготовь и покажи несколько вариантов на выбор в первом содержательном ответе. Варианты должны заметно отличаться по концепции, композиции, форме или стилю; почти одинаковые макеты с мелкими изменениями цвета или деталей не считаются разными направлениями.
-- Показывай сами изображения или отрендеренные макеты прямо в чате/превью, а не только ссылки на файлы, код или текстовые описания. Текст используй как краткую подпись для выбора и пояснения существенных ограничений.
-- Визуальное направление выбирается по показанным вариантам до его реализации в проекте. Подготовка концептов не означает разрешения менять игровой runtime, публиковать или выкатывать результат.
+- Preserve scope, product contracts and others' files/processes. Questions/reviews are read-only; create an owned code worktree only before authorized edits when isolation is needed.
+- Select minimal affected checks from recorded baseline/diff/dependencies. Full needs separate human approval for this run, even at merge/release. Preserve test contracts and FAIL/NotRun; never infer human/device acceptance from QA.
+- Explicit model/effort wins. Authorized new chats: Sol 6.1/medium; bounded work/subagents: Luna/medium or higher. Astra needs a specific complex decision or explicit choice. No implied delegation/message permission.
+- Show real visual alternatives before implementation; concepts do not authorize publication.
+- Before QA, delivery or finalization read `.agents/references/execution-policy.md`; it includes preservation/cleanup and reporting. Report branch + SHA and integration separately. Read `.agents/references/portability.md` on a new device or missing dependency. Other references below load only on their stated trigger.
 
 ## Проект и архитектура
 
@@ -33,7 +28,7 @@ Python 3.13, `uv`, aiogram, SQLAlchemy 2.0, SQLite; технический ин�
 - При сжатии контекста сохраняй scope, список изменённых файлов, baseline, команды и результаты проверок, незакрытые вопросы.
 - Новые правила проекта сохраняй в соответствующий файл `.agents/rules/`, если это относится к текущей задаче. Глобальную память меняй только по прямой просьбе человека.
 - Сохраняй чужую работу, локальные `.env`, БД, бэкапы и процессы. Не печатай токены и персональные данные.
-- В коммит включай все файлы текущей задачи, но не чужие изменения. Перед финалом выполни `~/.codex/references/task-cleanup.md`, если он доступен; укажи ветку, commit и состояние интеграции.
+- В коммит включай все файлы текущей задачи, но не чужие изменения. Перед финалом выполни `.agents/references/task-cleanup.md`, если он доступен; укажи ветку, commit и состояние интеграции.
 - Для чтения и обсуждения используй текущий checkout; отдельный worktree создавай только для разрешённых изменений, если нужна изоляция. Подагенты и новые чаты — только при отдельной авторизации.
 
 ## Какие правила читать
@@ -50,25 +45,4 @@ Codex не загружает Claude `globs` автоматически. Пер�
 Не переписывай README/docs/specs механически: обновляй по триггерам соответствующих правил.
 `openspec/changes/` хранит изменения в работе, `openspec/specs/` — текущее поведение. Обычный вопрос не разрешает создание planning-артефактов.
 
-## Команды и проверка
-
-- Зависимости: `make init` (`uv sync` + установка pre-commit), без pip.
-- Форматирование: `make format`; `make lint` запускает Ruff с `--fix` и меняет файлы.
-- Читающие проверки: `uv run ruff check <files>`, `uv run ruff format --check <files>`, `make type-check` (`ty`).
-- До запуска QA запиши baseline, affected-набор и причину выбора команд. Для локальной Python-правки: `uv run pytest --no-cov tests/test_<affected>.py`.
-- Полный `make check` (format + lint + type-check + все тесты), `make test` и pytest без селектора — только по отдельной явной команде человека. Commit/merge/«доведи до конца» этого разрешения не дают.
-- Общий coverage gate остаётся 100%; affected-запуск с `--no-cov` не доказывает общее покрытие. Не ослабляй assertions/seeds/timeouts ради green. Skipped/missing остаётся NotRun.
-- Полный pytest pre-commit hook переведён в stage `manual`; `uvx pre-commit run pytest --hook-stage manual --all-files` также требует отдельного разрешения на full.
-- `make run` / `make run-reload` применяют миграции и запускают реальный polling; не использовать как smoke-проверку.
-- `make create-invite` меняет локальную БД; `make create-invite-prod` — production. Запуск — в явно запрошенном scope.
-- `make deploy` меняет VPS, применяет миграции и перезапускает бота. Только по отдельной явной команде на выкатку.
-- `make backup` / `make backup-prod` сохраняют локальную/серверную БД; не читать данные без необходимости.
-- `make upgrade` меняет Python/deps/hooks; `make clean` удаляет общие кэши. Не запускать как обычную подготовку задачи.
-
-## Skills и настройки Codex
-
-- Repo skills: `.agents/skills/`; вызов `$openspec-new-change`, `$openspec-continue-change`, `$openspec-ff-change`, `$openspec-apply-change`, `$openspec-verify-change`, `$openspec-sync-specs`, `$openspec-archive-change`, `$openspec-explore`, `$verify`.
-- Старые `/opsx:*`, AskUserQuestion и TodoWrite — интерфейсы Claude, а не команды Codex. Используй соответствующий skill и доступный инструмент или вопрос в чате.
-- Default новых обычных чатов/координаторов — `gpt-6.1-sol` / `medium`; ограниченная разработка — `gpt-6-luna` / `medium` или выше. Явный выбор человека важнее; существующие чаты не перенастраивать.
-- `.codex/config.toml` задаёт default `gpt-6.1-sol` / `medium`; выбор модели по типу задачи описан выше. Разрешение создавать чаты из этого не следует.
-- Состояние переноса, ограничения и спорные legacy-настройки: `docs/codex-migration.md`.
+Перед локальным запуском/QA или изменением зависимостей читай `.agents/references/development.md` (команды, coverage, pre-commit и окружение).

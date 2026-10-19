@@ -1,4 +1,2 @@
 # Defaults новых запусков; явный выбор человека важнее.
 # Ограниченная разработка: gpt-6-luna / medium, выбор в чате.
-model = "gpt-6.1-sol"
-model_reasoning_effort = "medium"

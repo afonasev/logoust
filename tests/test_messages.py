@@ -21,7 +21,8 @@ def test_load_default_messages():
 def test_missing_key_raises(tmp_path: Path):
     bad = tmp_path / "messages.toml"
     bad.write_text(
-        '[start]\nwelcome = "hi"\nalready_welcomed = "ok"\nunknown_token = "no"\n',
+        '[start]\nwelcome = "hi"\nalready_welcomed = "ok"\n'
+        'already_linked = "yo"\nunknown_token = "no"\n',
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match=r"missing key 'start\.no_token'"):

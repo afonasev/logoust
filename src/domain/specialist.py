@@ -79,6 +79,9 @@ class Specialist:
     subscription_presets: str = DEFAULT_SUBSCRIPTION_PRESETS
     # Настенное "HH:MM" кнопки-пресета при откладывании уведомления клиенту.
     deferred_notify_time: str = DEFAULT_DEFERRED_NOTIFY_TIME
+    # Хеш последнего доставленного специалисту набора кнопок клавиатуры; None ⇒
+    # клавиатура ещё не доставлялась (новые/мигрированные записи).
+    keyboard_version: str | None = None
 
 
 def is_digest_due(specialist: "Specialist", now: datetime) -> bool:
@@ -157,6 +160,10 @@ class SpecialistsRepo(Protocol):
     async def get(  # pragma: no cover
         self, specialist_id: int
     ) -> Specialist | None: ...
+
+    async def set_keyboard_version(  # pragma: no cover
+        self, specialist_id: int, version: str
+    ) -> None: ...
 
     async def update_settings(  # pragma: no cover
         self, specialist_id: int, fields: Mapping[str, object]

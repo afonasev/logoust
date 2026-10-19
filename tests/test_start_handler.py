@@ -1,8 +1,11 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandObject
+from aiogram.methods import SendMessage
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.bot.handlers.start import (
@@ -12,6 +15,7 @@ from src.bot.handlers.start import (
     make_start_handler,
     make_token_handler,
 )
+from src.bot.keyboard_refresh import keyboard_version
 from src.bot.messages import BotMessages
 from src.domain.audit import AuditEvent, AuditKind, DeliveryStatus
 from src.domain.client import ClientStatus
@@ -72,6 +76,75 @@ async def test_no_token_branch(
     msg.answer.assert_awaited_once_with(messages.start.no_token)
 
 
+async def test_bare_start_specialist_refreshes_keyboard(
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemySpecialistsRepo(session)
+    specialist = await create_invite(repo)
+    handler = make_start_handler(messages, session_factory)
+    # Onboard the default user (id=42) so find_by_chat_id recognises them.
+    await handler(_fake_message(), _cmd(specialist.invite_token))
+
+    msg = _fake_message()
+    await handler(msg, _cmd(None))
+    assert msg.answer.await_args.args[0] == messages.start.already_welcomed
+    assert msg.answer.await_args.kwargs["reply_markup"] is not None
+    refreshed = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(42)
+    assert refreshed is not None
+    assert refreshed.keyboard_version == keyboard_version(messages)
+
+
+@pytest.mark.parametrize(
+    "delivery_error", [None, TelegramForbiddenError, TelegramBadRequest]
+)
+async def test_bare_start_client_already_linked(
+    delivery_error,
+    messages: BotMessages,
+    session_factory: async_sessionmaker[AsyncSession],
+    session: AsyncSession,
+):
+    repo = SqlAlchemyClientsRepo(session)
+    client = await add_client(
+        repo,
+        NewClient(
+            specialist_id=1,
+            child_name="Маша",
+            contact_name="Мама",
+            contact_telegram="masha",
+        ),
+    )
+    assert client.id is not None
+    ts = datetime.now(UTC)
+    await repo.link_telegram(
+        client.id, telegram_chat_id=42, username=None, linked_at=ts, updated_at=ts
+    )
+
+    handler = make_start_handler(messages, session_factory)
+    msg = _fake_message()
+    if delivery_error is not None:
+        msg.answer.side_effect = delivery_error(method=None, message="blocked")
+    await handler(msg, _cmd(None))
+    msg.answer.assert_awaited_once_with(messages.start.already_linked)
+    async with session_factory() as audit_session:
+        rows = await SqlAlchemyAuditRepo(audit_session).list_for_specialist(
+            1, limit=10, offset=0
+        )
+    assert len(rows) == 1
+    entry = rows[0]
+    assert entry.kind is AuditKind.MESSAGE
+    assert entry.event is AuditEvent.CONNECTION_CONFIRMED
+    assert entry.client_id == client.id
+    assert entry.text == messages.start.already_linked
+    expected = DeliveryStatus.SENT if delivery_error is None else DeliveryStatus.FAILED
+    assert entry.status is expected
+    assert (entry.error is None) == (delivery_error is None)
+    if delivery_error is not None:
+        assert entry.error is not None
+        assert "blocked" in entry.error
+
+
 async def test_unknown_token_branch(
     messages: BotMessages,
     session_factory: async_sessionmaker[AsyncSession],
@@ -95,6 +168,10 @@ async def test_welcomed_branch(
     await handler(msg, _cmd(specialist.invite_token))
     msg.answer.assert_awaited_once()
     assert msg.answer.await_args.args[0] == messages.start.welcome
+    async with session_factory() as check_session:
+        saved = await SqlAlchemySpecialistsRepo(check_session).find_by_chat_id(42)
+    assert saved is not None
+    assert saved.keyboard_version == keyboard_version(messages)
 
 
 async def test_already_welcomed_branch(
@@ -355,3 +432,51 @@ async def test_one_account_links_two_client_cards(
         c.telegram_chat_id for c in await repo.list_by_status(1, ClientStatus.ACTIVE)
     }
     assert bound == {900}
+
+
+@pytest.mark.parametrize("payload", [False, True])
+async def test_keyboard_delivery_failure_keeps_stale_version(
+    messages, session_factory, payload
+):
+    async with session_factory() as session:
+        specialist = await create_invite(SqlAlchemySpecialistsRepo(session))
+    handler = make_start_handler(messages, session_factory)
+    await handler(_fake_message(), _cmd(specialist.invite_token))
+    assert specialist.id is not None
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).set_keyboard_version(
+            specialist.id, "old"
+        )
+    msg = _fake_message()
+    msg.answer.side_effect = TelegramForbiddenError(
+        method=SendMessage(chat_id=42, text="hello"), message="blocked"
+    )
+    with pytest.raises(TelegramForbiddenError):
+        await handler(msg, _cmd(specialist.invite_token if payload else None))
+    async with session_factory() as session:
+        refreshed = await SqlAlchemySpecialistsRepo(session).get(specialist.id)
+    assert refreshed is not None
+    assert refreshed.keyboard_version == "old"
+
+
+async def test_replayed_invite_by_other_account_does_not_mark_owner_keyboard(
+    messages, session_factory
+):
+    async with session_factory() as session:
+        specialist = await create_invite(SqlAlchemySpecialistsRepo(session))
+    assert specialist.id is not None
+    handler = make_start_handler(messages, session_factory)
+    await handler(_fake_message(), _cmd(specialist.invite_token))
+    async with session_factory() as session:
+        await SqlAlchemySpecialistsRepo(session).set_keyboard_version(
+            specialist.id, "old"
+        )
+    stranger = _fake_message(user=FakeUser(id=99))
+    await handler(stranger, _cmd(specialist.invite_token))
+    assert stranger.answer.await_args.args[0] == messages.start.already_welcomed
+    async with session_factory() as session:
+        owner = await SqlAlchemySpecialistsRepo(session).get(specialist.id)
+        other = await SqlAlchemySpecialistsRepo(session).find_by_chat_id(99)
+    assert owner is not None
+    assert owner.keyboard_version == "old"
+    assert other is None

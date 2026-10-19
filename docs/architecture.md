@@ -24,6 +24,7 @@ src/
 │   └── clients_repo.py
 │
 ├── bot/                      # adapter-слой: aiogram dispatcher + хендлеры
+│   ├── keyboard_refresh.py   # middleware исходящих запросов сессии Bot
 │   ├── dispatcher.py
 │   ├── handlers/
 │   │   ├── start.py
@@ -128,3 +129,7 @@ Async везде: aiogram async, SQLAlchemy `AsyncSession`, CLI оборачив
 ## Каталог текстов
 
 Все пользовательские тексты — в `src/bot/messages.toml`. Загрузчик `src/bot/messages.py` читает файл один раз при старте через `tomllib`, кладёт в frozen-dataclass `BotMessages`. Отсутствие обязательного ключа → `RuntimeError` на старте, до приёма апдейтов.
+
+### Версия постоянной клавиатуры
+
+`src/__main__.py` регистрирует `KeyboardRefreshMiddleware` на сессии Bot. При отправке сообщения специалисту без собственной разметки адаптер сверяет версию основной клавиатуры с БД и при необходимости добавляет её к копии запроса; версию сохраняет после успеха. Inline-разметка и редактирования не меняются. Подробный контракт — в [bot.md](./bot.md#автообновление-reply-клавиатуры--srcbotkeyboard_refreshpy).
